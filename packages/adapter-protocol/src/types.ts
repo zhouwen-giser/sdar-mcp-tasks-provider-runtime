@@ -52,6 +52,16 @@ export interface ExecutionSnapshot {
   observedAt?: unknown;
   result?: unknown;
   inputRequests?: AdapterInputRequest[];
+  operationName: string;
+  argumentHash: string;
+  executionContext?: AdapterExecutionContext;
+}
+
+export interface AdapterExecutionContext {
+  authorizationContextHash: string;
+  executionMode: string;
+  simulationId: string;
+  correlationId: string;
 }
 
 export interface AdapterInputRequest {
@@ -112,4 +122,12 @@ export interface CommandAck {
   reasonCode: string;
   message: string;
   commandSequence: string | number;
+  identity?: {
+    taskId: string;
+    externalExecutionId: string;
+    operationName: string;
+    argumentHash: string;
+    executionContext?: AdapterExecutionContext;
+    commandSequence: string | number;
+  };
 }

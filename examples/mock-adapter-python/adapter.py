@@ -147,7 +147,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         external_id = f"python-{task_id}"
         if request.operation_name == "echo_sync":
             snapshot = self._snapshot_dict(
-                task_id, external_id, "SUCCEEDED", 1, "SUCCESS", "Echo completed.", arguments
+                task_id, external_id, "SUCCEEDED", 1, "SUCCESS", "Echo completed.", arguments, binding
             )
             execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
         elif request.operation_name == "flex_task" and arguments.get("scenario") == "terminal":
@@ -159,6 +159,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 "SUCCESS",
                 "Task-capable operation completed inline.",
                 {"resourceId": arguments.get("resourceId"), "completed": True},
+                binding,
             )
             execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
         else:
@@ -170,6 +171,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 1,
                 "APPROVAL_REQUIRED" if input_required else "STARTED",
                 "Approval input is required." if input_required else "Reference task is running.",
+                None,
+                binding,
             )
             if input_required:
                 snapshot["input_requests"] = [
@@ -188,6 +191,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 "SUCCESS",
                 "Reference task completed.",
                 {"resourceId": arguments.get("resourceId"), "completed": True},
+                binding,
             )
             execution = self._execution(binding, external_id, snapshot, terminal, arguments)
             execution["waiting_for_input"] = input_required
@@ -202,6 +206,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         execution = self.store.get(request.task_id)
         if execution is None:
             await context.abort(grpc.StatusCode.NOT_FOUND, "execution does not exist")
+        if execution["arguments"].get("scenario") == "get_transient_failure":
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "injected GetExecution transient failure")
         if not execution.get("waiting_for_input") and not execution.get("hold_snapshot"):
             execution["snapshot"] = execution["terminal_snapshot"]
             self.store.set(request.task_id, execution)
@@ -216,7 +222,17 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 reason_code="EXECUTION_NOT_FOUND",
                 message="No execution is bound to this taskId.",
             )
-        if execution["binding"]["argument_hash"] != request.argument_hash:
+        if execution["arguments"].get("scenario") == "get_transient_failure":
+            return adapter_pb2.ReconcileExecutionResponse(
+                status=adapter_pb2.TRANSIENT_UNAVAILABLE,
+                reason_code="ADAPTER_TRANSIENT_UNAVAILABLE",
+                message="Injected Adapter outage.",
+                retryable=True,
+            )
+        if (
+            execution["binding"] != self._binding(request)
+            or (request.external_execution_id and request.external_execution_id != execution["external_execution_id"])
+        ):
             return adapter_pb2.ReconcileExecutionResponse(
                 status=adapter_pb2.CONFLICT,
                 reason_code="ARGUMENT_HASH_CONFLICT",
@@ -249,6 +265,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 revision,
                 "SAFE_STOP_CONFIRMED",
                 "Reference execution safely stopped.",
+                None,
+                execution["binding"],
             )
             execution["terminal_snapshot"] = execution["snapshot"]
         ack = self._ack_dict(True, "STOP_ACCEPTED", "Safe stop accepted.", request)
@@ -280,6 +298,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 2,
                 "COMMENT_REQUIRED",
                 "A second input round is required.",
+                None,
+                execution["binding"],
             )
             execution["snapshot"]["input_requests"] = [
                 {
@@ -299,6 +319,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 revision,
                 "INPUT_ACCEPTED",
                 "Input accepted; execution resumed.",
+                None,
+                execution["binding"],
             )
             execution["terminal_snapshot"]["revision"] = revision + 1
         ack = self._ack_dict(
@@ -335,6 +357,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             revision,
             "PAUSED_BY_CLIENT" if command == "pause" else "RESUMED_BY_CLIENT",
             "Execution paused." if command == "pause" else "Execution resuming.",
+            None,
+            execution["binding"],
         )
         execution["hold_snapshot"] = command == "pause"
         if command == "resume":
@@ -369,7 +393,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         }
 
     @staticmethod
-    def _snapshot_dict(task_id, external_id, state, revision, reason, message, result=None):
+    def _snapshot_dict(task_id, external_id, state, revision, reason, message, result=None, binding=None):
+        binding = binding or {}
         return {
             "task_id": task_id,
             "external_execution_id": external_id,
@@ -380,6 +405,13 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             "retryable": False,
             "result": result,
             "input_requests": [],
+            "operation_name": binding.get("operation_name", ""),
+            "argument_hash": binding.get("argument_hash", ""),
+            "execution_context": {
+                "authorization_context_hash": binding.get("authorization_context_hash", ""),
+                "execution_mode": binding.get("execution_mode", 0),
+                "simulation_id": binding.get("simulation_id", ""),
+            },
         }
 
     @staticmethod
@@ -404,6 +436,9 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             result=json_struct(value["result"] or {}),
             input_requests=requests,
             observed_at=now_timestamp(),
+            operation_name=value["operation_name"],
+            argument_hash=value["argument_hash"],
+            execution_context=adapter_pb2.ExecutionContext(**value["execution_context"]),
         )
 
     def _accepted(self, execution):
@@ -421,6 +456,18 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             "reason_code": reason,
             "message": message,
             "command_sequence": request.identity.command_sequence,
+            "identity": {
+                "task_id": request.identity.task_id,
+                "external_execution_id": request.identity.external_execution_id,
+                "operation_name": request.identity.operation_name,
+                "argument_hash": request.identity.argument_hash,
+                "execution_context": {
+                    "authorization_context_hash": request.identity.execution_context.authorization_context_hash,
+                    "execution_mode": request.identity.execution_context.execution_mode,
+                    "simulation_id": request.identity.execution_context.simulation_id,
+                },
+                "command_sequence": request.identity.command_sequence,
+            },
         }
 
     def _ack(self, accepted, reason, message, request):

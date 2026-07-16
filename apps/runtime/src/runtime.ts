@@ -23,6 +23,7 @@ import {
   DurableScheduler,
   RecoveryManager,
   TaskEngine,
+  TtlCleaner,
 } from "../../../packages/task-engine/src/index.js";
 import type { RuntimeConfig } from "./config.js";
 
@@ -36,6 +37,7 @@ export interface RuntimeDependencies {
   database: "starting" | "ready" | "failed";
   adapter: "starting" | "ready" | "failed";
   recovery: "starting" | "ready" | "failed";
+  ttlCleaner: "starting" | "ready" | "failed";
 }
 
 export interface RuntimeApplication {
@@ -63,15 +65,18 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     database: "starting",
     adapter: "starting",
     recovery: "starting",
+    ttlCleaner: "starting",
   };
   let manifest: ProviderManifest | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
   let schedulerTimer: NodeJS.Timeout | undefined;
   let recoveryTimer: NodeJS.Timeout | undefined;
   let commandDispatcherTimer: NodeJS.Timeout | undefined;
+  let ttlCleanerTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
+  let ttlCleanerTicking = false;
   const rateWindows = new Map<string, { startedAt: number; count: number }>();
 
   app.addHook("onRequest", async (request, reply) => {
@@ -152,6 +157,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (schedulerTimer !== undefined) clearInterval(schedulerTimer);
     if (recoveryTimer !== undefined) clearInterval(recoveryTimer);
     if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
+    if (ttlCleanerTimer !== undefined) clearInterval(ttlCleanerTimer);
     gateway.close();
     await pool.end();
   });
@@ -194,6 +200,12 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       const taskRepository = new TaskRepository(pool);
       const scheduler = new DurableScheduler(validated, gateway, taskRepository);
       const commandDispatcher = new DurableCommandDispatcher(gateway, taskRepository);
+      const ttlCleaner = new TtlCleaner(taskRepository, {
+        batchSize: config.TTL_CLEANER_BATCH_SIZE,
+        purgeGraceMs: config.TTL_PURGE_GRACE_MS,
+        onMetric: (outcome, amount) =>
+          metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
+      });
       const recovery = new RecoveryManager(taskEngine, taskRepository, (error, taskId) => {
         logger.warn(
           { err: error, taskId, providerId: validated.providerId },
@@ -209,6 +221,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       );
       await scheduler.tick();
       await commandDispatcher.tick();
+      await ttlCleaner.tick();
+      dependencies.ttlCleaner = "ready";
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
         schedulerTicking = true;
@@ -237,6 +251,24 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.SCHEDULER_POLL_MS);
       commandDispatcherTimer.unref();
+      ttlCleanerTimer = setInterval(() => {
+        if (ttlCleanerTicking) return;
+        ttlCleanerTicking = true;
+        void ttlCleaner
+          .tick()
+          .then(() => {
+            dependencies.ttlCleaner = "ready";
+          })
+          .catch((error: unknown) => {
+            dependencies.database = "failed";
+            dependencies.ttlCleaner = "failed";
+            logger.error({ err: error }, "TTL cleaner tick failed");
+          })
+          .finally(() => {
+            ttlCleanerTicking = false;
+          });
+      }, config.TTL_CLEANER_POLL_MS);
+      ttlCleanerTimer.unref();
       recoveryTimer = setInterval(() => {
         if (recoveryTicking) return;
         recoveryTicking = true;

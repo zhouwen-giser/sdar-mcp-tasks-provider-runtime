@@ -768,6 +768,15 @@ export class ExecutionSnapshot extends jspb.Message {
     clearObservedAt(): void;
     getObservedAt(): google_protobuf_timestamp_pb.Timestamp | undefined;
     setObservedAt(value?: google_protobuf_timestamp_pb.Timestamp): ExecutionSnapshot;
+    getOperationName(): string;
+    setOperationName(value: string): ExecutionSnapshot;
+    getArgumentHash(): string;
+    setArgumentHash(value: string): ExecutionSnapshot;
+
+    hasExecutionContext(): boolean;
+    clearExecutionContext(): void;
+    getExecutionContext(): ExecutionContext | undefined;
+    setExecutionContext(value?: ExecutionContext): ExecutionSnapshot;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): ExecutionSnapshot.AsObject;
@@ -793,6 +802,9 @@ export namespace ExecutionSnapshot {
         retryable: boolean,
         alternativesList: Array<Alternative.AsObject>,
         observedAt?: google_protobuf_timestamp_pb.Timestamp.AsObject,
+        operationName: string,
+        argumentHash: string,
+        executionContext?: ExecutionContext.AsObject,
     }
 }
 
@@ -909,6 +921,8 @@ export class SideEffectIdentity extends jspb.Message {
     setExecutionContext(value?: ExecutionContext): SideEffectIdentity;
     getCommandSequence(): number;
     setCommandSequence(value: number): SideEffectIdentity;
+    getExternalExecutionId(): string;
+    setExternalExecutionId(value: string): SideEffectIdentity;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): SideEffectIdentity.AsObject;
@@ -927,6 +941,7 @@ export namespace SideEffectIdentity {
         argumentHash: string,
         executionContext?: ExecutionContext.AsObject,
         commandSequence: number,
+        externalExecutionId: string,
     }
 }
 
@@ -1099,6 +1114,11 @@ export class CommandAck extends jspb.Message {
     getCommandSequence(): number;
     setCommandSequence(value: number): CommandAck;
 
+    hasIdentity(): boolean;
+    clearIdentity(): void;
+    getIdentity(): SideEffectIdentity | undefined;
+    setIdentity(value?: SideEffectIdentity): CommandAck;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): CommandAck.AsObject;
     static toObject(includeInstance: boolean, msg: CommandAck): CommandAck.AsObject;
@@ -1115,6 +1135,7 @@ export namespace CommandAck {
         reasonCode: string,
         message: string,
         commandSequence: number,
+        identity?: SideEffectIdentity.AsObject,
     }
 }
 

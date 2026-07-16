@@ -1,7 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CallToolResultSchema, CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolResultSchema,
+  CreateTaskResultSchema,
+  ErrorCode,
+} from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
@@ -26,6 +30,7 @@ import {
   DurableCommandDispatcher,
   DurableScheduler,
   TaskEngine,
+  TtlCleaner,
 } from "../../packages/task-engine/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -499,7 +504,7 @@ describe("durable task lifecycle", () => {
     }
   });
 
-  it("starts scheduled work no earlier than notBefore and only once across workers", async () => {
+  it("T-013 starts scheduled work no earlier than notBefore and only once across workers", async () => {
     const clock = new FakeClock(new Date("2026-07-16T12:00:00Z"));
     const scheduledEngine = new TaskEngine(
       engine.manifest,
@@ -555,6 +560,70 @@ describe("durable task lifecycle", () => {
     expect(task.status).toBe("completed");
   });
 
+  it("T-013 reconciles a response-lost scheduled start without a duplicate side effect", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T12:30:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-response-loss", scenario: "response_loss" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 5_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    const first = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "response-loss-1",
+    );
+    expect(await first.tick()).toMatchObject({ deferred: 1, started: 0 });
+    expect(sideEffectCount - before).toBe(1);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STARTING",
+      invocationAttempt: 1,
+      externalExecutionId: null,
+    });
+    clock.advance(1_000);
+    const outcomes = await Promise.all([
+      first.tick(),
+      new DurableScheduler(
+        engine.manifest,
+        gateway,
+        new TaskRepository(pool),
+        clock,
+        "response-loss-2",
+      ).tick(),
+    ]);
+    expect(outcomes.reduce((sum, tick) => sum + tick.reconciled, 0)).toBe(1);
+    expect(sideEffectCount - before).toBe(1);
+    const recovered = await repository.getById(taskId);
+    expect(recovered).toMatchObject({
+      internalState: "RUNNING",
+      invocationAttempt: 1,
+    });
+    expect(typeof recovered?.externalExecutionId).toBe("string");
+  });
+
   it("completes a missed start window without invoking the Adapter", async () => {
     const clock = new FakeClock(new Date("2026-07-16T13:00:00Z"));
     const scheduledEngine = new TaskEngine(
@@ -597,6 +666,289 @@ describe("durable task lifecycle", () => {
       status: "completed",
       result: { isError: true, structuredContent: { outcome: "start_window_missed" } },
     });
+  });
+
+  it("T-007 safely stops an immediate queued task before publishing start_window_missed", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T18:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const timedEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await timedEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-immediate-queued", scenario: "queued_start" },
+      authorization,
+      undefined,
+      undefined,
+      { start: { mode: "immediate", startToleranceMs: 1_000 }, maxElapsedMs: null },
+    );
+    if (created.kind !== "task") throw new Error("Expected queued Task");
+    const taskId = String(created.task.taskId);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "QUEUED",
+      actualStartedAt: null,
+    });
+    clock.advance(1_001);
+    expect(
+      await new DurableScheduler(
+        engine.manifest,
+        gateway,
+        repository,
+        clock,
+        "immediate-watchdog",
+      ).tick(),
+    ).toMatchObject({ watchdogStops: 1 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STOPPING",
+      stopReason: "START_WINDOW_MISSED",
+    });
+    await new DurableCommandDispatcher(gateway, repository, clock, "immediate-stop").tick();
+    expect(await timedEngine.getTask(taskId, authorization)).toMatchObject({
+      status: "completed",
+      result: { isError: true, structuredContent: { outcome: "start_window_missed" } },
+    });
+  });
+
+  it("T-008 compensates an immediate StartOperation response that arrives after the window", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T19:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const lateGateway = {
+      startOperation: async (...args: Parameters<GrpcAdapterGateway["startOperation"]>) => {
+        const response = await gateway.startOperation(...args);
+        clock.advance(1_001);
+        return response;
+      },
+    } as unknown as GrpcAdapterGateway;
+    const lateEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      lateGateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await lateEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-immediate-late-response" },
+      authorization,
+      undefined,
+      undefined,
+      { start: { mode: "immediate", startToleranceMs: 1_000 }, maxElapsedMs: null },
+    );
+    if (created.kind !== "task") throw new Error("Expected compensated Task");
+    const taskId = String(created.task.taskId);
+    expect(created.task).toMatchObject({ status: "working" });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STOPPING",
+      stopReason: "START_WINDOW_MISSED",
+    });
+    await new DurableCommandDispatcher(gateway, repository, clock, "late-response-stop").tick();
+    const reader = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    expect(await reader.getTask(taskId, authorization)).toMatchObject({
+      status: "completed",
+      result: { structuredContent: { outcome: "start_window_missed" } },
+    });
+  });
+
+  it("T-009 records actualStartedAt and does not stop an on-time immediate execution", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T20:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const timedEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await timedEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-immediate-on-time" },
+      authorization,
+      undefined,
+      undefined,
+      { start: { mode: "immediate", startToleranceMs: 1_000 }, maxElapsedMs: null },
+    );
+    if (created.kind !== "task") throw new Error("Expected running Task");
+    const taskId = String(created.task.taskId);
+    expect((await repository.getById(taskId))?.actualStartedAt?.toISOString()).toBe(
+      clock.now().toISOString(),
+    );
+    clock.advance(2_000);
+    expect(
+      await new DurableScheduler(
+        engine.manifest,
+        gateway,
+        repository,
+        clock,
+        "on-time-watchdog",
+      ).tick(),
+    ).toMatchObject({ watchdogStops: 0 });
+    expect(await repository.getById(taskId)).toMatchObject({ internalState: "RUNNING" });
+  });
+
+  it("T-010 retries a retryable scheduled rejection inside the window and starts once", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T21:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-retry-success", scenario: "scheduled_retry_once" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 3_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    const scheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "scheduled-retry-success",
+    );
+    expect(await scheduler.tick()).toMatchObject({ deferred: 1, started: 0 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "SCHEDULED",
+      invocationAttempt: 1,
+    });
+    clock.advance(1_000);
+    expect(await scheduler.tick()).toMatchObject({ started: 1 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      invocationAttempt: 2,
+      internalState: "RUNNING",
+    });
+    expect(sideEffectCount - before).toBe(1);
+  });
+
+  it("T-011 ends repeated retryable scheduled rejection at the window without a late start", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T22:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-window-end", scenario: "scheduled_retry_always" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 500,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    const scheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "scheduled-window-end",
+    );
+    expect(await scheduler.tick()).toMatchObject({ deferred: 1 });
+    clock.advance(501);
+    expect(await scheduler.tick()).toMatchObject({ missed: 1, started: 0 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_COMPLETED",
+      invocationAttempt: 1,
+      result: { structuredContent: { outcome: "start_window_missed" } },
+    });
+    expect(sideEffectCount).toBe(before);
+  });
+
+  it("T-012 publishes a nonretryable scheduled rejection with observation and outbox", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T23:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-permanent", scenario: "scheduled_permanent_reject" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 1_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    await new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "scheduled-permanent",
+    ).tick();
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_COMPLETED",
+      result: { structuredContent: { outcome: "admission_rejected", retryable: false } },
+    });
+    expect(await repository.listObservations(taskId)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "task.completed",
+          reasonCode: "START_NOT_PERMITTED",
+          source: "runtime",
+        }),
+      ]),
+    );
+    const event = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1 AND event_type='task.completed'",
+      [taskId],
+    );
+    expect(event.rows[0]?.count).toBe("1");
   });
 
   it("requests safe stop at maxElapsed and publishes deadline only after Adapter proof", async () => {
@@ -1048,6 +1400,515 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(commands.rows[0]?.count).toBe("1");
+  });
+
+  it("T-014/T-015 separates Runtime observation revision and publishes complete idempotent events", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-observation-revision" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected observable task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+
+    expect(await repository.getById(taskId)).toMatchObject({
+      observationRevision: 1,
+      adapterRevision: 1,
+    });
+    await engine.cancelTask(taskId, authorization);
+    expect(await repository.getById(taskId)).toMatchObject({
+      observationRevision: 2,
+      adapterRevision: 1,
+      internalState: "STOPPING",
+    });
+    await pool.query(
+      `UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z'
+       WHERE task_id<>$1 AND state IN ('PENDING','RETRY_WAIT')`,
+      [taskId],
+    );
+    expect(
+      await new DurableCommandDispatcher(
+        gateway,
+        repository,
+        undefined,
+        "observation-revision",
+      ).tick(),
+    ).toMatchObject({ acknowledged: 1 });
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
+
+    expect(await repository.getById(taskId)).toMatchObject({
+      observationRevision: 3,
+      adapterRevision: 2,
+      internalState: "TERMINAL_CANCELLED",
+    });
+    await repository.applySnapshot(taskId, 99, {
+      internalState: "RUNNING",
+      mcpStatus: "working",
+      substate: "running",
+      statusMessage: "late snapshot",
+      result: null,
+      error: null,
+      terminal: false,
+      observationType: "task.progress",
+    });
+    const observations = await repository.listObservations(taskId);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        revision: 1,
+        source: "adapter",
+        adapterRevision: 1,
+      }),
+      expect.objectContaining({
+        revision: 2,
+        type: "task.cancel_requested",
+        reasonCode: "USER_REQUESTED",
+        message: "Cancellation requested.",
+        substate: "stopping",
+        source: "runtime",
+        adapterRevision: null,
+      }),
+      expect.objectContaining({
+        revision: 3,
+        type: "task.cancelled",
+        source: "adapter",
+        adapterRevision: 2,
+      }),
+    ]);
+    expect(observations[0]?.message).toBeTruthy();
+    expect(observations[2]?.message).toBeTruthy();
+
+    const events = await pool.query<{
+      event_key: string;
+      event_type: string;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT event_key, event_type, payload FROM outbox_event
+       WHERE aggregate_id=$1 ORDER BY created_at, event_key`,
+      [taskId],
+    );
+    expect(events.rows).toHaveLength(3);
+    expect(new Set(events.rows.map((row) => row.event_key)).size).toBe(3);
+    expect(events.rows.map((row) => row.event_type)).toEqual([
+      "task.created",
+      "task.cancel_requested",
+      "task.cancelled",
+    ]);
+    for (const [index, event] of events.rows.entries()) {
+      expect(event.payload).toMatchObject({
+        taskId,
+        observationRevision: index + 1,
+        adapterRevision: index === 2 ? 2 : 1,
+      });
+      expect(typeof event.payload.status).toBe("string");
+    }
+  });
+
+  it("T-016 rolls back task, observation, and outbox together on event write failure", async () => {
+    const clock = new FakeClock(new Date("2026-07-17T00:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-atomic-transition" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 1_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled task");
+    const taskId = String(created.task.taskId);
+    clock.advance(1_001);
+
+    await pool.query(`CREATE OR REPLACE FUNCTION rc2_reject_terminal_outbox()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.aggregate_id='${taskId}' AND NEW.event_type='task.completed' THEN
+          RAISE EXCEPTION 'RC2_OUTBOX_FAILURE';
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await pool.query(`CREATE TRIGGER rc2_reject_terminal_outbox
+      BEFORE INSERT ON outbox_event FOR EACH ROW EXECUTE FUNCTION rc2_reject_terminal_outbox()`);
+    try {
+      await expect(repository.completeDueStartWindowMisses(clock.now())).rejects.toThrow(
+        "RC2_OUTBOX_FAILURE",
+      );
+      expect(await repository.getById(taskId)).toMatchObject({
+        internalState: "SCHEDULED",
+        observationRevision: 1,
+      });
+      expect(await repository.listObservations(taskId)).toHaveLength(1);
+      const rolledBackEvents = await pool.query<{ count: string }>(
+        "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1",
+        [taskId],
+      );
+      expect(rolledBackEvents.rows[0]?.count).toBe("1");
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS rc2_reject_terminal_outbox ON outbox_event");
+      await pool.query("DROP FUNCTION IF EXISTS rc2_reject_terminal_outbox() ");
+    }
+
+    expect(await repository.completeDueStartWindowMisses(clock.now())).toBe(1);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_COMPLETED",
+      observationRevision: 2,
+      adapterRevision: 0,
+    });
+    expect(await repository.listObservations(taskId)).toHaveLength(2);
+    const committedEvents = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1",
+      [taskId],
+    );
+    expect(committedEvents.rows[0]?.count).toBe("2");
+  });
+
+  it("T-019 rejects a Start Snapshot task identity mismatch before Task publication", async () => {
+    await expect(
+      engine.callOperation(
+        requiredOperation("durable_task"),
+        { resourceId: "rc2-start-identity", scenario: "start_task_identity_mismatch" },
+        authorization,
+      ),
+    ).rejects.toThrow("ADAPTER_SNAPSHOT_IDENTITY_MISMATCH");
+    const rows = await pool.query<{ state: string; task_count: string }>(
+      `SELECT admission_intent.state,
+              (SELECT count(*) FROM provider_task WHERE provider_task.task_id=admission_intent.task_id) AS task_count
+       FROM admission_intent WHERE arguments->>'resourceId'='rc2-start-identity'`,
+    );
+    expect(rows.rows[0]).toMatchObject({ state: "UNCERTAIN", task_count: "0" });
+  });
+
+  it("T-020 rejects a Get Snapshot external identity mismatch and audits without rebinding", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-get-identity", scenario: "get_external_identity_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected identity test Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    if (before === null) throw new Error("Expected persisted identity test Task");
+    await expect(engine.getTask(taskId, authorization)).rejects.toThrow(
+      "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH",
+    );
+    expect(await repository.getById(taskId)).toEqual(before);
+    const audit = await pool.query<{ event_type: string; payload: Record<string, unknown> }>(
+      `SELECT event_type,payload FROM outbox_event
+       WHERE aggregate_id=$1 AND event_type='task.identity_conflict'`,
+      [taskId],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]?.event_type).toBe("task.identity_conflict");
+    expect(audit.rows[0]?.payload).toMatchObject({
+      audit: true,
+      reasonCode: "ADAPTER_IDENTITY_MISMATCH",
+      observationRevision: before.observationRevision,
+      adapterRevision: before.adapterRevision,
+    });
+  });
+
+  it("T-021 rejects a command Ack sequence mismatch and leaves the command retryable", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-command-identity", scenario: "command_sequence_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected command identity Task");
+    const taskId = String(created.task.taskId);
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      `UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z'
+       WHERE task_id<>$1 AND state IN ('PENDING','RETRY_WAIT')`,
+      [taskId],
+    );
+    expect(
+      await new DurableCommandDispatcher(
+        gateway,
+        new TaskRepository(pool),
+        undefined,
+        "command-identity",
+      ).tick(),
+    ).toMatchObject({ retried: 1, acknowledged: 0 });
+    const command = await pool.query<{ state: string; last_error_message: string }>(
+      "SELECT state,last_error_message FROM task_command WHERE task_id=$1",
+      [taskId],
+    );
+    expect(command.rows[0]).toMatchObject({
+      state: "RETRY_WAIT",
+      last_error_message: "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH",
+    });
+  });
+
+  it("T-022 rejects Reconcile hash/context identity mismatch without binding it", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-reconcile-identity", scenario: "reconcile_identity_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected reconcile identity Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    if (before === null) throw new Error("Expected persisted Task");
+    await expect(engine.reconcileTask(before)).rejects.toThrow(
+      "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH",
+    );
+    expect(await repository.getById(taskId)).toEqual(before);
+    const audit = await pool.query<{ count: string }>(
+      `SELECT count(*) FROM outbox_event
+       WHERE aggregate_id=$1 AND event_type='task.identity_conflict'`,
+      [taskId],
+    );
+    expect(audit.rows[0]?.count).toBe("1");
+  });
+
+  it("T-023 renews a finite active Task handle instead of expiring or purging it", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-active-ttl", scenario: "hold" },
+      authorization,
+      1_000,
+    );
+    if (created.kind !== "task") throw new Error("Expected active TTL Task");
+    const taskId = String(created.task.taskId);
+    await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
+      taskId,
+    ]);
+    const result = await new TtlCleaner(new TaskRepository(pool), {
+      purgeGraceMs: 60_000,
+    }).tick(new Date("2000-01-02T00:00:00Z"));
+    expect(result.renewed).toBeGreaterThanOrEqual(1);
+    const retained = await new TaskRepository(pool).getById(taskId);
+    expect(retained).toMatchObject({ internalState: "RUNNING", expiredAt: null });
+    expect(retained?.handleExpiresAt?.getTime()).toBeGreaterThan(
+      new Date("2000-01-02T00:00:00Z").getTime(),
+    );
+  });
+
+  it("T-024 retains a terminal Task result before its TTL expires", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-terminal-retained" },
+      authorization,
+      60_000,
+    );
+    if (created.kind !== "task") throw new Error("Expected retained terminal Task");
+    const taskId = String(created.task.taskId);
+    const completed = await engine.getTask(taskId, authorization);
+    expect(completed).toMatchObject({ status: "completed" });
+    expect(completed.result).toMatchObject({
+      structuredContent: { resourceId: "rc2-terminal-retained" },
+    });
+    const retained = await new TaskRepository(pool).getById(taskId);
+    expect(retained?.terminalAt).not.toBeNull();
+    expect(retained?.handleExpiresAt?.getTime()).toBeGreaterThan(
+      retained?.terminalAt?.getTime() ?? Number.POSITIVE_INFINITY,
+    );
+
+    const defaultCreated = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-terminal-default-retention" },
+      authorization,
+    );
+    if (defaultCreated.kind !== "task") throw new Error("Expected default-retention Task");
+    const defaultTaskId = String(defaultCreated.task.taskId);
+    await engine.getTask(defaultTaskId, authorization);
+    const defaultRetained = await new TaskRepository(pool).getById(defaultTaskId);
+    if (defaultRetained?.ttlMs === null || defaultRetained?.ttlMs === undefined) {
+      throw new Error("Expected manifest default terminal retention");
+    }
+    expect(defaultRetained.ttlMs).toBeGreaterThanOrEqual(86_400_000);
+    expect(
+      (defaultRetained.handleExpiresAt?.getTime() ?? 0) -
+        (defaultRetained.terminalAt?.getTime() ?? Number.POSITIVE_INFINITY),
+    ).toBe(defaultRetained.ttlMs);
+  });
+
+  it("T-026 lets concurrent TTL cleaners expire and purge each Task exactly once", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-ttl-concurrency" },
+      authorization,
+      1_000,
+      "rc2-ttl-concurrency-key",
+    );
+    if (created.kind !== "task") throw new Error("Expected TTL concurrency Task");
+    const taskId = String(created.task.taskId);
+    await engine.getTask(taskId, authorization);
+    await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
+      taskId,
+    ]);
+    await pool.query(
+      `INSERT INTO task_input_request(task_id,request_key,schema,status,description,required)
+       VALUES ($1,'retention-proof','{}'::jsonb,'ANSWERED','retention proof',false)`,
+      [taskId],
+    );
+    await pool.query(
+      `INSERT INTO task_command(task_id,command_sequence,command_type,request_hash,state,payload)
+       VALUES ($1,99,'UPDATE',$2,'EXHAUSTED','{}'::jsonb)`,
+      [taskId, "f".repeat(64)],
+    );
+    const first = new TtlCleaner(new TaskRepository(pool), { purgeGraceMs: 60_000 });
+    const second = new TtlCleaner(new TaskRepository(pool), { purgeGraceMs: 60_000 });
+    const expired = await Promise.all([
+      first.tick(new Date("2000-01-02T00:00:00Z")),
+      second.tick(new Date("2000-01-02T00:00:00Z")),
+    ]);
+    expect(expired.reduce((sum, result) => sum + result.expired, 0)).toBe(1);
+    const logicallyExpired = await new TaskRepository(pool).getById(taskId);
+    expect(logicallyExpired?.expiredAt).not.toBeNull();
+    expect(logicallyExpired?.purgeAfter?.getTime()).toBeGreaterThan(
+      logicallyExpired?.expiredAt?.getTime() ?? Number.POSITIVE_INFINITY,
+    );
+    const expiryEvents = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM outbox_event WHERE aggregate_id=$1 AND event_type='task.expired'",
+      [taskId],
+    );
+    expect(expiryEvents.rows[0]?.count).toBe("1");
+    await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
+      taskId,
+    ]);
+    const purged = await Promise.all([
+      first.tick(new Date("2000-01-03T00:00:00Z")),
+      second.tick(new Date("2000-01-03T00:00:00Z")),
+    ]);
+    expect(purged.reduce((sum, result) => sum + result.purged, 0)).toBe(1);
+    const residue = await pool.query<{ count: string }>(
+      `SELECT (
+         (SELECT count(*) FROM provider_task WHERE task_id=$1) +
+         (SELECT count(*) FROM task_observation WHERE task_id=$1) +
+         (SELECT count(*) FROM task_input_request WHERE task_id=$1) +
+         (SELECT count(*) FROM task_command WHERE task_id=$1) +
+         (SELECT count(*) FROM admission_intent WHERE task_id=$1) +
+         (SELECT count(*) FROM idempotency_record WHERE task_id=$1) +
+         (SELECT count(*) FROM outbox_event WHERE aggregate_id=$1)
+       )::text AS count`,
+      [taskId],
+    );
+    expect(residue.rows[0]?.count).toBe("0");
+  });
+
+  it("T-025 returns an explicit Invalid Params error for an expired Task handle", async () => {
+    const handler = new McpProtocolHandler(engine.manifest, gateway, engine, {
+      resolveAuthorization: () => authorization,
+    });
+    const app = Fastify();
+    app.post("/mcp", async (request, reply) => {
+      reply.hijack();
+      await handler.handle(request.raw, reply.raw, request.body);
+    });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (address === null || typeof address === "string") throw new Error("MCP did not bind");
+    const client = new Client({ name: "rc2-ttl-wire", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${String(address.port)}/mcp`),
+      ) as unknown as Transport,
+    );
+    try {
+      const created = await client.request(
+        {
+          method: "tools/call",
+          params: { name: "durable_task", arguments: { resourceId: "rc2-expired-wire" } },
+        },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      await client.experimental.tasks.getTask(created.task.taskId);
+      await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
+        created.task.taskId,
+      ]);
+      await expect(client.experimental.tasks.getTask(created.task.taskId)).rejects.toMatchObject({
+        code: ErrorCode.InvalidParams,
+        data: { reasonCode: "TASK_EXPIRED" },
+      });
+      await expect(
+        client.experimental.tasks.getTaskResult(created.task.taskId, CallToolResultSchema),
+      ).rejects.toMatchObject({
+        code: ErrorCode.InvalidParams,
+        data: { reasonCode: "TASK_EXPIRED" },
+      });
+      await expect(client.experimental.tasks.cancelTask(created.task.taskId)).rejects.toMatchObject(
+        {
+          code: ErrorCode.InvalidParams,
+          data: { reasonCode: "TASK_EXPIRED" },
+        },
+      );
+      await expect(
+        client.request(
+          {
+            method: "tasks/update",
+            params: { taskId: created.task.taskId, inputs: { approval: true } },
+          },
+          z.object({}).loose(),
+        ),
+      ).rejects.toMatchObject({
+        code: ErrorCode.InvalidParams,
+        data: { reasonCode: "TASK_EXPIRED" },
+      });
+      await expect(
+        engine.getTask(created.task.taskId, { ...authorization, hash: "b".repeat(64) }),
+      ).rejects.toThrow("TASK_NOT_FOUND");
+    } finally {
+      await client.close();
+      await app.close();
+    }
+  });
+
+  it("T-027 returns persisted state with stale metadata during a transient Adapter outage", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-stale-read", scenario: "get_transient_failure" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected degraded-read Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    const stale = await engine.getTask(taskId, authorization);
+    expect(stale).toMatchObject({ status: "working" });
+    const metadata = stale._meta as Record<string, unknown>;
+    const profile = metadata["io.sdar/taskExecution"] as Record<string, unknown>;
+    expect(profile).toMatchObject({
+      snapshotFreshness: "stale",
+      degradedReasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
+    });
+    expect(typeof profile.lastConfirmedAt).toBe("string");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(await repository.getById(taskId)).toEqual(before);
+  });
+
+  it("T-028 never masks an Adapter identity conflict as a stale read", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-conflict-not-stale", scenario: "get_external_identity_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected identity-conflict Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    await expect(engine.getTask(taskId, authorization)).rejects.toThrow(
+      "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH",
+    );
+    expect(await repository.getById(taskId)).toEqual(before);
   });
 });
 

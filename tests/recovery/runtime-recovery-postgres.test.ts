@@ -7,7 +7,10 @@ import {
   bindMockAdapter,
   createMockAdapterServer,
 } from "../../examples/mock-adapter-typescript/src/server.js";
-import { GrpcAdapterGateway } from "../../packages/adapter-protocol/src/index.js";
+import {
+  GrpcAdapterGateway,
+  jsonToProtoStruct,
+} from "../../packages/adapter-protocol/src/index.js";
 import type { AuthorizationContext } from "../../packages/domain/src/index.js";
 import { OperationRegistry } from "../../packages/operation-registry/src/index.js";
 import {
@@ -18,6 +21,7 @@ import {
 } from "../../packages/persistence-postgres/src/index.js";
 import {
   DurableCommandDispatcher,
+  DurableScheduler,
   RecoveryManager,
   TaskEngine,
 } from "../../packages/task-engine/src/index.js";
@@ -198,6 +202,97 @@ describe("Runtime startup and fault recovery", () => {
     }
     const after = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
     expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+  });
+
+  it("T-017 schedules an old Task from its snapshot after Manifest v2 removes the operation", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "snapshot-v1-removed-operation" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: new Date().toISOString(),
+          startToleranceMs: 30_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected old scheduled Task");
+    const taskId = String(created.task.taskId);
+    await expect(
+      engine.callOperation(
+        requiredOperation("durable_task"),
+        { resourceId: "snapshot-v1-response-loss", scenario: "response_loss" },
+        authorization,
+      ),
+    ).rejects.toThrow("injected StartOperation response loss");
+    const raw = await gateway.describeProvider();
+    const manifestV2 = new OperationRegistry().validate({
+      ...raw,
+      providerVersion: "2.0.0",
+      operations: raw.operations.filter((operation) => operation.name !== "durable_task"),
+    });
+    const snapshotIdsV2 = await new OperationSnapshotRepository(pool).saveManifest(manifestV2);
+    const repository = new TaskRepository(pool);
+    const restarted = new TaskEngine(manifestV2, snapshotIdsV2, gateway, repository);
+    expect((await new RecoveryManager(restarted, repository).scan()).admissionsRecovered).toBe(1);
+    await new DurableScheduler(manifestV2, gateway, repository).tick();
+    expect(await repository.getById(taskId)).toMatchObject({
+      operationName: "durable_task",
+      internalState: "RUNNING",
+    });
+    expect(
+      restarted.manifest.operations.some((operation) => operation.name === "durable_task"),
+    ).toBe(false);
+    const recovered = await pool.query<{ operation_snapshot_id: string }>(
+      "SELECT operation_snapshot_id FROM provider_task WHERE arguments->>'resourceId'='snapshot-v1-response-loss'",
+    );
+    expect(recovered.rows[0]?.operation_snapshot_id).toBe(
+      engine.operationSnapshotIds.get("durable_task"),
+    );
+  });
+
+  it("T-018 keeps old input capability/schema while new calls use Manifest v2 schema", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "snapshot-v1-input", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected old input Task");
+    const taskId = String(created.task.taskId);
+    const raw = await gateway.describeProvider();
+    const manifestV2 = new OperationRegistry().validate({
+      ...raw,
+      providerVersion: "2.1.0",
+      operations: raw.operations.map((operation) =>
+        operation.name === "durable_task"
+          ? {
+              ...operation,
+              inputSchema: jsonToProtoStruct({
+                type: "object",
+                properties: { replacement: { type: "string" } },
+                required: ["replacement"],
+                additionalProperties: false,
+              }),
+              capabilities: { ...operation.capabilities, inputRequired: false },
+            }
+          : operation,
+      ),
+    });
+    const snapshotsV2 = await new OperationSnapshotRepository(pool).saveManifest(manifestV2);
+    const restarted = new TaskEngine(manifestV2, snapshotsV2, gateway, new TaskRepository(pool));
+    await restarted.updateTask(taskId, { approval: true }, authorization);
+    expect(await restarted.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
+    const newOperation = manifestV2.operations.find(
+      (operation) => operation.name === "durable_task",
+    );
+    if (newOperation === undefined) throw new Error("Expected v2 operation");
+    await expect(
+      restarted.callOperation(newOperation, { resourceId: "old-shape" }, authorization),
+    ).rejects.toThrow("INVALID_TOOL_ARGUMENTS");
   });
 
   it("gates readiness on startup recovery and exposes auth, rate, and metrics endpoints", async () => {

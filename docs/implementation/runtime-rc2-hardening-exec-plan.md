@@ -4,7 +4,7 @@ Status: active
 Branch: `feature/mcp-tasks-provider-runtime-v1`  
 Immutable baseline: annotated tag `v1.0.0-rc.1` -> `51d68926ba1bc9e935438e750582693aea3ecf4d`  
 Target: annotated tag `v1.0.0-rc.2`  
-Last updated: 2026-07-16 (H1)
+Last updated: 2026-07-16 (H3 closure)
 
 ## Objective and invariants
 
@@ -49,10 +49,10 @@ Every H phase follows this loop:
 | ----- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | -------- |
 | H0    | real baseline, six red regressions, plan and matrix                           | baseline assessment, red output, H0 report, push/CI           | complete |
 | H1    | durable stop command dispatcher and rejection policy                          | T-001..T-006, T-029, T-030; migration; no RPC under DB client | complete |
-| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | pending  |
-| H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | pending  |
-| H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | pending  |
-| H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | pending  |
+| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | complete |
+| H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | complete |
+| H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | complete |
+| H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | complete |
 | H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | pending  |
 | H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | pending  |
 | H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending  |
@@ -102,3 +102,33 @@ The tag is never moved.
 - 2026-07-16 H1 closure: implementation `3f2d425`; push run `29509615239` and PR run
   `29509616607` passed `pnpm verify`, Buf lint/compatibility and Compose with both Adapter
   images. The report closure commit follows the evidence it records.
+- 2026-07-16 H2: persist start attempts and retry anchors; never retry an uncertain Start before
+  Reconcile `NOT_FOUND`; late/queued immediate execution enters durable safe-stop compensation.
+- 2026-07-16 H2 upstream event: PR #1 was externally merged while H2 was in progress, and
+  governance commit `075d8dc` reached both `main` and the target branch. H2 implementation
+  `20d4598` was committed first, then remote target `e768f52` was merged without conflict as
+  `a14d4b3`. Draft PR #3 now carries the remaining H2-H9 delta so PR-context checks continue.
+- 2026-07-16 H2 closure: push run `29511568781`, PR runtime run `29511591880`, and
+  governance quality/Compose runs `29511590472`/`29511590473` all succeeded.
+- 2026-07-16 H3: introduced a Runtime-owned observation sequence and one transactional
+  transition primitive for Task state, complete observations and stable-key outbox events.
+  PostgreSQL fault injection proves that an outbox insertion failure rolls back Task and
+  observation changes. Implementation `f3ad038`; push runtime `29514013921`, PR runtime
+  `29514017780`, quality `29514019017` and Compose `29514017491` all succeeded.
+- 2026-07-16 H3 closure repair: closure push `29514255881` exposed non-canonical JWT
+  base64url acceptance; fix `b599480` made JWT segment decoding canonical and passed 20 local
+  security repetitions plus push `29514585761`, PR runtime `29514590381`, quality
+  `29514592620` and Compose `29514590244`.
+- 2026-07-17 H4: historical execution, scheduling, recovery and control now resolve and
+  validate the Task-bound immutable Operation Snapshot. Adapter Snapshots and command Acks
+  echo the complete execution identity and are rejected atomically on any mismatch; conflicts
+  produce a durable audit Outbox event and metric without updating or rebinding the Task.
+- 2026-07-17 H4 closure: implementation `c58feb7`; its first full verify exposed a Python Ack
+  field omission in runs `29517410128`/`29517412904`. Repair `5873a79` passed push runtime
+  `29517588173`, PR runtime `29517591379`, quality `29517591502` and Compose `29517591413`.
+- 2026-07-17 H5: migration 011, replica-safe TTL cleaner, typed expired wire error and strict
+  transient-only stale read fallback implement T-023..T-028. Active Tasks renew instead of
+  expiring; identity/contract errors remain visible.
+- 2026-07-17 H5 closure: implementation `6360af8` passed push runtime `29520205271`, PR
+  runtime `29520212409`, quality `29520211902` and Compose `29520211382`, including full
+  `pnpm verify`, Buf lint/breaking and dual-language Adapter conformance.

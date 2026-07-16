@@ -33,6 +33,8 @@ export type MetricName =
   | "sdar_cancel_requests_total"
   | "sdar_recovery_total"
   | "sdar_adapter_rpc_total"
+  | "sdar_adapter_identity_conflicts_total"
+  | "sdar_ttl_cleaner_total"
   | "sdar_outbox_delivery_total"
   | "sdar_idempotency_hits_total"
   | "sdar_rate_limited_total";

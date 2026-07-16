@@ -1,10 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import * as grpc from "@grpc/grpc-js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
-import { protoStructToJson } from "../../adapter-protocol/src/index.js";
+import {
+  protoStructToJson,
+  validateAdapterSnapshotIdentity,
+  validateCommandAckIdentity,
+} from "../../adapter-protocol/src/index.js";
 import type {
   AvailabilityCheckInput,
+  CommandAck,
   ExecutionSnapshot,
+  StartOperationResponse,
 } from "../../adapter-protocol/src/index.js";
 import type { AuthorizationContext, TaskRecord } from "../../domain/src/index.js";
 import type {
@@ -28,9 +35,11 @@ import type {
   AdmissionIntentRecord,
   IdempotencyRepository,
   PendingCommandRecord,
+  ResolvedTaskOperation,
   StoredInvocation,
   TaskRepository,
 } from "../../persistence-postgres/src/index.js";
+import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -48,10 +57,12 @@ export interface TaskTraceEvent {
   resourceRef: string | null;
   executionMode: string;
   correlationId: string | null;
+  error?: string;
 }
 
 export class TaskEngine {
   readonly #repository: TaskRepository;
+  readonly #operationSnapshots: OperationSnapshotRepository;
 
   constructor(
     readonly manifest: ValidatedManifest,
@@ -62,8 +73,55 @@ export class TaskEngine {
     readonly clock: Clock = systemClock,
     readonly metrics?: TaskEngineMetrics,
     readonly onTrace?: (event: TaskTraceEvent) => void,
+    operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
+      repository.pool,
+    ),
   ) {
     this.#repository = repository;
+    this.#operationSnapshots = operationSnapshots;
+  }
+
+  async loadOperationSnapshot(snapshotId: string): Promise<ValidatedOperation> {
+    return (await this.resolveTaskOperation(snapshotId)).operation;
+  }
+
+  async resolveTaskOperation(snapshotId: string): Promise<ResolvedTaskOperation> {
+    return this.#operationSnapshots.loadOperationSnapshot(snapshotId);
+  }
+
+  async #validateTaskSnapshot(
+    task: TaskRecord,
+    operationName: string,
+    snapshot: ExecutionSnapshot,
+  ): Promise<void> {
+    try {
+      validateAdapterSnapshotIdentity(snapshot, expectedTaskIdentity(task, operationName));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH";
+      await this.#repository.recordIdentityConflict(task.taskId, detail);
+      this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "snapshot" });
+      throw error;
+    }
+  }
+
+  async #validateTaskAck(
+    task: TaskRecord,
+    operationName: string,
+    commandSequence: number,
+    ack: CommandAck,
+  ): Promise<void> {
+    try {
+      validateCommandAckIdentity(ack, {
+        ...expectedTaskIdentity(task, operationName),
+        commandSequence,
+      });
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH";
+      await this.#repository.recordIdentityConflict(task.taskId, detail);
+      this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "command_ack" });
+      throw error;
+    }
   }
 
   async callOperation(
@@ -171,6 +229,7 @@ export class TaskEngine {
     argumentHash: string,
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
+    persistedOperationSnapshotId?: string,
   ): Promise<ToolInvocationResult> {
     this.onTrace?.({
       event: "operation.admission",
@@ -188,10 +247,19 @@ export class TaskEngine {
         argumentHash,
         timing: toAdapterTiming(timing),
       });
+      validateStartResponseIdentity(response, {
+        taskId,
+        operationName: operation.name,
+        argumentHash,
+        authorizationContextHash: authorization.hash,
+        executionMode: authorization.executionMode,
+        simulationId: authorization.simulationId,
+      });
       return { kind: "result", result: resultFromStart(response) };
     }
 
-    const operationSnapshotId = this.operationSnapshotIds.get(operation.name);
+    const operationSnapshotId =
+      persistedOperationSnapshotId ?? this.operationSnapshotIds.get(operation.name);
     if (operationSnapshotId === undefined) throw new Error("OPERATION_SNAPSHOT_NOT_FOUND");
     const intent = {
       taskId,
@@ -263,7 +331,10 @@ export class TaskEngine {
       throw error;
     }
     if (response.result === "rejected" || response.rejected !== undefined) {
-      const rejected = rejectionResult(response.rejected);
+      const rejected =
+        this.clock.now() > anchors.latestStartAt
+          ? startWindowMissed(this.clock.now(), "Start response arrived after the start window.")
+          : rejectionResult(response.rejected);
       await this.#repository.recordRejection(taskId, rejected);
       return { kind: "result", result: rejected };
     }
@@ -272,9 +343,26 @@ export class TaskEngine {
       await this.#repository.markAdmissionUncertain(taskId);
       throw new Error("ADAPTER_START_RESPONSE_MISSING_RESULT");
     }
+    try {
+      validateStartResponseIdentity(response, {
+        taskId,
+        operationName: operation.name,
+        argumentHash,
+        authorizationContextHash: authorization.hash,
+        executionMode: authorization.executionMode,
+        simulationId: authorization.simulationId,
+      });
+    } catch (error) {
+      await this.#repository.markAdmissionUncertain(taskId);
+      throw error;
+    }
     const snapshot = normalizeSnapshot(accepted.initialSnapshot);
     const transition = mapAdapterSnapshot(snapshot);
     const inputRequests = normalizeInputRequests(accepted.initialSnapshot);
+    const respondedAt = this.clock.now();
+    const actualStartedAt = snapshotHasStarted(accepted.initialSnapshot.state) ? respondedAt : null;
+    const startWindowMissedAt =
+      (actualStartedAt ?? respondedAt) > anchors.latestStartAt ? respondedAt : undefined;
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
       const result = transition.result ?? transition.error ?? {};
       await this.#repository.completeAdmissionWithoutTask(
@@ -298,6 +386,8 @@ export class TaskEngine {
         deadlineAt: anchors.deadlineAt,
         timing,
         inputRequests,
+        actualStartedAt,
+        ...(startWindowMissedAt === undefined ? {} : { startWindowMissedAt }),
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
@@ -330,8 +420,19 @@ export class TaskEngine {
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
   ): Promise<ToolInvocationResult> {
+    validateAdapterSnapshotIdentity(snapshotValue, {
+      taskId: intent.taskId,
+      externalExecutionId,
+      operationName: operation.name,
+      argumentHash: intent.argumentHash,
+      authorizationContextHash: intent.authorization.hash,
+      executionMode: intent.authorization.executionMode,
+      simulationId: intent.authorization.simulationId,
+    });
     const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
     const inputRequests = normalizeInputRequests(snapshotValue);
+    const respondedAt = this.clock.now();
+    const actualStartedAt = snapshotHasStarted(snapshotValue.state) ? respondedAt : null;
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
       await this.#repository.completeAdmissionWithoutTask(intent.taskId, adapterResponse);
       return { kind: "result", result: transition.result ?? transition.error ?? {} };
@@ -349,6 +450,10 @@ export class TaskEngine {
       deadlineAt: anchors.deadlineAt,
       timing,
       inputRequests,
+      actualStartedAt,
+      ...((actualStartedAt ?? respondedAt) > anchors.latestStartAt
+        ? { startWindowMissedAt: respondedAt }
+        : {}),
     });
     return { kind: "task", task: detailedTask(task, inputRequests) };
   }
@@ -374,25 +479,61 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
     let task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
     if (
       !isTerminalState(task.internalState) &&
       task.internalState !== "SCHEDULED" &&
       task.internalState !== "STARTING"
     ) {
       if (task.externalExecutionId === null) return detailedTask(task);
-      const snapshot = await this.gateway.getExecution(
-        task.taskId,
-        task.externalExecutionId,
-        executionOptions(authorization),
-      );
-      task = await this.#repository.applySnapshot(
-        task.taskId,
-        Number(snapshot.revision),
-        task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
-          ? deadlineReached(snapshot.message, this.clock.now())
-          : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
-        normalizeInputRequests(snapshot),
-      );
+      try {
+        const snapshot = await this.gateway.getExecution(
+          task.taskId,
+          task.externalExecutionId,
+          executionOptions(authorization),
+        );
+        await this.#validateTaskSnapshot(task, operation.name, snapshot);
+        task = await this.#repository.applySnapshot(
+          task.taskId,
+          Number(snapshot.revision),
+          stopTransition(task, snapshot, this.clock.now()),
+          normalizeInputRequests(snapshot),
+        );
+      } catch (error) {
+        if (!isTransientAdapterReadError(error)) throw error;
+        setImmediate(() => {
+          void this.reconcileTask(task, operation)
+            .then((outcome) => {
+              this.metrics?.increment("sdar_recovery_total", {
+                outcome: `degraded_read_${outcome}`,
+              });
+            })
+            .catch((reconcileError: unknown) => {
+              this.metrics?.increment("sdar_recovery_total", {
+                outcome: "degraded_read_error",
+              });
+              this.onTrace?.({
+                event: "task.degraded_reconcile_failed",
+                providerId: task.providerId,
+                taskId: task.taskId,
+                operationName: operation.name,
+                resourceRef: resourceReference(operation, task.arguments),
+                executionMode: task.executionMode,
+                correlationId: authorization.correlationId ?? null,
+                error: reconcileError instanceof Error ? reconcileError.message : "unknown",
+              });
+            });
+        });
+        return detailedTask(
+          task,
+          await this.#repository.listInputRequests(task.taskId),
+          await this.#repository.listObservations(task.taskId),
+          {
+            snapshotFreshness: "stale",
+            degradedReasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
+          },
+        );
+      }
     }
     return detailedTask(
       task,
@@ -401,11 +542,12 @@ export class TaskEngine {
     );
   }
 
-  async recoverAdmission(admission: AdmissionIntentRecord): Promise<ToolInvocationResult> {
-    const operation = this.manifest.operations.find(
-      (candidate) => candidate.name === admission.operationName,
-    );
-    if (operation === undefined) throw new Error("RECOVERY_OPERATION_NOT_FOUND");
+  async recoverAdmission(
+    admission: AdmissionIntentRecord,
+    resolvedOperation?: ValidatedOperation,
+  ): Promise<ToolInvocationResult> {
+    const operation =
+      resolvedOperation ?? (await this.loadOperationSnapshot(admission.operationSnapshotId));
     return this.#executeOperation(
       operation,
       admission.arguments,
@@ -421,19 +563,29 @@ export class TaskEngine {
         latestStartAt: admission.latestStartAt,
         deadlineAt: admission.deadlineAt,
       },
+      admission.operationSnapshotId,
     );
   }
 
-  async reconcileTask(task: TaskRecord): Promise<"found" | "not_found" | "deferred"> {
+  async reconcileTask(
+    task: TaskRecord,
+    resolvedOperation?: ValidatedOperation,
+  ): Promise<"found" | "not_found" | "deferred"> {
+    if (task.internalState === "STARTING" && task.externalExecutionId === null) return "deferred";
+    const operation =
+      resolvedOperation ?? (await this.loadOperationSnapshot(task.operationSnapshotId));
     const response = await this.gateway.reconcileExecution(
       task.taskId,
-      task.operationName,
+      operation.name,
       task.argumentHash,
-      executionOptions({
-        hash: task.authorizationContextHash,
-        executionMode: task.executionMode,
-        simulationId: task.simulationId,
-      }),
+      {
+        ...executionOptions({
+          hash: task.authorizationContextHash,
+          executionMode: task.executionMode,
+          simulationId: task.simulationId,
+        }),
+        externalExecutionId: task.externalExecutionId,
+      },
     );
     if (response.status === "TRANSIENT_UNAVAILABLE") return "deferred";
     if (response.status === "CONFLICT") {
@@ -444,13 +596,6 @@ export class TaskEngine {
       return "not_found";
     }
     if (response.status === "NOT_FOUND" || response.snapshot === undefined) {
-      if (task.internalState === "STARTING" && task.externalExecutionId === null) {
-        await this.#repository.releaseScheduleClaim(
-          task.taskId,
-          "Scheduled start was not found during recovery; claim released for retry.",
-        );
-        return "not_found";
-      }
       await this.#repository.failRecoveryNotFound(
         task.taskId,
         "Adapter execution was not found during recovery.",
@@ -458,30 +603,31 @@ export class TaskEngine {
       return "not_found";
     }
     const snapshot = response.snapshot;
-    if (task.internalState === "STARTING" && task.externalExecutionId === null) {
-      await this.#repository.acceptScheduled(
+    if (response.externalExecutionId !== snapshot.externalExecutionId) {
+      await this.#repository.recordIdentityConflict(
         task.taskId,
-        response.externalExecutionId || snapshot.externalExecutionId,
-        Number(snapshot.revision),
-        mapAdapterSnapshot(normalizeSnapshot(snapshot)),
-        response as unknown as Record<string, unknown>,
-        normalizeInputRequests(snapshot),
+        "ADAPTER_RECONCILE_IDENTITY_MISMATCH",
       );
-    } else {
-      await this.#repository.applySnapshot(
-        task.taskId,
-        Number(snapshot.revision),
-        task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
-          ? deadlineReached(snapshot.message, this.clock.now())
-          : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
-        normalizeInputRequests(snapshot),
-      );
+      throw new Error("ADAPTER_RECONCILE_IDENTITY_MISMATCH");
     }
+    await this.#validateTaskSnapshot(task, operation.name, snapshot);
+    await this.#repository.applySnapshot(
+      task.taskId,
+      Number(snapshot.revision),
+      stopTransition(task, snapshot, this.clock.now()),
+      normalizeInputRequests(snapshot),
+    );
     await this.#repository.noteRecovery(task.taskId);
     return "found";
   }
 
-  async replayPendingCommand(task: TaskRecord, command: PendingCommandRecord): Promise<void> {
+  async replayPendingCommand(
+    task: TaskRecord,
+    command: PendingCommandRecord,
+    resolvedOperation?: ValidatedOperation,
+  ): Promise<void> {
+    const operation =
+      resolvedOperation ?? (await this.loadOperationSnapshot(task.operationSnapshotId));
     const authorization = {
       hash: task.authorizationContextHash,
       executionMode: task.executionMode,
@@ -489,22 +635,24 @@ export class TaskEngine {
     };
     const identity = {
       taskId: task.taskId,
-      operationName: task.operationName,
+      operationName: operation.name,
       argumentHash: task.argumentHash,
       commandSequence: command.commandSequence,
     };
     let ack;
     let completedAnswers: { key: string; hash: string; value: unknown }[] = [];
     if (command.commandType === "CANCEL") {
+      if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
       ack = await this.gateway.requestCancel(
         task.taskId,
-        task.operationName,
+        operation.name,
         task.argumentHash,
         task.stopReason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "USER_REQUESTED",
         command.commandSequence,
-        executionOptions(authorization),
+        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
     } else if (command.commandType === "UPDATE") {
+      if (!operation.capabilities.inputRequired) throw new Error("INPUT_NOT_SUPPORTED");
       const answers = command.payload.answers;
       if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
         throw new Error("INVALID_RECOVERY_UPDATE_PAYLOAD");
@@ -521,13 +669,22 @@ export class TaskEngine {
           value: answer.value,
           answerHash: answer.hash,
         })),
-        executionOptions(authorization),
+        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
     } else if (command.commandType === "PAUSE") {
-      ack = await this.gateway.pauseExecution(identity, executionOptions(authorization));
+      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+      ack = await this.gateway.pauseExecution(identity, {
+        ...executionOptions(authorization),
+        externalExecutionId: task.externalExecutionId,
+      });
     } else {
-      ack = await this.gateway.resumeExecution(identity, executionOptions(authorization));
+      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+      ack = await this.gateway.resumeExecution(identity, {
+        ...executionOptions(authorization),
+        externalExecutionId: task.externalExecutionId,
+      });
     }
+    await this.#validateTaskAck(task, operation.name, command.commandSequence, ack);
     await this.#repository.acknowledgeCommand(
       task.taskId,
       command.commandSequence,
@@ -556,6 +713,7 @@ export class TaskEngine {
       executionMode: authorization.executionMode,
     });
     let task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
     this.onTrace?.({
       event: "task.cancel_requested",
       providerId: task.providerId,
@@ -566,6 +724,7 @@ export class TaskEngine {
       correlationId: authorization.correlationId ?? null,
     });
     if (isTerminalState(task.internalState)) return detailedTask(task);
+    if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
     await this.#repository.beginCancel(taskId, requestHash);
     task = (await this.#repository.getById(taskId)) ?? task;
@@ -578,6 +737,8 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, never>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (!operation.capabilities.inputRequired) throw new Error("INPUT_NOT_SUPPORTED");
     const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
     const pending: { key: string; hash: string; value: unknown }[] = [];
@@ -610,8 +771,9 @@ export class TaskEngine {
           value: answer.value,
           answerHash: answer.hash,
         })),
-        executionOptions(authorization),
+        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
+      await this.#validateTaskAck(task, operation.name, command.sequence, ack);
       await this.#repository.acknowledgeCommand(
         taskId,
         command.sequence,
@@ -630,23 +792,28 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
-    const operation = this.manifest.operations.find(
-      (candidate) => candidate.name === task.operationName,
-    );
-    if (!operation?.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
     const requestHash = createHash("sha256").update(commandType).digest("hex");
     const command = await this.#repository.beginCommand(taskId, commandType, requestHash, {});
     if (!command.duplicate) {
       const identity = {
         taskId,
-        operationName: task.operationName,
+        operationName: operation.name,
         argumentHash: task.argumentHash,
         commandSequence: command.sequence,
       };
       const ack =
         commandType === "PAUSE"
-          ? await this.gateway.pauseExecution(identity, executionOptions(authorization))
-          : await this.gateway.resumeExecution(identity, executionOptions(authorization));
+          ? await this.gateway.pauseExecution(identity, {
+              ...executionOptions(authorization),
+              externalExecutionId: task.externalExecutionId,
+            })
+          : await this.gateway.resumeExecution(identity, {
+              ...executionOptions(authorization),
+              externalExecutionId: task.externalExecutionId,
+            });
+      await this.#validateTaskAck(task, operation.name, command.sequence, ack);
       await this.#repository.acknowledgeCommand(
         taskId,
         command.sequence,
@@ -666,6 +833,36 @@ function normalizeSnapshot(snapshot: ExecutionSnapshot) {
     message: snapshot.message,
     retryable: snapshot.retryable,
     result: protoStructToJson(snapshot.result),
+  };
+}
+
+function validateStartResponseIdentity(
+  response: StartOperationResponse,
+  expected: Omit<ReturnType<typeof expectedTaskIdentity>, "externalExecutionId">,
+): void {
+  const accepted = response.accepted;
+  if (accepted === undefined) return;
+  if (
+    accepted.externalExecutionId.length === 0 ||
+    accepted.initialSnapshot.externalExecutionId !== accepted.externalExecutionId
+  ) {
+    throw new Error("ADAPTER_START_IDENTITY_MISMATCH");
+  }
+  validateAdapterSnapshotIdentity(accepted.initialSnapshot, {
+    ...expected,
+    externalExecutionId: accepted.externalExecutionId,
+  });
+}
+
+function expectedTaskIdentity(task: TaskRecord, operationName: string) {
+  return {
+    taskId: task.taskId,
+    externalExecutionId: task.externalExecutionId,
+    operationName,
+    argumentHash: task.argumentHash,
+    authorizationContextHash: task.authorizationContextHash,
+    executionMode: task.executionMode,
+    simulationId: task.simulationId,
   };
 }
 
@@ -730,8 +927,17 @@ function detailedTask(
     type: string;
     occurredAt: Date;
     reasonCode: string | null;
+    message: string | null;
+    substate: string | null;
+    progress: Record<string, unknown> | null;
+    source: "runtime" | "adapter";
+    adapterRevision: number | null;
     payload: Record<string, unknown>;
   }[] = [],
+  readStatus: {
+    snapshotFreshness: "fresh" | "stale";
+    degradedReasonCode?: string;
+  } = { snapshotFreshness: "fresh" },
 ): Record<string, unknown> {
   return {
     taskId: task.taskId,
@@ -757,12 +963,21 @@ function detailedTask(
       "io.sdar/taskExecution": {
         profileVersion: "1.0",
         substate: task.substate,
-        observationRevision: task.adapterRevision,
+        observationRevision: task.observationRevision,
         executionMode: task.executionMode,
+        snapshotFreshness: readStatus.snapshotFreshness,
+        lastConfirmedAt: task.lastConfirmedAt?.toISOString() ?? null,
+        ...(readStatus.degradedReasonCode === undefined
+          ? {}
+          : { degradedReasonCode: readStatus.degradedReasonCode }),
         timing: {
           acceptedAt: task.acceptedAt.toISOString(),
           notBefore: task.notBefore?.toISOString(),
           latestStartAt: task.latestStartAt?.toISOString(),
+          actualStartedAt: task.actualStartedAt?.toISOString() ?? null,
+          startStopRequestedAt: task.startStopRequestedAt?.toISOString() ?? null,
+          invocationAttempt: task.invocationAttempt,
+          nextStartAttemptAt: task.nextStartAttemptAt?.toISOString() ?? null,
           deadlineAt: task.deadlineAt?.toISOString() ?? null,
         },
         observations: observations.map((observation) => ({
@@ -770,11 +985,33 @@ function detailedTask(
           type: observation.type,
           occurredAt: observation.occurredAt.toISOString(),
           ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
+          ...(observation.message === null ? {} : { message: observation.message }),
+          ...(observation.substate === null ? {} : { substate: observation.substate }),
+          ...(observation.progress === null ? {} : { progress: observation.progress }),
+          source: observation.source,
+          ...(observation.adapterRevision === null
+            ? {}
+            : { adapterRevision: observation.adapterRevision }),
           ...observation.payload,
         })),
       },
     },
   };
+}
+
+function isTransientAdapterReadError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return (
+    typeof code === "number" &&
+    [
+      grpc.status.CANCELLED,
+      grpc.status.DEADLINE_EXCEEDED,
+      grpc.status.RESOURCE_EXHAUSTED,
+      grpc.status.ABORTED,
+      grpc.status.UNAVAILABLE,
+    ].includes(code)
+  );
 }
 
 function deadlineReached(message: string, completedAt: Date) {
@@ -797,6 +1034,54 @@ function deadlineReached(message: string, completedAt: Date) {
     terminal: true,
     observationType: "task.progress",
   };
+}
+
+function startWindowMissed(completedAt: Date, message: string): Record<string, unknown> {
+  return {
+    content: [{ type: "text", text: message }],
+    isError: true,
+    structuredContent: {
+      outcome: "start_window_missed",
+      reasonCode: "START_WINDOW_MISSED",
+      retryable: true,
+      completedAt: completedAt.toISOString(),
+    },
+  };
+}
+
+function startWindowMissedTransition(message: string, completedAt: Date) {
+  return {
+    internalState: "TERMINAL_COMPLETED" as const,
+    mcpStatus: "completed" as const,
+    substate: null,
+    statusMessage: message || "Start window was missed after safe stop.",
+    result: startWindowMissed(completedAt, message || "Start window was missed after safe stop."),
+    error: null,
+    terminal: true,
+    observationType: "task.start_window_missed",
+  };
+}
+
+function stopTransition(task: TaskRecord, snapshot: ExecutionSnapshot, completedAt: Date) {
+  if (snapshot.state === "CANCELLED" && task.stopReason === "DEADLINE_REACHED") {
+    return deadlineReached(snapshot.message, completedAt);
+  }
+  if (snapshot.state === "CANCELLED" && task.stopReason === "START_WINDOW_MISSED") {
+    return startWindowMissedTransition(snapshot.message, completedAt);
+  }
+  return mapAdapterSnapshot(normalizeSnapshot(snapshot));
+}
+
+function snapshotHasStarted(state: string): boolean {
+  return [
+    "RUNNING",
+    "PAUSED",
+    "RESUMING",
+    "SUCCEEDED",
+    "BUSINESS_FAILED",
+    "PARTIALLY_COMPLETED",
+    "TECHNICAL_FAILED",
+  ].includes(state);
 }
 
 function storedInvocation(invocation: ToolInvocationResult): StoredInvocation {

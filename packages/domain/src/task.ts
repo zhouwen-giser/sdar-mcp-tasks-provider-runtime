@@ -38,7 +38,13 @@ export interface TaskRecord {
   result: Record<string, unknown> | null;
   error: Record<string, unknown> | null;
   adapterRevision: number;
+  observationRevision: number;
   ttlMs: number | null;
+  handleExpiresAt: Date | null;
+  terminalAt: Date | null;
+  expiredAt: Date | null;
+  purgeAfter: Date | null;
+  lastConfirmedAt: Date | null;
   pollIntervalMs: number;
   createdAt: Date;
   updatedAt: Date;
@@ -46,6 +52,12 @@ export interface TaskRecord {
   acceptedAt: Date;
   notBefore: Date | null;
   latestStartAt: Date | null;
+  actualStartedAt: Date | null;
+  startStopRequestedAt: Date | null;
+  invocationAttempt: number;
+  nextStartAttemptAt: Date | null;
+  scheduleClaimOwner: string | null;
+  scheduleClaimUntil: Date | null;
   deadlineAt: Date | null;
   cancelRequested: boolean;
   stopReason: string | null;

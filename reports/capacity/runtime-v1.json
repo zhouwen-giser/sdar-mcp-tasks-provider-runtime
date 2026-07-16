@@ -1,35 +1,35 @@
 {
   "version": "1.0.0-rc.1",
-  "generatedAt": "2026-07-16T13:14:04.679Z",
+  "generatedAt": "2026-07-16T17:23:19.731Z",
   "environment": {
     "node": "v22.23.1",
     "platform": "linux/x64",
-    "cpuLogicalCount": 4,
-    "memoryBytes": 16765382656,
-    "database": "PostgreSQL 17 GitHub Actions service",
+    "cpuLogicalCount": 16,
+    "memoryBytes": 12545503232,
+    "database": "TEST_DATABASE_URL target (credentials redacted)",
     "topology": "single Runtime, single TypeScript Adapter, sequential MCP HTTP client"
   },
   "workloads": {
     "synchronousTool": {
       "iterations": 100,
-      "durationMs": 763.688443,
-      "throughputPerSecond": 130.94345071816153,
+      "durationMs": 820.183759,
+      "throughputPerSecond": 121.92389681298236,
       "latencyMs": {
-        "p50": 4.344946000000164,
-        "p95": 18.16740299999998,
-        "p99": 64.53656699999999,
-        "max": 121.93421899999998
+        "p50": 7.803582000000006,
+        "p95": 11.180155999999897,
+        "p99": 13.363585000000057,
+        "max": 22.252091000000064
       }
     },
     "durableTaskCreateAndGet": {
       "iterations": 25,
-      "durationMs": 1282.6015679999998,
-      "throughputPerSecond": 19.491633741710817,
+      "durationMs": 1040.18707,
+      "throughputPerSecond": 24.034138397817234,
       "latencyMs": {
-        "p50": 18.919130000000223,
-        "p95": 217.67950399999995,
-        "p99": 229.2338279999999,
-        "max": 229.2338279999999
+        "p50": 39.434847999999874,
+        "p95": 51.17439400000012,
+        "p99": 61.230477000000064,
+        "max": 61.230477000000064
       }
     }
   }

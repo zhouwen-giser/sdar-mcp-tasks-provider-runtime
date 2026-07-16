@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { protoStructToJson } from "../../adapter-protocol/src/index.js";
+import { jsonToProtoStruct, protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { OperationDefinition, ProviderManifest } from "../../adapter-protocol/src/index.js";
 
 const OPERATION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
@@ -145,5 +145,38 @@ export class OperationRegistry {
       manifestHash,
       operations,
     };
+  }
+
+  validateStoredDefinition(
+    definition: Record<string, unknown>,
+    metadata: { providerId: string; providerVersion: string; manifestHash: string },
+  ): ValidatedOperation {
+    const inputSchema = definition.inputSchema;
+    const outputSchema = definition.outputSchema;
+    if (
+      typeof inputSchema !== "object" ||
+      inputSchema === null ||
+      Array.isArray(inputSchema) ||
+      typeof outputSchema !== "object" ||
+      outputSchema === null ||
+      Array.isArray(outputSchema)
+    ) {
+      throw new Error("INVALID_OPERATION_SNAPSHOT_SCHEMA");
+    }
+    const operation = {
+      ...definition,
+      inputSchema: jsonToProtoStruct(inputSchema as Record<string, unknown>),
+      outputSchema: jsonToProtoStruct(outputSchema as Record<string, unknown>),
+    } as unknown as OperationDefinition;
+    const resolved = this.validate({
+      adapterProtocolVersion: "1.0",
+      providerId: metadata.providerId,
+      providerType: "operation-snapshot",
+      providerVersion: metadata.providerVersion,
+      inventoryMode: "OPAQUE",
+      operations: [operation],
+    }).operations[0];
+    if (resolved === undefined) throw new Error("INVALID_OPERATION_SNAPSHOT");
+    return { ...resolved, manifestHash: metadata.manifestHash, definition };
   }
 }

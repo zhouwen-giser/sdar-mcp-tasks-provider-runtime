@@ -18,10 +18,18 @@ ReconcileExecution; Update/Pause/Resume are conditional, and event streaming and
 resource listing are optional. Complete Snapshots and Get/Reconcile remain the
 correctness path even when events are enabled.
 
-Every side-effect command carries stable task id, operation name, argument hash,
-execution context including authorization hash and mode, and an attempt or
-command sequence. StartOperation is idempotent by task id and conflicts on any
-identity mismatch. Request cancellation is acknowledgement-only.
+Every side-effect command carries stable task id, external execution id, operation name,
+argument hash, execution context including authorization hash and mode, and an attempt or
+command sequence. StartOperation is idempotent by task id and conflicts on any identity
+mismatch. Request cancellation is acknowledgement-only.
+
+Every ExecutionSnapshot echoes task id, external execution id, operation name,
+argument hash and execution context. Every CommandAck echoes the complete
+SideEffectIdentity as well as its top-level command sequence. Runtime rejects a
+response if any echoed field differs from the persisted Task/Snapshot identity;
+the request having contained the expected value is not considered response
+proof. Reconcile also carries the known external execution id and cannot rebind
+an existing Task.
 
 All execution kinds call StartOperation. For synchronous operations the accepted
 initial Snapshot must be terminal and the Runtime returns an ordinary Tool

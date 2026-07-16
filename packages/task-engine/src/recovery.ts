@@ -1,4 +1,7 @@
-import type { TaskRepository } from "../../persistence-postgres/src/index.js";
+import type {
+  ResolvedTaskOperation,
+  TaskRepository,
+} from "../../persistence-postgres/src/index.js";
 import type { TaskEngine } from "./engine.js";
 
 export interface RecoveryScanResult {
@@ -31,7 +34,10 @@ export class RecoveryManager {
     for (const admission of admissions) {
       try {
         const recovered = await this.repository.withRecoveryLock(admission.taskId, async () => {
-          await this.engine.recoverAdmission(admission);
+          const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
+            admission.operationSnapshotId,
+          );
+          await this.engine.recoverAdmission(admission, resolvedOperation.operation);
           return true;
         });
         if (recovered === null) result.lockSkipped += 1;
@@ -48,13 +54,16 @@ export class RecoveryManager {
         const outcome = await this.repository.withRecoveryLock(candidate.taskId, async () => {
           const task = await this.repository.getById(candidate.taskId);
           if (task === null || task.internalState.startsWith("TERMINAL_")) return "terminal";
+          const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
+            task.operationSnapshotId,
+          );
           const pending = await this.repository.listPendingCommands(task.taskId);
           for (const command of pending) {
             if (command.commandType === "CANCEL") continue;
-            await this.engine.replayPendingCommand(task, command);
+            await this.engine.replayPendingCommand(task, command, resolvedOperation.operation);
             result.commandsReplayed += 1;
           }
-          return this.engine.reconcileTask(task);
+          return this.engine.reconcileTask(task, resolvedOperation.operation);
         });
         if (outcome === null) result.lockSkipped += 1;
         else if (outcome === "found") result.tasksReconciled += 1;

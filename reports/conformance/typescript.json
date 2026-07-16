@@ -2,7 +2,7 @@
   "profileVersion": "1.0",
   "adapterLanguage": "typescript",
   "providerId": "conformance-typescript",
-  "generatedAt": "2026-07-16T12:55:29.219Z",
+  "generatedAt": "2026-07-16T17:22:53.641Z",
   "status": "passed",
   "groups": [
     {
@@ -12,9 +12,13 @@
         {
           "name": "manifest and synchronous Tool",
           "status": "passed",
-          "durationMs": 116.41193699999997
+          "durationMs": 110.56738300000006
         },
-        { "name": "task_required lifecycle", "status": "passed", "durationMs": 36.53298500000005 }
+        {
+          "name": "task_required lifecycle",
+          "status": "passed",
+          "durationMs": 64.17216699999994
+        }
       ]
     },
     {
@@ -24,7 +28,7 @@
         {
           "name": "availability states and windows",
           "status": "passed",
-          "durationMs": 6.523635000000013
+          "durationMs": 8.168924999999945
         }
       ]
     },
@@ -32,23 +36,31 @@
       "id": "P2",
       "status": "passed",
       "tests": [
-        { "name": "durable scheduled start", "status": "passed", "durationMs": 35.09741799999995 }
+        {
+          "name": "durable scheduled start",
+          "status": "passed",
+          "durationMs": 69.62718100000006
+        }
       ]
     },
     {
       "id": "P3",
       "status": "passed",
       "tests": [
-        { "name": "multi-round input_required", "status": "passed", "durationMs": 88.360188 },
+        {
+          "name": "multi-round input_required",
+          "status": "passed",
+          "durationMs": 175.68548599999986
+        },
         {
           "name": "Ack-only cancel and command idempotency",
           "status": "passed",
-          "durationMs": 21.94014900000002
+          "durationMs": 88.50016900000014
         },
         {
           "name": "idempotency duplicate and conflict",
           "status": "passed",
-          "durationMs": 14.485910999999987
+          "durationMs": 17.11999199999991
         }
       ]
     },
@@ -56,16 +68,20 @@
       "id": "P4",
       "status": "passed",
       "tests": [
-        { "name": "response-loss Reconcile", "status": "passed", "durationMs": 17.301792999999975 },
+        {
+          "name": "response-loss Reconcile",
+          "status": "passed",
+          "durationMs": 17.945157999999992
+        },
         {
           "name": "Adapter identity conflict",
           "status": "passed",
-          "durationMs": 4.960055000000011
+          "durationMs": 4.778957999999875
         },
         {
           "name": "terminal irreversibility and outbox idempotency",
           "status": "passed",
-          "durationMs": 16.06614599999989
+          "durationMs": 35.63764699999979
         }
       ]
     }

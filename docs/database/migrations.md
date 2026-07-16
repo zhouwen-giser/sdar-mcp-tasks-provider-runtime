@@ -29,4 +29,31 @@ due work claimable by multiple Runtime instances. The migration removes the rc.1
 request-hash uniqueness rule so a permanently rejected user cancellation can be followed by a
 new stable command sequence, while retaining duplicate coalescing for active commands.
 
+`008_start_window_and_schedule_retry.sql` persists the remaining start contract: the time a
+safe-stop compensation was requested, the unique invocation attempt, and the next bounded
+start-attempt time. It adds partial indexes for immediate watchdog scans, scheduled retries and
+expired `STARTING` claims. Existing rc.1 rows retain their confirmed `actual_started_at` value;
+scheduled rows start at attempt zero and receive attempt one only when a worker atomically
+claims an actual Adapter call.
+
+`009_observation_revision_and_outbox_keys.sql` separates the Runtime-owned monotonic
+`observation_revision` from the Adapter Snapshot revision. It expands observations with
+message, substate, progress, source and optional Adapter revision, and gives every outbox row a
+globally unique stable event key. The rc.1 backfill preserves the highest recorded observation
+revision, identifies the Runtime-created scheduled/window/control observations, and treats the
+remaining historical Snapshot observations as Adapter-sourced. New lifecycle changes allocate
+the next observation revision, update the current Task, append the complete observation and
+insert the idempotent outbox event in one transaction.
+
+`010_adapter_execution_identity.sql` enforces provider-scoped uniqueness for every non-null
+external execution id. Start and recovery already bind a Task and execution in one publication
+transaction; the unique partial index makes a second Task binding fail atomically even if an
+Adapter violates its identity contract.
+
+`011_task_handle_retention.sql` turns `ttl_ms` into an executable Task-handle lifecycle. It adds
+the renewable handle expiry, terminal time, logical expiry, purge boundary and last Adapter
+confirmation time. Existing active finite-TTL Tasks receive a fresh protected window during
+upgrade; existing terminal Tasks retain their result for their stored TTL or the 24-hour default.
+Partial indexes support batched `FOR UPDATE SKIP LOCKED` expiry and purge across Runtime replicas.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

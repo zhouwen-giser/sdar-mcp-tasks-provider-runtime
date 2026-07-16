@@ -75,6 +75,7 @@ export interface StartOperationOptions {
   executionMode?: "live" | "simulation" | "historical-replay";
   simulationId?: string | null;
   argumentHash?: string;
+  externalExecutionId?: string | null;
   invocationAttempt?: number;
   timing?: Record<string, unknown>;
   correlationId?: string;
@@ -157,6 +158,7 @@ export class GrpcAdapterGateway {
       operationName,
       argumentHash,
       executionContext: this.#executionContext(options),
+      externalExecutionId: options.externalExecutionId ?? "",
     });
   }
 
@@ -164,7 +166,7 @@ export class GrpcAdapterGateway {
     taskId: string,
     operationName: string,
     argumentHash: string,
-    reason: "USER_REQUESTED" | "DEADLINE_REACHED",
+    reason: "USER_REQUESTED" | "DEADLINE_REACHED" | "START_WINDOW_MISSED",
     commandSequence: number,
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
@@ -172,6 +174,7 @@ export class GrpcAdapterGateway {
       metadata: this.#metadata(options.correlationId),
       identity: {
         taskId,
+        externalExecutionId: options.externalExecutionId ?? "",
         operationName,
         argumentHash,
         executionContext: this.#executionContext(options),
@@ -195,6 +198,7 @@ export class GrpcAdapterGateway {
       metadata: this.#metadata(options.correlationId),
       identity: {
         ...identity,
+        externalExecutionId: options.externalExecutionId ?? "",
         executionContext: this.#executionContext(options),
       },
       inputs: inputs.map((input) => ({
@@ -216,7 +220,11 @@ export class GrpcAdapterGateway {
   ): Promise<CommandAck> {
     return this.#unary<CommandAck>("pauseExecution", {
       metadata: this.#metadata(options.correlationId),
-      identity: { ...identity, executionContext: this.#executionContext(options) },
+      identity: {
+        ...identity,
+        externalExecutionId: options.externalExecutionId ?? "",
+        executionContext: this.#executionContext(options),
+      },
       reasonCode: "CLIENT_REQUESTED",
     });
   }
@@ -232,7 +240,11 @@ export class GrpcAdapterGateway {
   ): Promise<CommandAck> {
     return this.#unary<CommandAck>("resumeExecution", {
       metadata: this.#metadata(options.correlationId),
-      identity: { ...identity, executionContext: this.#executionContext(options) },
+      identity: {
+        ...identity,
+        externalExecutionId: options.externalExecutionId ?? "",
+        executionContext: this.#executionContext(options),
+      },
       reasonCode: "CLIENT_REQUESTED",
     });
   }
