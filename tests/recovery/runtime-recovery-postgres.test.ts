@@ -85,7 +85,7 @@ describe("Runtime startup and fault recovery", () => {
     const recovered = await pool.query<{ task_id: string; recovery_attempts: number }>(
       `SELECT provider_task.task_id, recovery_attempts FROM provider_task
        JOIN admission_intent USING (task_id)
-       WHERE arguments->>'resourceId'='startup-response-loss'`,
+       WHERE provider_task.arguments->>'resourceId'='startup-response-loss'`,
     );
     expect(recovered.rows[0]?.recovery_attempts).toBeGreaterThanOrEqual(1);
     expect(await engine.getTask(String(recovered.rows[0]?.task_id), authorization)).toMatchObject({
