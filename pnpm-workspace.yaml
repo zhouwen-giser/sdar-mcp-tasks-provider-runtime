@@ -3,6 +3,9 @@ packages:
   - packages/*
   - examples/*
 
+overrides:
+  handlebars: 4.7.9
+
 allowBuilds:
   esbuild: true
   grpc-tools: true

@@ -14,7 +14,6 @@ pnpm install --frozen-lockfile
 pnpm build
 pnpm test:unit
 pnpm test:contract
-pnpm test:integration
 docker compose up --build --wait
 curl --fail http://127.0.0.1:8080/health/ready
 ```
@@ -25,8 +24,29 @@ The default stack exposes Runtime HTTP on `:8080`, PostgreSQL on `:5432`, and an
 docker compose --profile python-adapter build adapter-python
 ```
 
-Runtime startup runs durable scheduling and recovery before readiness. Authentication, execution-mode isolation, mutual TLS, limits, recovery behavior, and Prometheus metrics are documented in [`docs/operations/security-recovery.md`](docs/operations/security-recovery.md).
+Runtime startup applies migrations and runs durable scheduling/recovery before
+readiness. The reference Adapter state and PostgreSQL data use named volumes.
+For a release gate with PostgreSQL and Docker available, run:
+
+```bash
+TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify
+```
+
+Configuration and security are documented in
+[`configuration.md`](docs/operations/configuration.md) and
+[`security-recovery.md`](docs/operations/security-recovery.md); deployment and
+incident procedures are in the [`runbook`](docs/operations/runbook.md).
 
 Adapter authors can run the dual-language P0-P4 workflow described in [`docs/conformance/adapter-testkit.md`](docs/conformance/adapter-testkit.md); its JSON reports use a published repository schema.
 
-Root commands for all release gates are discoverable in `package.json`; `pnpm verify` becomes the complete RC gate as R8-R9 add their assigned suites.
+Adapter authors should begin with the
+[`quick start`](docs/adapter/quick-start.md) and dual-language P0-P4 workflow in
+[`adapter-testkit.md`](docs/conformance/adapter-testkit.md). API/RPC and state
+semantics are summarized in [`api-reference.md`](docs/protocol/api-reference.md)
+and [`state-reason-mapping.md`](docs/implementation/state-reason-mapping.md).
+
+Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
+with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).
+Root commands in `package.json` expose every release gate; `pnpm verify` includes
+formatting, lint, types, build/Proto drift, audit/SBOM, deployment/container,
+unit/contract/integration/recovery/security/E2E/conformance and capacity checks.

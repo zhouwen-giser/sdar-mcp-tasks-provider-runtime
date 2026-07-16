@@ -27,6 +27,8 @@ COPY --from=build /workspace/node_modules /app/node_modules
 COPY --from=build /workspace/dist /app/dist
 COPY --from=build /workspace/proto /app/proto
 COPY --from=build /workspace/migrations /app/migrations
+RUN mkdir -p /var/lib/sdar && chown node:node /var/lib/sdar
+USER node
 CMD ["node", "dist/apps/runtime/src/main.js"]
 
 FROM runtime AS adapter-ts

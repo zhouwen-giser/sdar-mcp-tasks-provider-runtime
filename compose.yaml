@@ -22,8 +22,11 @@ services:
     environment:
       PROVIDER_ID: mock-provider
       ADAPTER_PORT: 7001
+      ADAPTER_STATE_PATH: /var/lib/sdar/adapter-state.json
     expose:
       - "7001"
+    volumes:
+      - adapter-typescript-state:/var/lib/sdar
 
   runtime:
     build:
@@ -67,3 +70,4 @@ services:
 
 volumes:
   runtime-postgres:
+  adapter-typescript-state:

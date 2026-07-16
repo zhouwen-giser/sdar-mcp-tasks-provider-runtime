@@ -39,7 +39,7 @@ implementation.
 | R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | completed (`3b896ca`, fix `e619a1d`, CI green) |
 | R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | completed (`bb5e941`, fix `e5736f7`, CI green) |
 | R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | completed (`9d603a6`, fixes through `380487c`) |
-| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | in progress                                    |
+| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | implementation complete; exit CI pending       |
 
 ## Phase execution details
 
@@ -215,6 +215,9 @@ contains the authoritative phase SHA table.
   Docker, PostgreSQL and Python gates unavailable on the local host; the exact
   R8 JSON artifacts were downloaded through the authenticated GitHub connector
   and committed with formatting-only normalization.
+- 2026-07-16: Kubernetes delivery uses dependency-free JSON manifests so the
+  repository can validate required production fields without a global Helm or
+  kubectl installation; cluster-side dry-run remains an operator rollout step.
 
 ## Current next action
 

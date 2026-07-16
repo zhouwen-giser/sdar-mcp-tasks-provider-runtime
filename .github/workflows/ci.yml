@@ -11,7 +11,7 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17-alpine
@@ -43,11 +43,7 @@ jobs:
         with:
           version: 1.57.2
       - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm build
-      - run: pnpm proto:check
+      - run: pnpm verify
       - run: buf lint proto
       - name: Check Protobuf compatibility
         run: |
@@ -56,17 +52,19 @@ jobs:
           else
             echo "No Protobuf baseline on origin/main; lint/generation are the R1 baseline."
           fi
-      - run: pnpm test:unit
-      - run: pnpm test:contract
-      - run: pnpm test:integration
-      - run: pnpm test:recovery
-      - run: pnpm test:security
-      - run: pnpm test:conformance
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: conformance-reports
           path: reports/conformance/*.json
+          if-no-files-found: warn
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence
+          path: |
+            reports/capacity/*.json
+            reports/sbom/*.json
           if-no-files-found: warn
 
   compose-smoke:

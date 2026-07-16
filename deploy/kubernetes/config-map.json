@@ -1,0 +1,30 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "sdar-runtime-config",
+    "namespace": "sdar-system"
+  },
+  "data": {
+    "HOST": "0.0.0.0",
+    "PORT": "8080",
+    "LOG_LEVEL": "info",
+    "PROVIDER_ID": "replace-provider-id",
+    "ADAPTER_ENDPOINT": "replace-adapter-service:7001",
+    "ADAPTER_TLS_MODE": "required",
+    "ADAPTER_TLS_CA_PATH": "/var/run/secrets/sdar-adapter/ca.pem",
+    "ADAPTER_TLS_CERT_PATH": "/var/run/secrets/sdar-adapter/tls.crt",
+    "ADAPTER_TLS_KEY_PATH": "/var/run/secrets/sdar-adapter/tls.key",
+    "AUTH_MODE": "jwt_hs256",
+    "JWT_ISSUER": "replace-issuer",
+    "JWT_AUDIENCE": "sdar-runtime",
+    "HTTP_BODY_LIMIT_BYTES": "1048576",
+    "ARGUMENT_MAX_BYTES": "1048576",
+    "ARGUMENT_MAX_DEPTH": "32",
+    "ARGUMENT_MAX_NODES": "10000",
+    "RATE_LIMIT_MAX": "300",
+    "RATE_LIMIT_WINDOW_MS": "60000",
+    "SCHEDULER_POLL_MS": "1000",
+    "RECOVERY_POLL_MS": "5000"
+  }
+}

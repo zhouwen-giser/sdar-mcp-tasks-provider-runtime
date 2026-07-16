@@ -27,4 +27,6 @@ Python bindings are generated inside the Python Adapter image from the same IDL.
 
 ## Development transport
 
-The R1 Compose example explicitly sets Adapter TLS to `disabled` for local-only networking. Production mTLS material and enforcement are R7 scope; a production configuration must not silently fall back to plaintext.
+The Compose example explicitly sets Adapter TLS to `disabled` for local-only
+networking. Production sets `required` with CA/client certificate/private-key
+files; startup validation never silently falls back to plaintext.
