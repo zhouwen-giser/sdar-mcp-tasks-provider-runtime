@@ -1,0 +1,28 @@
+# Adapter Protocol v1
+
+The normative IDL is `proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto`. JavaScript and TypeScript bindings are regenerated with `pnpm proto:generate`; `pnpm proto:check` fails when committed bindings drift.
+
+## RPC surface
+
+Mandatory RPCs are DescribeProvider, CheckAvailability, StartOperation, GetExecution, RequestCancel, and ReconcileExecution. UpdateExecution, PauseExecution, and ResumeExecution are conditional on operation capabilities. StreamExecutionEvents and ListResources are optional; neither events nor inventory replaces GetExecution/Reconcile as the recovery authority.
+
+Every request carries protocol/provider/correlation metadata. Side-effect calls carry a stable task id, operation name, argument hash, authorization context hash, execution mode, and attempt or command sequence. StartOperation is idempotent by task id; an identity mismatch is a conflict. RequestCancel is acknowledgement-only.
+
+## Execution publication
+
+All operation kinds use StartOperation:
+
+- `SYNCHRONOUS` requires an accepted terminal initial Snapshot; Runtime returns an ordinary Tool result and never creates an MCP Task.
+- `TASK_CAPABLE` returns an ordinary result for a terminal initial Snapshot and creates a Task for a nonterminal Snapshot.
+- `TASK_REQUIRED` always creates a persisted Task after acceptance, even if the initial Snapshot is terminal.
+- A scheduled accepted call always creates a Task. Runtime invokes StartOperation no earlier than `scheduledAt`.
+
+## Generation
+
+The repository pins `grpc-tools` and the TypeScript protoc plugin. pnpm's dependency-build allowlist contains only the reviewed packages that require installation scripts. Global `protoc` is not required.
+
+Python bindings are generated inside the Python Adapter image from the same IDL. `pnpm adapter:python:smoke` can perform a local cross-language DescribeProvider smoke when the host Python has pip; the container path remains the reproducible default.
+
+## Development transport
+
+The R1 Compose example explicitly sets Adapter TLS to `disabled` for local-only networking. Production mTLS material and enforcement are R7 scope; a production configuration must not silently fall back to plaintext.

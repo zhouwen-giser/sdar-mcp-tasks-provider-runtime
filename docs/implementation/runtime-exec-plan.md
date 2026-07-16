@@ -28,18 +28,18 @@ implementation.
 
 ## Progress
 
-| Phase | Scope | Exit evidence | Status |
-|---|---|---|---|
-| R0 | Repository assessment, baseline, architecture decisions, traceability | Baseline recorded; every requirement mapped | completed |
-| R1 | Workspace, Runtime health/config, Proto, TS/Python Adapter foundations, Compose | gRPC DescribeProvider and healthy Compose | pending |
-| R2 | Manifest registry, snapshots, dynamic tools, MCP Streamable HTTP, synchronous call | MCP client lists/calls sync tool; snapshot stable | pending |
-| R3 | Migrations, task repository/state engine, admission, `tasks/get` | async lifecycle and restart query | pending |
-| R4 | Availability, full idempotency, admission recovery/concurrency | one external execution per duplicate/concurrent call | pending |
-| R5 | DB scheduler, timing contract, start windows, deadlines | clock/time matrix and restart claims pass | pending |
-| R6 | update/input, cancel/stop, observations/outbox, pause/resume gateway | no premature cancellation; stable revisions/inputs | pending |
-| R7 | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry | fault/security suites and readiness pass | pending |
-| R8 | P0-P4 conformance CLI, complete TS/Python Adapters | machine-readable dual-language results | pending |
-| R9 | production images/deployments/docs/audit/capacity/release | `pnpm verify`, final report, ready PR, RC tag | pending |
+| Phase | Scope                                                                              | Exit evidence                                        | Status                                       |
+| ----- | ---------------------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------- |
+| R0    | Repository assessment, baseline, architecture decisions, traceability              | Baseline recorded; every requirement mapped          | completed                                    |
+| R1    | Workspace, Runtime health/config, Proto, TS/Python Adapter foundations, Compose    | gRPC DescribeProvider and healthy Compose            | implementation complete; remote gate pending |
+| R2    | Manifest registry, snapshots, dynamic tools, MCP Streamable HTTP, synchronous call | MCP client lists/calls sync tool; snapshot stable    | pending                                      |
+| R3    | Migrations, task repository/state engine, admission, `tasks/get`                   | async lifecycle and restart query                    | pending                                      |
+| R4    | Availability, full idempotency, admission recovery/concurrency                     | one external execution per duplicate/concurrent call | pending                                      |
+| R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | pending                                      |
+| R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | pending                                      |
+| R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | pending                                      |
+| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | pending                                      |
+| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | pending                                      |
 
 ## Phase execution details
 
@@ -165,9 +165,12 @@ contains the authoritative phase SHA table.
   `protoc`; Buf remains a compatibility/release gate.
 - 2026-07-16: all Adapter executions use StartOperation; Runtime publication
   behavior is selected by immutable operation execution metadata.
+- 2026-07-16: pnpm 11 dependency scripts use an explicit three-package
+  `allowBuilds` map; broad install-script execution remains disabled.
+- 2026-07-16: local Docker socket access is unavailable to the current user.
+  R1 uses the committed GitHub Actions Compose smoke as its Docker health gate.
 
 ## Current next action
 
-Complete R0 reports, run document/integrity checks, commit
-`docs(runtime): freeze provider runtime implementation baseline`, push, record
-its SHA, then immediately begin R1.
+Run the complete R1 gate, commit and push the foundation, verify the remote
+Compose job, record the R1 SHA/result, and then begin R2.

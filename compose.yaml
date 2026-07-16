@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sdar
+      POSTGRES_PASSWORD: sdar
+      POSTGRES_DB: sdar_runtime
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sdar -d sdar_runtime"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - runtime-postgres:/var/lib/postgresql/data
+
+  adapter-typescript:
+    build:
+      context: .
+      target: adapter-ts
+    environment:
+      PROVIDER_ID: mock-provider
+      ADAPTER_PORT: 7001
+    expose:
+      - "7001"
+
+  runtime:
+    build:
+      context: .
+      target: runtime
+    environment:
+      PROVIDER_ID: mock-provider
+      DATABASE_URL: postgresql://sdar:sdar@postgres:5432/sdar_runtime
+      ADAPTER_ENDPOINT: adapter-typescript:7001
+      ADAPTER_TLS_MODE: disabled
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      adapter-typescript:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)})",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  adapter-python:
+    profiles: ["python-adapter"]
+    build:
+      context: .
+      dockerfile: examples/mock-adapter-python/Dockerfile
+    environment:
+      PROVIDER_ID: mock-provider-python
+      ADAPTER_PORT: 7001
+    ports:
+      - "7002:7001"
+
+volumes:
+  runtime-postgres:

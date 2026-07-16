@@ -18,18 +18,18 @@ priority declared in that package.
 
 ## Repository and toolchain inventory
 
-| Area | Baseline finding | R0 decision |
-|---|---|---|
-| Runtime language | None | Node.js 22, TypeScript strict, ESM |
-| Package manager | None | pnpm workspace, lockfile committed |
-| MCP server | None | Official TypeScript MCP SDK behind `packages/mcp-protocol` |
-| Adapter transport | Design only | gRPC/Protobuf v1; generated TS stubs and Python example |
-| Persistence | None | PostgreSQL and explicit SQL repositories/migrations |
-| Scheduler | None | PostgreSQL claims/leases; injectable clock; no in-memory authority |
-| Tests | None | Vitest plus real PostgreSQL/gRPC/HTTP suites |
-| CI | None | GitHub Actions running formatting, lint, typecheck, build and test gates |
-| Containers | None | Multi-stage Dockerfile and Compose development/E2E stack |
-| Observability | None | Pino, Prometheus exposition, OpenTelemetry API integration |
+| Area              | Baseline finding | R0 decision                                                              |
+| ----------------- | ---------------- | ------------------------------------------------------------------------ |
+| Runtime language  | None             | Node.js 22, TypeScript strict, ESM                                       |
+| Package manager   | None             | pnpm workspace, lockfile committed                                       |
+| MCP server        | None             | Official TypeScript MCP SDK behind `packages/mcp-protocol`               |
+| Adapter transport | Design only      | gRPC/Protobuf v1; generated TS stubs and Python example                  |
+| Persistence       | None             | PostgreSQL and explicit SQL repositories/migrations                      |
+| Scheduler         | None             | PostgreSQL claims/leases; injectable clock; no in-memory authority       |
+| Tests             | None             | Vitest plus real PostgreSQL/gRPC/HTTP suites                             |
+| CI                | None             | GitHub Actions running formatting, lint, typecheck, build and test gates |
+| Containers        | None             | Multi-stage Dockerfile and Compose development/E2E stack                 |
+| Observability     | None             | Pino, Prometheus exposition, OpenTelemetry API integration               |
 
 Observed local tools:
 
@@ -46,12 +46,12 @@ Observed local tools:
 
 Executed from the repository root on 2026-07-16:
 
-| Command | Result |
-|---|---|
-| `git fetch origin --tags --prune` | PASS; `origin/main` at `7e501d0` |
-| `git status --short --branch` | PASS; user task-package files present and preserved |
-| `pnpm test` | FAIL (expected baseline): `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND` |
-| `pnpm build` | FAIL (expected baseline): `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND` |
+| Command                           | Result                                                          |
+| --------------------------------- | --------------------------------------------------------------- |
+| `git fetch origin --tags --prune` | PASS; `origin/main` at `7e501d0`                                |
+| `git status --short --branch`     | PASS; user task-package files present and preserved             |
+| `pnpm test`                       | FAIL (expected baseline): `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND` |
+| `pnpm build`                      | FAIL (expected baseline): `ERR_PNPM_NO_IMPORTER_MANIFEST_FOUND` |
 
 There was no narrower baseline test or build command to run. R1 must replace
 this empty baseline with discoverable, passing workspace commands.

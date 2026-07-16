@@ -1,0 +1,57 @@
+{
+  "name": "sdar-mcp-tasks-provider-runtime",
+  "version": "1.0.0-rc.1",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.13.1",
+  "engines": {
+    "node": ">=22 <23",
+    "pnpm": ">=11 <12"
+  },
+  "scripts": {
+    "clean": "rm -rf dist coverage packages/adapter-protocol/generated",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "pnpm proto:generate && tsc -p tsconfig.build.json",
+    "proto:generate": "node scripts/generate-proto.mjs",
+    "proto:check": "pnpm proto:generate && git diff --exit-code -- packages/adapter-protocol/generated",
+    "adapter:python:smoke": "pnpm build && node scripts/python-adapter-smoke.mjs",
+    "test:unit": "vitest run tests/unit",
+    "test:contract": "vitest run tests/contract",
+    "test:integration": "vitest run tests/integration",
+    "test:recovery": "vitest run tests/recovery",
+    "test:security": "vitest run tests/security",
+    "test:e2e": "vitest run tests/e2e",
+    "test:conformance": "vitest run tests/conformance",
+    "test": "pnpm test:unit && pnpm test:contract",
+    "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm build && pnpm proto:check && pnpm test:unit && pnpm test:contract && pnpm test:integration && pnpm test:recovery && pnpm test:security && pnpm test:e2e && pnpm test:conformance",
+    "dev:runtime": "tsx apps/runtime/src/main.ts",
+    "dev:adapter:ts": "tsx examples/mock-adapter-typescript/src/main.ts"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "1.14.4",
+    "@grpc/proto-loader": "0.8.1",
+    "fastify": "5.10.0",
+    "google-proto-files": "5.0.2",
+    "pg": "8.22.0",
+    "pino": "10.3.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "22.20.1",
+    "@types/pg": "8.20.0",
+    "@typescript-eslint/eslint-plugin": "8.64.0",
+    "@typescript-eslint/parser": "8.64.0",
+    "eslint": "10.0.1",
+    "grpc-tools": "1.13.1",
+    "grpc_tools_node_protoc_ts": "5.3.3",
+    "prettier": "3.9.5",
+    "tsx": "4.23.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.64.0",
+    "vitest": "4.1.10"
+  }
+}

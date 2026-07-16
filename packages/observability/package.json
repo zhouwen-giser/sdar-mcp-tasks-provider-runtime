@@ -1,0 +1,6 @@
+{
+  "name": "@sdar/observability",
+  "version": "1.0.0-rc.1",
+  "private": true,
+  "type": "module"
+}

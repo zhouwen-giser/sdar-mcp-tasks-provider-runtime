@@ -1,0 +1,9 @@
+packages:
+  - apps/*
+  - packages/*
+  - examples/*
+
+allowBuilds:
+  esbuild: true
+  grpc-tools: true
+  protobufjs: true

@@ -1,0 +1,58 @@
+name: runtime-ci
+
+on:
+  push:
+    branches: [main, feature/mcp-tasks-provider-runtime-v1]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.57.2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm build
+      - run: pnpm proto:check
+      - run: buf lint proto
+      - name: Check Protobuf compatibility
+        run: |
+          if git cat-file -e origin/main:proto/buf.yaml 2>/dev/null; then
+            buf breaking proto --against '.git#branch=origin/main,subdir=proto'
+          else
+            echo "No Protobuf baseline on origin/main; lint/generation are the R1 baseline."
+          fi
+      - run: pnpm test:unit
+      - run: pnpm test:contract
+      - run: pnpm test:integration
+
+  compose-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config -q
+      - run: docker compose build runtime adapter-typescript
+      - run: docker compose --profile python-adapter build adapter-python
+      - run: docker compose up --detach --wait --wait-timeout 120
+      - run: curl --fail --silent --show-error http://127.0.0.1:8080/health/ready
+      - if: always()
+        run: docker compose down --volumes
