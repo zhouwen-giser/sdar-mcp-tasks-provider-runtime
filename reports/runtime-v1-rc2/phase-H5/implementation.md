@@ -80,8 +80,11 @@ See `test-results.md` for exact evidence. No test is skipped.
 
 ## 8. Commit and CI
 
-- Implementation commit: pending.
-- Branch and PR checks: pending after normal push.
+- Implementation commit: `6360af89f7ceb482fc7fc511f32b2fc3f06f1d0e`.
+- Push runtime `29520205271`: SUCCESS (`pnpm verify`, Buf lint/breaking, Compose).
+- PR runtime `29520212409`: SUCCESS (`pnpm verify`, Buf lint/breaking, Compose).
+- PR quality `29520211902`: SUCCESS.
+- PR Compose `29520211382`: SUCCESS.
 - Report-containing closure Head checks: pending.
 
 ## 9. Exit status
@@ -92,5 +95,5 @@ See `test-results.md` for exact evidence. No test is skipped.
 - [x] Transient Adapter reads return persisted state with degradation metadata.
 - [x] Identity conflicts are not hidden by fallback.
 - [x] T-023..T-028 pass locally without skip.
-- [ ] Implementation Head passes branch and PR checks.
+- [x] Implementation Head passes branch and PR checks.
 - [ ] Report-containing closure Head passes branch and PR checks.
