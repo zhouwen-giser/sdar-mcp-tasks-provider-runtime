@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,12 @@ def json_struct(value: dict[str, Any]) -> Struct:
 def now_timestamp() -> Timestamp:
     value = Timestamp()
     value.GetCurrentTime()
+    return value
+
+
+def future_timestamp(seconds: int) -> Timestamp:
+    value = Timestamp()
+    value.FromDatetime(datetime.now(timezone.utc) + timedelta(seconds=seconds))
     return value
 
 
@@ -89,6 +96,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
     async def CheckAvailability(self, request, context):  # noqa: N802
         del context
         checked_at = now_timestamp()
+        valid_until = future_timestamp(10)
         results = []
         for check in request.checks:
             arguments = MessageToDict(check.arguments) if check.HasField("arguments") else {}
@@ -102,6 +110,11 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 availability = adapter_pb2.DISABLED
                 reason = "RESOURCE_DISABLED"
                 description = "The resource is disabled."
+            elif scenario == "unknown":
+                availability = adapter_pb2.UNKNOWN
+                reason = "RESOURCE_STATE_UNKNOWN"
+                description = "The reference resource state is unknown."
+                risk = adapter_pb2.MEDIUM
             elif scenario == "restricted":
                 availability = adapter_pb2.RESTRICTED
                 reason = "PREEMPTIBLE_TASK_ACTIVE"
@@ -117,8 +130,21 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     reason_code=reason,
                     description=description,
                     possible_effects=effects,
-                    valid_until=checked_at,
-                    earliest_start_time=checked_at,
+                    valid_until=valid_until,
+                    **(
+                        {
+                            "earliest_start_time": valid_until,
+                            "next_available_windows": [
+                                adapter_pb2.AvailableWindow(
+                                    start_time=valid_until,
+                                    end_time=future_timestamp(70),
+                                )
+                            ],
+                            "estimated_delay_ms": 10000,
+                        }
+                        if scenario == "restricted"
+                        else {}
+                    ),
                 )
             )
         return adapter_pb2.CheckAvailabilityResponse(
@@ -139,6 +165,26 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 rejected=adapter_pb2.AdmissionRejected(
                     reason_code="UNSUPPORTED_OPERATION",
                     message="Unknown reference operation.",
+                    retryable=False,
+                )
+            )
+
+        invocation_attempt = request.invocation_attempt or 1
+        if (
+            arguments.get("scenario") == "scheduled_retry_once" and invocation_attempt == 1
+        ) or arguments.get("scenario") == "scheduled_retry_always":
+            return adapter_pb2.StartOperationResponse(
+                rejected=adapter_pb2.AdmissionRejected(
+                    reason_code="START_CAPACITY_RETRY",
+                    message="Reference Adapter requests a bounded scheduled retry.",
+                    retryable=True,
+                )
+            )
+        if arguments.get("scenario") == "scheduled_permanent_reject":
+            return adapter_pb2.StartOperationResponse(
+                rejected=adapter_pb2.AdmissionRejected(
+                    reason_code="START_NOT_PERMITTED",
+                    message="Reference Adapter permanently rejected scheduled admission.",
                     retryable=False,
                 )
             )
@@ -294,6 +340,27 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         existing = execution["command_acks"].get(key)
         if existing is not None:
             return adapter_pb2.CommandAck(**existing)
+        execution["cancel_attempts"] = execution.get("cancel_attempts", 0) + 1
+        scenario = execution["arguments"].get("scenario")
+        if scenario == "cancel_permanent_reject":
+            self.store.set(request.identity.task_id, execution)
+            return self._ack(
+                False,
+                "CANCEL_NOT_PERMITTED",
+                "Reference execution rejected user cancellation.",
+                request,
+            )
+        if scenario == "cancel_retryable_reject" and execution["cancel_attempts"] == 1:
+            self.store.set(request.identity.task_id, execution)
+            return self._ack(
+                False,
+                "TRANSIENT_UNAVAILABLE",
+                "Reference execution requests a retry.",
+                request,
+            )
+        if scenario == "cancel_transport_failure":
+            self.store.set(request.identity.task_id, execution)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "injected cancel transport failure")
         if execution["arguments"].get("scenario") == "natural_completion":
             execution["snapshot"] = execution["terminal_snapshot"]
         else:
@@ -310,6 +377,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             )
             execution["terminal_snapshot"] = execution["snapshot"]
         ack = self._ack_dict(True, "STOP_ACCEPTED", "Safe stop accepted.", request)
+        if scenario == "command_sequence_mismatch":
+            ack["command_sequence"] = int(request.identity.command_sequence) + 1
         execution["command_acks"][key] = ack
         self.store.set(request.identity.task_id, execution)
         if execution["arguments"].get("scenario") == "cancel_response_loss":

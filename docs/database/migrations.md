@@ -1,6 +1,11 @@
 # Database Migrations
 
-Migrations are append-only SQL files under `migrations/`, ordered by numeric prefix. Runtime acquires a PostgreSQL advisory lock, creates `runtime_schema_migration`, verifies the SHA-256 checksum of every applied file, and applies each new file in its own transaction.
+Migrations are append-only SQL files under `migrations/`, ordered by numeric prefix. Runtime
+acquires a PostgreSQL advisory lock, creates `runtime_schema_migration`, verifies the SHA-256
+checksum of every applied file, and applies each new file in its own transaction. Checksums use
+LF-normalized SQL so Linux and Windows checkouts share one published value; the verifier accepts
+the raw checkout hash only when matching a legacy Windows record, and still rejects any content
+change. T-047 pins the published 001-006 normalized hashes from rc.1.
 
 `001_operation_snapshot.sql` creates immutable operation snapshots keyed by provider/version/operation/Manifest hash, with UUID primary key, JSON object checks, hash/name checks and lookup index. Reloading the same Manifest is idempotent; a changed Manifest produces a new snapshot instead of rewriting history.
 
@@ -13,7 +18,12 @@ Migrations are append-only SQL files under `migrations/`, ordered by numeric pre
 
 The Runtime never returns a task identifier before `provider_task`, its initial observation, the creation outbox event, and the admission publication state commit together. Failed publication leaves only an `UNCERTAIN` admission intent for reconcile; it cannot leak a queryable half-created Task.
 
-`003_idempotency.sql` evolves the reserved idempotency table without rewriting earlier migrations. It adds pending/complete state, a stable pre-admission taskId, simulation identity, update time, a pending-recovery index, and a payload consistency constraint. The repository holds a PostgreSQL advisory lock scoped to authorization, operation, key, execution mode, and simulation while it performs final admission. Competing Runtime instances therefore observe one stored result/taskId and cannot create duplicate Adapter side effects. A process crash releases the database session lock while retaining the pending stable taskId for Reconcile.
+`003_idempotency.sql` evolves the reserved idempotency table without rewriting earlier migrations.
+It adds pending/complete state, a stable pre-admission taskId, simulation identity, update time, a
+pending-recovery index, and a payload consistency constraint. In rc.1 the repository held a
+PostgreSQL session advisory lock over final admission. Migration 012 and the H7 repository
+replace that connection-held execution window with a durable claim lease while retaining the
+stable taskId for Reconcile.
 
 `004_durable_timing.sql` permits a scheduled Task to exist before it has an external execution binding, adds durable not-before and scheduler claim fields, permits revision zero for the Runtime-created scheduling observation, and adds partial due/deadline indexes. Claims are database rows selected with `FOR UPDATE SKIP LOCKED`; an expired `STARTING` claim is eligible for another Runtime, so restart does not depend on an in-process timer.
 
@@ -62,4 +72,9 @@ already-due migration recovery lease; COMPLETE rows retain their payload and no 
 partial index orders takeover work by lease expiry. Runtime claims in a short transaction,
 performs Adapter work without a checked-out PoolClient, and completes with an owner CAS.
 
-Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.
+Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate
+Snapshot insertion, task lifecycle constraints, crash windows, applied-migration tamper
+detection, and a complete 001-006 rc.1 fixture containing pending/uncertain admissions,
+working/queued/input/stopping/scheduled/terminal Tasks, a pending command, observation/outbox and
+idempotency data. After 007-012 it proves data/backfills and executes Recovery, Dispatcher and
+Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter.

@@ -37,13 +37,14 @@ Configuration and security are documented in
 [`security-recovery.md`](docs/operations/security-recovery.md); deployment and
 incident procedures are in the [`runbook`](docs/operations/runbook.md).
 
-Adapter authors can run the dual-language P0-P4 workflow described in [`docs/conformance/adapter-testkit.md`](docs/conformance/adapter-testkit.md); its JSON reports use a published repository schema.
-
 Adapter authors should begin with the
-[`quick start`](docs/adapter/quick-start.md) and dual-language P0-P4 workflow in
+[`quick start`](docs/adapter/quick-start.md) and dual-language expanded Adapter
+protocol workflow in
 [`adapter-testkit.md`](docs/conformance/adapter-testkit.md). API/RPC and state
 semantics are summarized in [`api-reference.md`](docs/protocol/api-reference.md)
 and [`state-reason-mapping.md`](docs/implementation/state-reason-mapping.md).
+The machine reports mark Runtime Profile coverage `partial` and real-resource
+safety `not_claimed`; a Mock Adapter result is not production qualification.
 
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).

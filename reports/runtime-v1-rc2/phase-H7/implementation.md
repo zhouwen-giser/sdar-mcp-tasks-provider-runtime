@@ -50,7 +50,8 @@ clients pass with no session identity.
 
 - [x] T-041..T-046 pass locally without skip.
 - [x] Actual rc.1 data forward-upgrade test passes.
-- [x] TypeScript and Python P0-P4 conformance pass.
+- [x] The then-current 10-case grouped TypeScript/Python baseline passed; H8 owns its expansion
+      and claim correction.
 - [x] Implementation and repair Heads pass push and PR checks.
 - [x] Production image is frozen, production-only, non-root, reproducible and size-guarded.
 - [ ] Report-containing closure Head checks are pending this report commit.

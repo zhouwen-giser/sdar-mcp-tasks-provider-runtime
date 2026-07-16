@@ -150,7 +150,8 @@ The tag is never moved.
   bounded rate state, explicit SDK stateless transport and a pruned/frozen production image
   implement T-041..T-046. Local evidence passed: unit 27, contract 4, guards 6, integration 57
   (including an actual 001-011 rc.1 data upgrade), recovery 8, security 6, E2E 4, dual-language
-  P0-P4 conformance, capacity, SBOM/deployment and the reproducible image audit. GitHub Linux
+  then-current 10-case grouped conformance baseline, capacity, SBOM/deployment and the
+  reproducible image audit. GitHub Linux
   measured 327,026,557 bytes (350 MB ceiling); Docker Desktop reports 97,150,847 bytes for the
   same filesystem/config shape because its containerd size semantics differ.
   Remote Linux CI remains required before closure; the local Windows grpc-tools binary cannot
@@ -159,3 +160,8 @@ The tag is never moved.
   `29541564999`, PR runtime `29541566647`, PR Compose `29541566656` and PR quality
   `29541566648`. Both runtime runs executed complete `pnpm verify`; H7 is closed and H8 starts
   from the report-containing Head after its checks complete.
+- 2026-07-17 H8 implementation: T-047 now starts from published rc.1 migrations 001-006 with
+  admission/task/schedule/terminal/command/observation/outbox/idempotency fixtures, then proves
+  007-012 backfills, idempotence and Recovery -> Dispatcher -> Scheduler continuation. T-048 and
+  T-049 run 17 identical cases per Adapter and schema-guard three scopes: Adapter protocol
+  passed, Runtime Profile partial and resource-specific safety not claimed.

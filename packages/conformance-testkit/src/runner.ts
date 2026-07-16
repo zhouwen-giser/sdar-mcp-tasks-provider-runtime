@@ -26,6 +26,7 @@ export interface ConformanceOptions {
   endpoint: string;
   providerId: string;
   databaseUrl: string;
+  restartBindingVerified: boolean;
 }
 
 export interface ConformanceReport {
@@ -34,7 +35,17 @@ export interface ConformanceReport {
   providerId: string;
   generatedAt: string;
   status: "passed" | "failed";
+  scopes: {
+    runtimeProfile: ScopeReport;
+    adapterProtocol: ScopeReport;
+    resourceSpecificSafety: ScopeReport;
+  };
   groups: GroupReport[];
+}
+
+interface ScopeReport {
+  status: "passed" | "failed" | "partial" | "not_claimed";
+  basis: string;
 }
 
 interface GroupReport {
@@ -83,7 +94,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       new IdempotencyRepository(pool),
     );
 
-    await test(groups, "P0", "manifest and synchronous Tool", async () => {
+    await test(groups, "P0", "P0 protocol/catalog and synchronous Tool", async () => {
       assert(manifest.operations.length === 3, "expected three operation definitions");
       const result = await engine.callOperation(
         operation(engine, "echo_sync"),
@@ -95,7 +106,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       await mcpRoundTrip(engine, gateway);
     });
 
-    await test(groups, "P0", "task_required lifecycle", async () => {
+    await test(groups, "P0", "P0 persisted task_required lifecycle and terminal read", async () => {
       const created = await engine.callOperation(
         operation(engine, "durable_task"),
         { resourceId: `${options.language}-p0` },
@@ -106,7 +117,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       assert(completed.status === "completed", "Task did not complete");
     });
 
-    await test(groups, "P1", "availability states and windows", async () => {
+    await test(groups, "P1", "P1 checkAvailability four states, risk and windows", async () => {
       const availability = await engine.checkAvailability(
         [
           { requestId: "available", operationName: "durable_task", arguments: { resourceId: "a" } },
@@ -120,17 +131,27 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
             operationName: "durable_task",
             arguments: { resourceId: "c", scenario: "disabled" },
           },
+          {
+            requestId: "unknown",
+            operationName: "durable_task",
+            arguments: { resourceId: "d", scenario: "unknown" },
+          },
         ],
         authorization,
       );
       assert(
         availability.checks.map((item) => item.availability).join(",") ===
-          "available,restricted,disabled",
+          "available,restricted,disabled,unknown",
         "availability state mismatch",
       );
+      const restricted = availability.checks[1];
+      assert(restricted?.riskLevel === "high", "restricted risk level mismatch");
+      assert(restricted.validUntil !== undefined, "restricted validUntil missing");
+      assert(restricted.earliestStartTime !== undefined, "restricted earliest start missing");
+      assert(restricted.nextAvailableWindows?.length === 1, "restricted window missing");
     });
 
-    await test(groups, "P2", "durable scheduled start", async () => {
+    await test(groups, "P2", "P2 scheduled start is durable and never early", async () => {
       const clock = new FakeClock(new Date("2031-01-01T00:00:00Z"));
       const timedEngine = new TaskEngine(
         manifest,
@@ -162,7 +183,97 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       assert((await scheduler.tick()).started === 1, "scheduled work did not start once");
     });
 
-    await test(groups, "P3", "multi-round input_required", async () => {
+    await test(
+      groups,
+      "P2",
+      "P2 retryable start rejection has a bounded retry identity",
+      async () => {
+        const taskId = randomUUID();
+        const argumentHash = "8".repeat(64);
+        const argumentsValue = {
+          resourceId: `${options.language}-retryable-start`,
+          scenario: "scheduled_retry_once",
+        };
+        const first = await gateway.startOperation("durable_task", argumentsValue, {
+          taskId,
+          argumentHash,
+          invocationAttempt: 1,
+        });
+        assert(first.rejected?.retryable === true, "first start was not retryably rejected");
+        const second = await gateway.startOperation("durable_task", argumentsValue, {
+          taskId,
+          argumentHash,
+          invocationAttempt: 2,
+        });
+        assert(second.accepted !== undefined, "bounded retry was not accepted");
+      },
+    );
+
+    await test(
+      groups,
+      "P3",
+      "P3 restricted arbitration accepts or rejects without ambiguity",
+      async () => {
+        const accepted = await engine.callOperation(
+          operation(engine, "durable_task"),
+          { resourceId: `${options.language}-restricted-accepted`, scenario: "restricted" },
+          authorization,
+        );
+        assert(accepted.kind === "task", "accepted restricted call did not publish a Task");
+        const before = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
+        const rejected = await engine.callOperation(
+          operation(engine, "durable_task"),
+          {
+            resourceId: `${options.language}-restricted-rejected`,
+            scenario: "scheduled_permanent_reject",
+          },
+          authorization,
+        );
+        assert(
+          rejected.kind === "result" &&
+            JSON.stringify(rejected.result).includes("START_NOT_PERMITTED"),
+          "rejected arbitration result was not explicit",
+        );
+        const after = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
+        assert(before.rows[0]?.count === after.rows[0]?.count, "rejected call published a Task");
+      },
+    );
+
+    await test(
+      groups,
+      "P3",
+      "P3 pause/resume acknowledgements preserve a working execution",
+      async () => {
+        const taskId = randomUUID();
+        const argumentHash = "9".repeat(64);
+        const started = await gateway.startOperation(
+          "durable_task",
+          { resourceId: `${options.language}-pause-resume` },
+          { taskId, argumentHash },
+        );
+        const externalExecutionId = started.accepted?.externalExecutionId;
+        assert(externalExecutionId !== undefined, "pause/resume seed was not accepted");
+        const identity = {
+          taskId,
+          operationName: "durable_task",
+          argumentHash,
+          commandSequence: 1,
+        };
+        const paused = await gateway.pauseExecution(identity, { externalExecutionId });
+        assert(paused.accepted, "pause was rejected");
+        assert(
+          (await gateway.getExecution(taskId, externalExecutionId)).state === "PAUSED",
+          "pause did not preserve a working paused state",
+        );
+        const resumed = await gateway.resumeExecution(
+          { ...identity, commandSequence: 2 },
+          { externalExecutionId },
+        );
+        assert(resumed.accepted, "resume was rejected");
+      },
+    );
+
+    await test(groups, "P4", "P4 input_required and multi-round update", async () => {
       const created = await engine.callOperation(
         operation(engine, "durable_task"),
         { resourceId: `${options.language}-input`, scenario: "multi_round_input" },
@@ -180,27 +291,32 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       );
     });
 
-    await test(groups, "P3", "Ack-only cancel and command idempotency", async () => {
-      const created = await engine.callOperation(
-        operation(engine, "durable_task"),
-        { resourceId: `${options.language}-cancel` },
-        authorization,
-      );
-      assert(created.kind === "task", "cancel operation did not return Task");
-      const taskId = String(created.task.taskId);
-      assert(
-        (await engine.cancelTask(taskId, authorization)).status === "working",
-        "cancel was terminal early",
-      );
-      await engine.cancelTask(taskId, authorization);
-      await new DurableCommandDispatcher(gateway, repository).tick();
-      assert(
-        (await engine.getTask(taskId, authorization)).status === "cancelled",
-        "cancel proof missing",
-      );
-    });
+    await test(
+      groups,
+      "P4",
+      "P4 cancel Ack, safe stop proof and duplicate idempotency",
+      async () => {
+        const created = await engine.callOperation(
+          operation(engine, "durable_task"),
+          { resourceId: `${options.language}-cancel` },
+          authorization,
+        );
+        assert(created.kind === "task", "cancel operation did not return Task");
+        const taskId = String(created.task.taskId);
+        assert(
+          (await engine.cancelTask(taskId, authorization)).status === "working",
+          "cancel was terminal early",
+        );
+        await engine.cancelTask(taskId, authorization);
+        await new DurableCommandDispatcher(gateway, repository).tick();
+        assert(
+          (await engine.getTask(taskId, authorization)).status === "cancelled",
+          "cancel proof missing",
+        );
+      },
+    );
 
-    await test(groups, "P3", "idempotency duplicate and conflict", async () => {
+    await test(groups, "P4", "P4 invocation idempotency duplicate and conflict", async () => {
       const key = `conformance-${options.language}`;
       const first = await engine.callOperation(
         operation(engine, "durable_task"),
@@ -230,7 +346,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       );
     });
 
-    await test(groups, "P4", "response-loss Reconcile", async () => {
+    await test(groups, "P4", "P4 response-loss Reconcile without duplicate identity", async () => {
       const key = `response-loss-${options.language}`;
       await expectFailure(
         engine.callOperation(
@@ -252,7 +368,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       assert(recovered.kind === "task", "response loss did not reconcile to Task");
     });
 
-    await test(groups, "P4", "Adapter identity conflict", async () => {
+    await test(groups, "P4", "P4 Adapter task/argument identity conflict", async () => {
       const taskId = randomUUID();
       await gateway.startOperation(
         "durable_task",
@@ -271,46 +387,194 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       assert(reconciled.status === "CONFLICT", "Reconcile did not report identity conflict");
     });
 
-    await test(groups, "P4", "terminal irreversibility and outbox idempotency", async () => {
+    await test(groups, "P4", "P4 Adapter output mismatch becomes a failed Task", async () => {
       const created = await engine.callOperation(
         operation(engine, "durable_task"),
-        { resourceId: `${options.language}-terminal` },
+        { resourceId: `${options.language}-invalid-output`, scenario: "output_invalid" },
         authorization,
       );
-      assert(created.kind === "task", "terminal test Task missing");
-      const taskId = String(created.task.taskId);
-      await engine.getTask(taskId, authorization);
-      const unchanged = await repository.applySnapshot(taskId, 999, {
-        internalState: "RUNNING",
-        mcpStatus: "working",
-        substate: "running",
-        statusMessage: "illegal regression",
-        result: null,
-        error: null,
-        terminal: false,
-        observationType: "task.progress",
-      });
-      assert(unchanged.mcpStatus === "completed", "terminal state regressed");
-      const outbox = new OutboxRepository(pool);
-      const event = (await outbox.pending(1))[0];
-      assert(event !== undefined, "outbox event missing");
-      assert((await outbox.markPublished([event.eventId])) === 1, "first delivery did not publish");
-      assert(
-        (await outbox.markPublished([event.eventId])) === 0,
-        "duplicate delivery was not idempotent",
-      );
+      assert(created.kind === "task", "output mismatch did not return its durable Task");
+      const failed = await engine.getTask(String(created.task.taskId), authorization);
+      assert(failed.status === "failed", "invalid Adapter output was published as success");
     });
+
+    await test(groups, "P4", "P4 command sequence mismatch is observable", async () => {
+      const taskId = randomUUID();
+      const argumentHash = "6".repeat(64);
+      const started = await gateway.startOperation(
+        "durable_task",
+        {
+          resourceId: `${options.language}-command-sequence`,
+          scenario: "command_sequence_mismatch",
+        },
+        { taskId, argumentHash },
+      );
+      const externalExecutionId = started.accepted?.externalExecutionId;
+      assert(externalExecutionId !== undefined, "command sequence seed was not accepted");
+      const ack = await gateway.requestCancel(
+        taskId,
+        "durable_task",
+        argumentHash,
+        "USER_REQUESTED",
+        1,
+        { externalExecutionId },
+      );
+      assert(Number(ack.commandSequence) === 2, "Adapter did not expose sequence mismatch");
+    });
+
+    await test(
+      groups,
+      "P4",
+      "P4 safe-stop permanent, retryable and transport rejection",
+      async () => {
+        const retryId = randomUUID();
+        const retryHash = "5".repeat(64);
+        const retryStart = await gateway.startOperation(
+          "durable_task",
+          { resourceId: `${options.language}-cancel-retry`, scenario: "cancel_retryable_reject" },
+          { taskId: retryId, argumentHash: retryHash },
+        );
+        const retryExternal = retryStart.accepted?.externalExecutionId;
+        assert(retryExternal !== undefined, "retryable cancel seed missing");
+        const rejected = await gateway.requestCancel(
+          retryId,
+          "durable_task",
+          retryHash,
+          "DEADLINE_REACHED",
+          1,
+          { externalExecutionId: retryExternal },
+        );
+        assert(
+          !rejected.accepted && rejected.reasonCode === "TRANSIENT_UNAVAILABLE",
+          "retryable cancel rejection missing",
+        );
+        const accepted = await gateway.requestCancel(
+          retryId,
+          "durable_task",
+          retryHash,
+          "DEADLINE_REACHED",
+          1,
+          { externalExecutionId: retryExternal },
+        );
+        assert(accepted.accepted, "retryable cancel did not converge to an Ack");
+        assert(
+          (await gateway.getExecution(retryId, retryExternal)).state === "CANCELLED",
+          "safe stop Ack lacked cancelled resource proof",
+        );
+
+        const permanentId = randomUUID();
+        const permanentHash = "4".repeat(64);
+        const permanentStart = await gateway.startOperation(
+          "durable_task",
+          {
+            resourceId: `${options.language}-cancel-permanent`,
+            scenario: "cancel_permanent_reject",
+          },
+          { taskId: permanentId, argumentHash: permanentHash },
+        );
+        const permanentExternal = permanentStart.accepted?.externalExecutionId;
+        assert(permanentExternal !== undefined, "permanent cancel seed missing");
+        const permanentAck = await gateway.requestCancel(
+          permanentId,
+          "durable_task",
+          permanentHash,
+          "DEADLINE_REACHED",
+          1,
+          { externalExecutionId: permanentExternal },
+        );
+        assert(!permanentAck.accepted, "permanent safe-stop rejection was hidden");
+
+        const transportId = randomUUID();
+        const transportHash = "3".repeat(64);
+        const transportStart = await gateway.startOperation(
+          "durable_task",
+          {
+            resourceId: `${options.language}-cancel-transport`,
+            scenario: "cancel_transport_failure",
+          },
+          { taskId: transportId, argumentHash: transportHash },
+        );
+        const transportExternal = transportStart.accepted?.externalExecutionId;
+        assert(transportExternal !== undefined, "transport cancel seed missing");
+        await expectFailure(
+          gateway.requestCancel(transportId, "durable_task", transportHash, "DEADLINE_REACHED", 1, {
+            externalExecutionId: transportExternal,
+          }),
+          "cancel transport failure",
+        );
+      },
+    );
+
+    await test(groups, "P4", "P4 Adapter process restart retains execution binding", async () => {
+      const verified = await Promise.resolve(options.restartBindingVerified);
+      assert(verified, "external restart binding proof was not supplied");
+    });
+
+    await test(
+      groups,
+      "P4",
+      "P4 terminal irreversibility and observation/outbox idempotency",
+      async () => {
+        const created = await engine.callOperation(
+          operation(engine, "durable_task"),
+          { resourceId: `${options.language}-terminal` },
+          authorization,
+        );
+        assert(created.kind === "task", "terminal test Task missing");
+        const taskId = String(created.task.taskId);
+        await engine.getTask(taskId, authorization);
+        const unchanged = await repository.applySnapshot(taskId, 999, {
+          internalState: "RUNNING",
+          mcpStatus: "working",
+          substate: "running",
+          statusMessage: "illegal regression",
+          result: null,
+          error: null,
+          terminal: false,
+          observationType: "task.progress",
+        });
+        assert(unchanged.mcpStatus === "completed", "terminal state regressed");
+        const outbox = new OutboxRepository(pool);
+        const event = (await outbox.pending(1))[0];
+        assert(event !== undefined, "outbox event missing");
+        assert(
+          (await outbox.markPublished([event.eventId])) === 1,
+          "first delivery did not publish",
+        );
+        assert(
+          (await outbox.markPublished([event.eventId])) === 0,
+          "duplicate delivery was not idempotent",
+        );
+      },
+    );
   } finally {
     gateway.close();
     await pool.end();
   }
   const groupReports = [...groups.values()];
+  const passed = groupReports.every((group) => group.status === "passed");
   return {
     profileVersion: "1.0",
     adapterLanguage: options.language,
     providerId: options.providerId,
     generatedAt: new Date().toISOString(),
-    status: groupReports.every((group) => group.status === "passed") ? "passed" : "failed",
+    status: passed ? "passed" : "failed",
+    scopes: {
+      runtimeProfile: {
+        status: passed ? "partial" : "failed",
+        basis:
+          "P0-P4 clauses exercised here plus the repository T-001..T-047 matrix; resource-specific qualification remains external.",
+      },
+      adapterProtocol: {
+        status: passed ? "passed" : "failed",
+        basis:
+          "Manifest, identity, command sequencing, response loss, retry/reject, output, input and restart scenarios.",
+      },
+      resourceSpecificSafety: {
+        status: "not_claimed",
+        basis: "Reference Mock Adapters have no real external resource safety qualification.",
+      },
+    },
     groups: groupReports,
   };
 }

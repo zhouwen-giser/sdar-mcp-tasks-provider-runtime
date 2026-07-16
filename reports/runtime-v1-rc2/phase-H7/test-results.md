@@ -13,7 +13,7 @@ official MCP client. No test was skipped.
 | `pnpm test:recovery`                 | PASS   |                                             8 |
 | `pnpm test:security`                 | PASS   |                                             6 |
 | `pnpm test:e2e`                      | PASS   |                                             4 |
-| TypeScript/Python conformance        | PASS   |                          P0-P4 both languages |
+| TypeScript/Python grouped baseline   | PASS   |  10 cases/language; not full Profile coverage |
 | SBOM/deployment/capacity             | PASS   |  184 prod components / 8 manifests / baseline |
 | `pnpm container:check`               | PASS   | two builds, non-root, prod-only, reproducible |
 | push runtime `29541564999`           | PASS   |          complete `pnpm verify`, Buf, Compose |

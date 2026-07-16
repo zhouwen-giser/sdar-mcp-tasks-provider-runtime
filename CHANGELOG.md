@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0-rc.2 - unreleased
+
+- Hardened durable commands, timing windows, observation revisions, immutable
+  operation snapshots, Adapter identity, TTL/read freshness, MCP wire contracts,
+  readiness, bounded rate state and idempotency claim leases.
+- Added an actual 001-006 rc.1 full-state forward-upgrade fixture and expanded
+  17-case-per-language Adapter protocol conformance with explicit partial/not-claimed
+  Runtime Profile and resource-safety scopes.
+
 ## 1.0.0-rc.1 - 2026-07-16
 
 - Added independently deployable Node.js 22/TypeScript Runtime with MCP
@@ -9,8 +18,8 @@
   input, pause/resume, monotonic observations and transactional Outbox.
 - Added versioned gRPC/Protobuf Adapter protocol, recovery/Reconcile, durable
   idempotency and authorization/execution-mode isolation with mTLS/JWT options.
-- Added TypeScript and Python reference Adapters and identical machine-readable
-  P0-P4 conformance coverage.
+- Added TypeScript and Python reference Adapters and an identical 10-case grouped
+  conformance baseline. This baseline did not constitute complete P0-P4 coverage.
 - Added multi-stage non-root images, one-command Compose, Kubernetes manifests,
   upgrade/runbook/config/API/Adapter documentation, SBOM, dependency audit,
   security/recovery/E2E suites and capacity baseline.

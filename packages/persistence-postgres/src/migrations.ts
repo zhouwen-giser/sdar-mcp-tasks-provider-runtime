@@ -20,13 +20,18 @@ export async function runMigrations(
     const files = (await readdir(directory)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
     for (const file of files) {
       const sql = await readFile(resolve(directory, file), "utf8");
-      const checksum = createHash("sha256").update(sql).digest("hex");
+      const normalizedSql = sql.replaceAll("\r\n", "\n");
+      const checksum = createHash("sha256").update(normalizedSql).digest("hex");
+      const legacyCheckoutChecksum = createHash("sha256").update(sql).digest("hex");
       const existing = await client.query<{ checksum: string }>(
         "SELECT checksum FROM runtime_schema_migration WHERE version = $1",
         [file],
       );
       if (existing.rowCount === 1) {
-        if (existing.rows[0]?.checksum !== checksum)
+        if (
+          existing.rows[0]?.checksum !== checksum &&
+          existing.rows[0]?.checksum !== legacyCheckoutChecksum
+        )
           throw new Error(`MIGRATION_CHECKSUM_MISMATCH:${file}`);
         continue;
       }

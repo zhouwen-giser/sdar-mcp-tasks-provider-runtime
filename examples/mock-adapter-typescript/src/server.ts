@@ -88,6 +88,17 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               description: "The resource is disabled.",
             };
           }
+          if (argumentsValue.scenario === "unknown") {
+            return {
+              requestId: check.requestId,
+              operationName: check.operationName,
+              availability: "UNKNOWN",
+              riskLevel: "MEDIUM",
+              reasonCode: "RESOURCE_STATE_UNKNOWN",
+              description: "The reference resource state is unknown.",
+              validUntil: timestamp(validUntil),
+            };
+          }
           return {
             requestId: check.requestId,
             operationName: check.operationName,
