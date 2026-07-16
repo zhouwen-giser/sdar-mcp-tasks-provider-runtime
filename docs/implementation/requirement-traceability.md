@@ -22,8 +22,8 @@ named gate has produced real evidence.
 | RQ-SEC                | Profile 20, 34-35; Adapter 16      | R2, R7         | auth, execution context, limits, mTLS, redaction                | JWT/trusted identity, cross-context, injection and log tests  | verified in R7 CI                        |
 | RQ-OBSERVABILITY      | Runtime 12                         | R1, R7, R9     | `packages/observability`, Runtime health/metrics                | health/readiness, metrics, trace and redaction tests          | verified through R7; R9 runbook complete |
 | RQ-CONFORMANCE        | Profile 37-39; Adapter 19-21       | R8, R9         | `packages/conformance-testkit`, both durable example Adapters   | P0-P4 JSON reports and identical dual-language E2E            | verified in R8 CI                        |
-| Deployment/operations | Task package R1, R9                | R1, R9         | `Dockerfile`, Compose, `deploy`, operations docs                | image build, Compose health, manifest rendering               | implemented; R9 exit CI pending          |
-| Release integrity     | Task package DoD                   | R9             | root scripts, CI, changelog, reports, SBOM                      | `pnpm verify`, audit/SBOM, phase SHA/push evidence            | implemented; R9 exit CI pending          |
+| Deployment/operations | Task package R1, R9                | R1, R9         | `Dockerfile`, Compose, `deploy`, operations docs                | image build, Compose health, manifest rendering               | verified in R9 CI                        |
+| Release integrity     | Task package DoD                   | R9             | root scripts, CI, changelog, reports, SBOM                      | `pnpm verify`, audit/SBOM, phase SHA/push evidence            | gates verified; PR/tag pending           |
 
 ## Mandatory scenario ownership
 

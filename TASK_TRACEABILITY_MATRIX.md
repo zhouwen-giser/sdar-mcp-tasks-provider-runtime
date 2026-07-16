@@ -22,5 +22,5 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 | RQ-SEC | Profile 20、34-35 | R2、R7 | security and protocol boundaries | auth/mode/fuzz | VERIFIED (R7 CI) |
 | RQ-OBSERVABILITY | Runtime 12 | R1、R7-R9 | `packages/observability` | metrics/log redaction | VERIFIED (R7 CI; R9 RUNBOOK) |
 | RQ-CONFORMANCE | Profile 37-39 | R8-R9 | `packages/conformance-testkit` | P0-P4/cross-language | VERIFIED (R8 CI) |
-| Deployment/operations | Task package R9 | R9 | `Dockerfile`, Compose, `deploy/kubernetes`, operations docs | container/manifest/health | IMPLEMENTED (R9 CI PENDING) |
-| Release integrity | Task package DoD | R9 | root scripts, CI, SBOM, changelog, reports | `pnpm verify`, audit, capacity | IMPLEMENTED (R9 CI PENDING) |
+| Deployment/operations | Task package R9 | R9 | `Dockerfile`, Compose, `deploy/kubernetes`, operations docs | container/manifest/health | VERIFIED (R9 CI) |
+| Release integrity | Task package DoD | R9 | root scripts, CI, SBOM, changelog, reports | `pnpm verify`, audit, capacity | VERIFIED GATES (PR/TAG PENDING) |
