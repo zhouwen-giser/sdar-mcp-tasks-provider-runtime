@@ -45,18 +45,18 @@ Every H phase follows this loop:
 
 ## Progress and exit evidence
 
-| Phase | Scope                                                                         | Required evidence                                             | Status   |
-| ----- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | -------- |
-| H0    | real baseline, six red regressions, plan and matrix                           | baseline assessment, red output, H0 report, push/CI           | complete |
-| H1    | durable stop command dispatcher and rejection policy                          | T-001..T-006, T-029, T-030; migration; no RPC under DB client | complete |
-| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | complete |
-| H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | complete |
-| H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | pending  |
-| H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | pending  |
-| H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | pending  |
-| H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | pending  |
-| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending  |
-| H9    | docs, full release gate, PR #1, final report and immutable tag                | T-050, all checks green, report-containing tag commit         | pending  |
+| Phase | Scope                                                                         | Required evidence                                             | Status            |
+| ----- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | ----------------- |
+| H0    | real baseline, six red regressions, plan and matrix                           | baseline assessment, red output, H0 report, push/CI           | complete          |
+| H1    | durable stop command dispatcher and rejection policy                          | T-001..T-006, T-029, T-030; migration; no RPC under DB client | complete          |
+| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | complete          |
+| H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | CI repair pending |
+| H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | pending           |
+| H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | pending           |
+| H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | pending           |
+| H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | pending           |
+| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending           |
+| H9    | docs, full release gate, PR #1, final report and immutable tag                | T-050, all checks green, report-containing tag commit         | pending           |
 
 ## Planned schema evolution
 

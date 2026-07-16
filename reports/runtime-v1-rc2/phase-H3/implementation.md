@@ -77,3 +77,12 @@ commits. See `test-results.md` for the complete local regression evidence.
 - [x] Latest revision and stable terminal observation remain consistent.
 - [x] T-014..T-016 and old lifecycle/control regressions pass without skip.
 - [x] Branch and PR checks pass at the implementation SHA.
+
+## 9. Closure-Head CI defect
+
+The later report-containing Head `857f095` passed PR runtime, quality and Compose, but push run
+`29514255881` exposed a nondeterministic security failure: changing the final base64url
+character of a JWT signature can leave the decoded bytes unchanged when only unused padding
+bits differ. Runtime accepted that non-canonical spelling. The fix rejects any segment whose
+decoded bytes do not round-trip to the exact canonical base64url text. The security suite
+passed 20 consecutive local runs; H3 remains open until the fix Head passes push and PR gates.

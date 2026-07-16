@@ -71,7 +71,7 @@ function jwtIdentity(
   const expected = createHmac("sha256", options.secret)
     .update(`${encodedHeader}.${encodedPayload}`)
     .digest();
-  const signature = Buffer.from(encodedSignature, "base64url");
+  const signature = decodeCanonicalBase64Url(encodedSignature);
   if (signature.length !== expected.length || !timingSafeEqual(signature, expected)) {
     throw new Error("INVALID_BEARER_TOKEN");
   }
@@ -97,12 +97,19 @@ function jwtIdentity(
 
 function parseSegment(segment: string): Record<string, unknown> {
   try {
-    const value: unknown = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
+    const value: unknown = JSON.parse(decodeCanonicalBase64Url(segment).toString("utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error();
     return value as Record<string, unknown>;
   } catch {
     throw new Error("INVALID_BEARER_TOKEN");
   }
+}
+
+function decodeCanonicalBase64Url(segment: string): Buffer {
+  if (!/^[A-Za-z0-9_-]+$/.test(segment)) throw new Error("INVALID_BEARER_TOKEN");
+  const decoded = Buffer.from(segment, "base64url");
+  if (decoded.toString("base64url") !== segment) throw new Error("INVALID_BEARER_TOKEN");
+  return decoded;
 }
 
 function matchesAudience(claim: unknown, expected: string): boolean {
