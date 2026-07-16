@@ -47,13 +47,18 @@ describe("MCP dynamic Tool catalog", () => {
     await client.connect(transport as unknown as Transport);
     try {
       expect(client.getServerCapabilities()).toMatchObject({
+        tasks: { requests: { tools: { call: {} } } },
         extensions: {
           "io.modelcontextprotocol/tasks": {},
           "io.sdar/taskExecution": { version: "1.0", scheduling: true },
         },
       });
       const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(["echo_sync", "durable_task"]);
+      expect(tools.tools.map((tool) => tool.name)).toEqual([
+        "echo_sync",
+        "durable_task",
+        "flex_task",
+      ]);
       const result = await client.callTool({ name: "echo_sync", arguments: { message: "hello" } });
       expect(result.isError).toBe(false);
       expect(result.structuredContent).toEqual({ message: "hello" });

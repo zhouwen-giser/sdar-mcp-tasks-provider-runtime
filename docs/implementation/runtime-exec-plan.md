@@ -33,7 +33,7 @@ implementation.
 | R0    | Repository assessment, baseline, architecture decisions, traceability              | Baseline recorded; every requirement mapped          | completed                                       |
 | R1    | Workspace, Runtime health/config, Proto, TS/Python Adapter foundations, Compose    | gRPC DescribeProvider and healthy Compose            | completed                                       |
 | R2    | Manifest registry, snapshots, dynamic tools, MCP Streamable HTTP, synchronous call | MCP client lists/calls sync tool; snapshot stable    | implementation complete; remote DB gate pending |
-| R3    | Migrations, task repository/state engine, admission, `tasks/get`                   | async lifecycle and restart query                    | pending                                         |
+| R3    | Migrations, task repository/state engine, admission, `tasks/get`                   | async lifecycle and restart query                    | implementation complete; CI evidence pending    |
 | R4    | Availability, full idempotency, admission recovery/concurrency                     | one external execution per duplicate/concurrent call | pending                                         |
 | R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | pending                                         |
 | R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | pending                                         |
@@ -87,6 +87,10 @@ manifest tests, illegal scheduling combinations rejected.
   tasks atomically with initial observation/outbox.
 - Implement task-required/task-capable results and authorized `tasks/get`.
 - Exercise response-loss and commit-failure windows with real PostgreSQL/gRPC.
+
+Implementation: complete. Local strict build/unit/contract/security and real-socket
+gRPC/MCP regression gates pass. PostgreSQL lifecycle, restart, immediate-query,
+response-loss, and injected commit-failure tests are committed for the Phase CI gate.
 
 ### R4 — availability and idempotency
 

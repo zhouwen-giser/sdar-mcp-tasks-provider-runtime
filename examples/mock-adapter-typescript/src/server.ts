@@ -19,6 +19,15 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
   const providerId = options.providerId ?? "mock-provider";
   const providerVersion = options.providerVersion ?? "1.0.0";
   const server = new grpc.Server();
+  const executions = new Map<
+    string,
+    {
+      externalExecutionId: string;
+      argumentHash: string;
+      snapshot: Record<string, unknown>;
+      terminalSnapshot: Record<string, unknown>;
+    }
+  >();
 
   server.addService(adapterServiceDefinition(), {
     describeProvider: (
@@ -89,6 +98,35 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               resourceIdJsonPointer: "/resourceId",
             },
           },
+          {
+            name: "flex_task",
+            description: "Completes inline or continues as a task according to the scenario.",
+            execution: "TASK_CAPABLE",
+            inputSchema: jsonToProtoStruct({
+              type: "object",
+              properties: {
+                resourceId: { type: "string" },
+                scenario: { type: "string", enum: ["terminal", "running"] },
+              },
+              required: ["resourceId", "scenario"],
+              additionalProperties: false,
+            }),
+            outputSchema: jsonToProtoStruct({ type: "object" }),
+            capabilities: {
+              availability: true,
+              scheduling: false,
+              maxElapsed: false,
+              cancel: false,
+              pauseResume: false,
+              inputRequired: false,
+              idempotency: true,
+              observations: true,
+            },
+            resourceBinding: {
+              mode: "ARGUMENT_REFERENCE",
+              resourceIdJsonPointer: "/resourceId",
+            },
+          },
         ],
       });
     },
@@ -96,7 +134,14 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       call: grpc.ServerUnaryCall<{ taskId?: string }, unknown>,
       callback: grpc.sendUnaryData<unknown>,
     ) => {
-      callback(notFound(`Execution ${call.request.taskId ?? "<missing>"} does not exist`));
+      const taskId = call.request.taskId ?? "";
+      const execution = executions.get(taskId);
+      if (execution === undefined) {
+        callback(notFound(`Execution ${taskId || "<missing>"} does not exist`));
+        return;
+      }
+      execution.snapshot = execution.terminalSnapshot;
+      callback(null, execution.snapshot);
     },
     startOperation: (
       call: grpc.ServerUnaryCall<
@@ -104,16 +149,41 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           taskId?: string;
           operationName?: string;
           arguments?: unknown;
+          argumentHash?: string;
         },
         unknown
       >,
       callback: grpc.sendUnaryData<unknown>,
     ) => {
-      if (call.request.operationName !== "echo_sync") {
+      const taskId = call.request.taskId ?? "missing";
+      const existing = executions.get(taskId);
+      if (existing !== undefined) {
+        if (existing.argumentHash !== (call.request.argumentHash ?? "")) {
+          callback(
+            Object.assign(new Error("taskId argument conflict"), {
+              code: grpc.status.ALREADY_EXISTS,
+            }),
+          );
+          return;
+        }
+        callback(null, {
+          accepted: {
+            externalExecutionId: existing.externalExecutionId,
+            initialSnapshot: existing.snapshot,
+          },
+          result: "accepted",
+        });
+        return;
+      }
+      if (
+        call.request.operationName !== "echo_sync" &&
+        call.request.operationName !== "durable_task" &&
+        call.request.operationName !== "flex_task"
+      ) {
         callback(null, {
           rejected: {
             reasonCode: "UNSUPPORTED_R1_SCENARIO",
-            message: "R1 only executes echo_sync.",
+            message: "Unknown reference operation.",
             retryable: false,
           },
           result: "rejected",
@@ -122,12 +192,66 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       }
       const result = protoStructToJson(call.request.arguments);
       const now = new Date();
+      if (call.request.operationName === "flex_task" && result.scenario === "terminal") {
+        callback(null, {
+          accepted: {
+            externalExecutionId: `inline-${taskId}`,
+            initialSnapshot: {
+              taskId,
+              externalExecutionId: `inline-${taskId}`,
+              state: "SUCCEEDED",
+              revision: "1",
+              reasonCode: "SUCCESS",
+              message: "Task-capable operation completed inline.",
+              result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
+              observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
+            },
+          },
+          result: "accepted",
+        });
+        return;
+      }
+      if (
+        call.request.operationName === "durable_task" ||
+        call.request.operationName === "flex_task"
+      ) {
+        const externalExecutionId = `task-${taskId}`;
+        const initialSnapshot = {
+          taskId,
+          externalExecutionId,
+          state: "RUNNING",
+          revision: "1",
+          reasonCode: "STARTED",
+          message: "Reference task is running.",
+          retryable: false,
+          observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
+        };
+        const terminalSnapshot = {
+          ...initialSnapshot,
+          state: "SUCCEEDED",
+          revision: "2",
+          reasonCode: "SUCCESS",
+          message: "Reference task completed.",
+          result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
+        };
+        executions.set(taskId, {
+          externalExecutionId,
+          argumentHash: call.request.argumentHash ?? "",
+          snapshot: initialSnapshot,
+          terminalSnapshot,
+        });
+        callback(null, {
+          accepted: { externalExecutionId, initialSnapshot },
+          result: "accepted",
+        });
+        return;
+      }
       callback(null, {
         accepted: {
-          externalExecutionId: `sync-${call.request.taskId ?? "missing"}`,
+          externalExecutionId: `sync-${taskId}`,
           initialSnapshot: {
-            taskId: call.request.taskId,
-            externalExecutionId: `sync-${call.request.taskId ?? "missing"}`,
+            taskId,
+            externalExecutionId: `sync-${taskId}`,
             state: "SUCCEEDED",
             revision: "1",
             reasonCode: "SUCCESS",

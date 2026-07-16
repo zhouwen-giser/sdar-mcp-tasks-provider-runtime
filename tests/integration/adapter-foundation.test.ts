@@ -34,6 +34,7 @@ describe("TypeScript Adapter foundation", () => {
     expect(manifest.operations.map((operation) => operation.name)).toEqual([
       "echo_sync",
       "durable_task",
+      "flex_task",
     ]);
     expect(manifest.operations[0]?.execution).toBe("SYNCHRONOUS");
     expect(manifest.operations[1]?.capabilities.scheduling).toBe(true);

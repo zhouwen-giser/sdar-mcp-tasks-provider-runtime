@@ -30,6 +30,15 @@ export interface AdapterGatewayOptions {
   timeoutMs?: number;
 }
 
+export interface StartOperationOptions {
+  taskId?: string;
+  authorizationContextHash?: string;
+  executionMode?: "live" | "simulation" | "historical-replay";
+  simulationId?: string | null;
+  argumentHash?: string;
+  invocationAttempt?: number;
+}
+
 export class GrpcAdapterGateway {
   readonly #client: AdapterClient;
   readonly #providerId: string;
@@ -67,8 +76,9 @@ export class GrpcAdapterGateway {
   startOperation(
     operationName: string,
     argumentsValue: Record<string, unknown>,
+    options: StartOperationOptions = {},
   ): Promise<StartOperationResponse> {
-    const taskId = randomUUID();
+    const taskId = options.taskId ?? randomUUID();
     const canonicalArguments = JSON.stringify(argumentsValue, Object.keys(argumentsValue).sort());
     return this.#unary<StartOperationResponse>("startOperation", {
       metadata: this.#metadata(),
@@ -77,12 +87,14 @@ export class GrpcAdapterGateway {
       arguments: jsonToProtoStruct(argumentsValue),
       timing: { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
       executionContext: {
-        authorizationContextHash: "r2-development",
-        executionMode: "LIVE",
+        authorizationContextHash: options.authorizationContextHash ?? "r2-development",
+        executionMode: (options.executionMode ?? "live").replace("-", "_").toUpperCase(),
+        simulationId: options.simulationId ?? "",
         correlationId: randomUUID(),
       },
-      argumentHash: createHash("sha256").update(canonicalArguments).digest("hex"),
-      invocationAttempt: 1,
+      argumentHash:
+        options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
+      invocationAttempt: options.invocationAttempt ?? 1,
     });
   }
 

@@ -84,6 +84,8 @@ importers:
 
   packages/adapter-protocol: {}
 
+  packages/domain: {}
+
   packages/mcp-protocol: {}
 
   packages/observability: {}
@@ -91,6 +93,8 @@ importers:
   packages/operation-registry: {}
 
   packages/persistence-postgres: {}
+
+  packages/task-engine: {}
 
 packages:
 

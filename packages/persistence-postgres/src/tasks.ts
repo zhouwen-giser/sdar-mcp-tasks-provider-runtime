@@ -1,0 +1,293 @@
+import { randomUUID } from "node:crypto";
+import type { Pool, PoolClient } from "pg";
+import type {
+  AuthorizationContext,
+  SnapshotTransition,
+  TaskRecord,
+} from "../../domain/src/index.js";
+import { isTerminalState } from "../../domain/src/index.js";
+
+export interface AdmissionIntentInput {
+  taskId: string;
+  providerId: string;
+  operationName: string;
+  operationSnapshotId: string;
+  authorization: AuthorizationContext;
+  arguments: Record<string, unknown>;
+  argumentHash: string;
+}
+
+export interface PublishTaskInput extends AdmissionIntentInput {
+  externalExecutionId: string;
+  transition: SnapshotTransition;
+  adapterRevision: number;
+  ttlMs: number | null;
+  adapterResponse: Record<string, unknown>;
+}
+
+interface TaskRow {
+  task_id: string;
+  provider_id: string;
+  operation_name: string;
+  operation_snapshot_id: string;
+  authorization_context_hash: string;
+  execution_mode: TaskRecord["executionMode"];
+  simulation_id: string | null;
+  arguments: Record<string, unknown>;
+  argument_hash: string;
+  external_execution_id: string;
+  internal_state: TaskRecord["internalState"];
+  mcp_status: TaskRecord["mcpStatus"];
+  substate: string | null;
+  status_message: string | null;
+  result: Record<string, unknown> | null;
+  error: Record<string, unknown> | null;
+  adapter_revision: string;
+  ttl_ms: string | null;
+  poll_interval_ms: number;
+  created_at: Date;
+  updated_at: Date;
+  version: string;
+}
+
+export class TaskRepository {
+  constructor(readonly pool: Pool) {}
+
+  async createAdmissionIntent(input: AdmissionIntentInput): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO admission_intent
+        (task_id, provider_id, operation_name, operation_snapshot_id,
+         authorization_context_hash, execution_mode, simulation_id, arguments,
+         argument_hash, state)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING')`,
+      [
+        input.taskId,
+        input.providerId,
+        input.operationName,
+        input.operationSnapshotId,
+        input.authorization.hash,
+        input.authorization.executionMode,
+        input.authorization.simulationId,
+        JSON.stringify(input.arguments),
+        input.argumentHash,
+      ],
+    );
+  }
+
+  async markAdmissionUncertain(taskId: string): Promise<void> {
+    await this.pool.query(
+      "UPDATE admission_intent SET state='UNCERTAIN', updated_at=clock_timestamp() WHERE task_id=$1 AND state='PENDING'",
+      [taskId],
+    );
+  }
+
+  async recordRejection(taskId: string, response: Record<string, unknown>): Promise<void> {
+    await this.pool.query(
+      `UPDATE admission_intent
+       SET state='REJECTED', adapter_response=$2::jsonb, updated_at=clock_timestamp()
+       WHERE task_id=$1`,
+      [taskId, JSON.stringify(response)],
+    );
+  }
+
+  async completeAdmissionWithoutTask(
+    taskId: string,
+    response: Record<string, unknown>,
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE admission_intent SET state='PUBLISHED', adapter_response=$2::jsonb,
+       updated_at=clock_timestamp() WHERE task_id=$1`,
+      [taskId, JSON.stringify(response)],
+    );
+  }
+
+  async publishAccepted(input: PublishTaskInput): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `UPDATE admission_intent SET state='ACCEPTED', adapter_response=$2::jsonb,
+           updated_at=clock_timestamp() WHERE task_id=$1`,
+        [input.taskId, JSON.stringify(input.adapterResponse)],
+      );
+      await client.query(
+        `INSERT INTO provider_task
+          (task_id, provider_id, operation_name, operation_snapshot_id,
+           authorization_context_hash, execution_mode, simulation_id, arguments,
+           argument_hash, external_execution_id, internal_state, mcp_status,
+           substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
+                 $16::jsonb,$17,clock_timestamp(),$18)`,
+        [
+          input.taskId,
+          input.providerId,
+          input.operationName,
+          input.operationSnapshotId,
+          input.authorization.hash,
+          input.authorization.executionMode,
+          input.authorization.simulationId,
+          JSON.stringify(input.arguments),
+          input.argumentHash,
+          input.externalExecutionId,
+          input.transition.internalState,
+          input.transition.mcpStatus,
+          input.transition.substate,
+          input.transition.statusMessage,
+          jsonOrNull(input.transition.result),
+          jsonOrNull(input.transition.error),
+          input.adapterRevision,
+          input.ttlMs,
+        ],
+      );
+      const revision = Math.max(1, input.adapterRevision);
+      await insertObservation(client, input.taskId, revision, input.transition);
+      await insertOutbox(client, input.taskId, "task.created", {
+        status: input.transition.mcpStatus,
+      });
+      await client.query(
+        "UPDATE admission_intent SET state='PUBLISHED', updated_at=clock_timestamp() WHERE task_id=$1",
+        [input.taskId],
+      );
+      await client.query("COMMIT");
+      const task = await this.getById(input.taskId);
+      if (task === null) throw new Error("TASK_NOT_VISIBLE_AFTER_COMMIT");
+      return task;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async getAuthorized(taskId: string, authorization: AuthorizationContext): Promise<TaskRecord> {
+    const result = await this.pool.query<TaskRow>(
+      `SELECT * FROM provider_task
+       WHERE task_id=$1 AND authorization_context_hash=$2 AND execution_mode=$3
+         AND simulation_id IS NOT DISTINCT FROM $4`,
+      [taskId, authorization.hash, authorization.executionMode, authorization.simulationId],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error("TASK_NOT_FOUND");
+    return fromRow(row);
+  }
+
+  async getById(taskId: string): Promise<TaskRecord | null> {
+    const result = await this.pool.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
+      taskId,
+    ]);
+    return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
+  }
+
+  async applySnapshot(
+    taskId: string,
+    adapterRevision: number,
+    transition: SnapshotTransition,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
+      );
+      const existingRow = locked.rows[0];
+      if (existingRow === undefined) throw new Error("TASK_NOT_FOUND");
+      const existing = fromRow(existingRow);
+      if (isTerminalState(existing.internalState) || adapterRevision <= existing.adapterRevision) {
+        await client.query("COMMIT");
+        return existing;
+      }
+      const updated = await client.query<TaskRow>(
+        `UPDATE provider_task SET internal_state=$2, mcp_status=$3, substate=$4,
+           status_message=$5, result=$6::jsonb, error=$7::jsonb, adapter_revision=$8,
+           updated_at=clock_timestamp(), version=version+1
+         WHERE task_id=$1 AND version=$9 RETURNING *`,
+        [
+          taskId,
+          transition.internalState,
+          transition.mcpStatus,
+          transition.substate,
+          transition.statusMessage,
+          jsonOrNull(transition.result),
+          jsonOrNull(transition.error),
+          adapterRevision,
+          existing.version,
+        ],
+      );
+      if (updated.rowCount !== 1) throw new Error("TASK_VERSION_CONFLICT");
+      await insertObservation(client, taskId, adapterRevision, transition);
+      await insertOutbox(client, taskId, "task.updated", { status: transition.mcpStatus });
+      await client.query("COMMIT");
+      const updatedRow = updated.rows[0];
+      if (updatedRow === undefined) throw new Error("TASK_UPDATE_NOT_RETURNED");
+      return fromRow(updatedRow);
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+}
+
+async function insertObservation(
+  client: PoolClient,
+  taskId: string,
+  revision: number,
+  transition: SnapshotTransition,
+): Promise<void> {
+  await client.query(
+    `INSERT INTO task_observation(task_id, revision, type, occurred_at, payload)
+     VALUES ($1,$2,$3,clock_timestamp(),$4::jsonb) ON CONFLICT DO NOTHING`,
+    [
+      taskId,
+      revision,
+      transition.observationType,
+      JSON.stringify({ substate: transition.substate }),
+    ],
+  );
+}
+
+async function insertOutbox(
+  client: PoolClient,
+  taskId: string,
+  type: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  await client.query(
+    "INSERT INTO outbox_event(event_id, aggregate_id, event_type, payload) VALUES ($1,$2,$3,$4::jsonb)",
+    [randomUUID(), taskId, type, JSON.stringify(payload)],
+  );
+}
+
+function jsonOrNull(value: Record<string, unknown> | null): string | null {
+  return value === null ? null : JSON.stringify(value);
+}
+
+function fromRow(row: TaskRow): TaskRecord {
+  return {
+    taskId: row.task_id,
+    providerId: row.provider_id,
+    operationName: row.operation_name,
+    operationSnapshotId: row.operation_snapshot_id,
+    authorizationContextHash: row.authorization_context_hash,
+    executionMode: row.execution_mode,
+    simulationId: row.simulation_id,
+    arguments: row.arguments,
+    argumentHash: row.argument_hash,
+    externalExecutionId: row.external_execution_id,
+    internalState: row.internal_state,
+    mcpStatus: row.mcp_status,
+    substate: row.substate,
+    statusMessage: row.status_message,
+    result: row.result,
+    error: row.error,
+    adapterRevision: Number(row.adapter_revision),
+    ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
+    pollIntervalMs: row.poll_interval_ms,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    version: Number(row.version),
+  };
+}
