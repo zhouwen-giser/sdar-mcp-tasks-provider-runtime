@@ -150,6 +150,8 @@ The tag is never moved.
   bounded rate state, explicit SDK stateless transport and a pruned/frozen production image
   implement T-041..T-046. Local evidence passed: unit 27, contract 4, guards 6, integration 57
   (including an actual 001-011 rc.1 data upgrade), recovery 8, security 6, E2E 4, dual-language
-  P0-P4 conformance, capacity, SBOM/deployment and the 97,150,847-byte reproducible image audit.
+  P0-P4 conformance, capacity, SBOM/deployment and the reproducible image audit. GitHub Linux
+  measured 327,026,557 bytes (350 MB ceiling); Docker Desktop reports 97,150,847 bytes for the
+  same filesystem/config shape because its containerd size semantics differ.
   Remote Linux CI remains required before closure; the local Windows grpc-tools binary cannot
   execute (`0xc0000135`), while the Linux Docker build regenerated protobuf and passed.

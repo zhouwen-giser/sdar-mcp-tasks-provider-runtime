@@ -22,5 +22,7 @@ still passes.
 
 H7 also records the production runtime image baseline at
 `reports/image/runtime-v1-rc2.json`. The audit compares two build filesystem/config shapes,
-requires the `node` user, rejects development/test/documentation payloads and enforces a 150 MB
-compressed image ceiling. This is a regression guard, not a universal deployment limit.
+requires the `node` user, rejects development/test/documentation payloads and enforces a 350 MB
+Linux Docker Engine size ceiling against the 327,026,557-byte GitHub Actions baseline. Docker
+Desktop may report a smaller compressed/containerd value, so release evidence uses the Linux
+Engine measurement. This is a regression guard, not a universal deployment limit.

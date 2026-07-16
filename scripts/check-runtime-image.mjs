@@ -3,7 +3,10 @@ import process from "node:process";
 
 const primary = "sdar-runtime:rc2-audit-primary";
 const repeat = "sdar-runtime:rc2-audit-repeat";
-const maximumBytes = 150_000_000;
+// Docker Desktop's containerd store reports a compressed value while the Linux
+// Engine reports the expanded layer total. The release ceiling follows the
+// authoritative GitHub Linux measurement and still catches material growth.
+const maximumBytes = 350_000_000;
 
 build(primary);
 build(repeat);
