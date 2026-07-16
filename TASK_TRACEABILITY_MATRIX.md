@@ -11,11 +11,11 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 | RQ-ADAPTER | Adapter 4-15 | R1-R8 | `proto`, `packages/adapter-protocol` | proto/contract/cross-language | PLANNED |
 | RQ-STATE | Profile 5、17、24；Runtime 5 | R3-R6 | `packages/domain`, `packages/task-engine` | state matrix/terminal CAS | IN PROGRESS (R3 CORE) |
 | RQ-ADMISSION | Runtime 6、8、10 | R3-R4 | task engine/PostgreSQL repositories | PG/gRPC crash-window/recovery | IN PROGRESS (R3 CORE) |
-| RQ-AVAIL | Profile 8-11 | R4 | task engine/MCP boundary | contract/integration | PLANNED |
+| RQ-AVAIL | Profile 8-11 | R4 | domain/task engine/MCP/gRPC | four-state/window/unknown E2E | IN PROGRESS (IMPLEMENTED) |
 | RQ-TIME | Profile 12-15 | R5 | domain/scheduler/task engine | fake-clock/restart | PLANNED |
 | RQ-CANCEL | Profile 23、36 | R6-R7 | task control/Adapter gateway | safe-stop/race | PLANNED |
 | RQ-INPUT | Profile 22 | R6 | task engine/PostgreSQL repositories | update/idempotency | PLANNED |
-| RQ-IDEMP | Profile 29 | R3-R5 | persistence/domain | duplicate/concurrent | PLANNED |
+| RQ-IDEMP | Profile 29 | R3-R5 | advisory-lock persistence/domain | duplicate/concurrent/reconcile | IN PROGRESS (R4 IMMEDIATE) |
 | RQ-OBS | Profile 17-18、32 | R6 | observation/outbox repositories | revision/delivery | PLANNED |
 | RQ-RECOVERY | Profile 30 | R3-R7 | recovery manager | restart/fault | PLANNED |
 | RQ-PERSIST | Runtime 8 | R2-R7 | `migrations`, PostgreSQL package | migration/integration | PLANNED |

@@ -8,6 +8,8 @@ Mandatory RPCs are DescribeProvider, CheckAvailability, StartOperation, GetExecu
 
 Every request carries protocol/provider/correlation metadata. Side-effect calls carry a stable task id, operation name, argument hash, authorization context hash, execution mode, and attempt or command sequence. StartOperation is idempotent by task id; an identity mismatch is a conflict. RequestCancel is acknowledgement-only.
 
+R4 exercises batched CheckAvailability and ReconcileExecution. Availability is predictive only and never authorizes or starts execution. Reconcile is a side-effect-free lookup by stable taskId, operation, canonical argument hash, and trusted execution context; `FOUND`, `NOT_FOUND`, transient unavailable, and conflict remain distinct outcomes.
+
 ## Execution publication
 
 All operation kinds use StartOperation:

@@ -59,3 +59,43 @@ export interface StartOperationResponse {
   accepted?: { externalExecutionId: string; initialSnapshot: ExecutionSnapshot };
   rejected?: { reasonCode: string; message: string; retryable: boolean };
 }
+
+export interface AvailabilityCheckInput {
+  requestId: string;
+  operationName: string;
+  arguments?: Record<string, unknown>;
+  unresolvedArguments?: {
+    knownArguments: Record<string, unknown>;
+    unresolvedPaths: string[];
+  };
+  timing?: Record<string, unknown>;
+}
+
+export interface AvailabilityResult {
+  requestId: string;
+  operationName: string;
+  availability: string;
+  riskLevel: string;
+  reasonCode: string;
+  description: string;
+  validUntil?: unknown;
+  earliestStartTime?: unknown;
+  nextAvailableWindows: { startTime?: unknown; endTime?: unknown }[];
+  estimatedDelayMs: string | number;
+  possibleEffects: string[];
+}
+
+export interface CheckAvailabilityResponse {
+  profileVersion: string;
+  checkedAt?: unknown;
+  checks: AvailabilityResult[];
+}
+
+export interface ReconcileExecutionResponse {
+  status: string;
+  snapshot?: ExecutionSnapshot;
+  externalExecutionId: string;
+  reasonCode: string;
+  message: string;
+  retryable: boolean;
+}

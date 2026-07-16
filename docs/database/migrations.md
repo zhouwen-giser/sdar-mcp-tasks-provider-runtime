@@ -13,4 +13,6 @@ Migrations are append-only SQL files under `migrations/`, ordered by numeric pre
 
 The Runtime never returns a task identifier before `provider_task`, its initial observation, the creation outbox event, and the admission publication state commit together. Failed publication leaves only an `UNCERTAIN` admission intent for reconcile; it cannot leak a queryable half-created Task.
 
+`003_idempotency.sql` evolves the reserved idempotency table without rewriting earlier migrations. It adds pending/complete state, a stable pre-admission taskId, simulation identity, update time, a pending-recovery index, and a payload consistency constraint. The repository holds a PostgreSQL advisory lock scoped to authorization, operation, key, execution mode, and simulation while it performs final admission. Competing Runtime instances therefore observe one stored result/taskId and cannot create duplicate Adapter side effects. A process crash releases the database session lock while retaining the pending stable taskId for Reconcile.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

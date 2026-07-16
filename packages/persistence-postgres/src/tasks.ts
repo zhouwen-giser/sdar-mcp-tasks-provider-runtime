@@ -25,6 +25,10 @@ export interface PublishTaskInput extends AdmissionIntentInput {
   adapterResponse: Record<string, unknown>;
 }
 
+export interface AdmissionIntentRecord extends AdmissionIntentInput {
+  state: "PENDING" | "ACCEPTED" | "REJECTED" | "PUBLISHED" | "UNCERTAIN";
+}
+
 interface TaskRow {
   task_id: string;
   provider_id: string;
@@ -53,13 +57,14 @@ interface TaskRow {
 export class TaskRepository {
   constructor(readonly pool: Pool) {}
 
-  async createAdmissionIntent(input: AdmissionIntentInput): Promise<void> {
-    await this.pool.query(
+  async createAdmissionIntent(input: AdmissionIntentInput): Promise<boolean> {
+    const result = await this.pool.query(
       `INSERT INTO admission_intent
         (task_id, provider_id, operation_name, operation_snapshot_id,
          authorization_context_hash, execution_mode, simulation_id, arguments,
          argument_hash, state)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING')`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING')
+       ON CONFLICT (task_id) DO NOTHING`,
       [
         input.taskId,
         input.providerId,
@@ -72,6 +77,38 @@ export class TaskRepository {
         input.argumentHash,
       ],
     );
+    return result.rowCount === 1;
+  }
+
+  async getAdmission(taskId: string): Promise<AdmissionIntentRecord | null> {
+    const result = await this.pool.query<{
+      task_id: string;
+      provider_id: string;
+      operation_name: string;
+      operation_snapshot_id: string;
+      authorization_context_hash: string;
+      execution_mode: AuthorizationContext["executionMode"];
+      simulation_id: string | null;
+      arguments: Record<string, unknown>;
+      argument_hash: string;
+      state: AdmissionIntentRecord["state"];
+    }>("SELECT * FROM admission_intent WHERE task_id=$1", [taskId]);
+    const row = result.rows[0];
+    if (row === undefined) return null;
+    return {
+      taskId: row.task_id,
+      providerId: row.provider_id,
+      operationName: row.operation_name,
+      operationSnapshotId: row.operation_snapshot_id,
+      authorization: {
+        hash: row.authorization_context_hash,
+        executionMode: row.execution_mode,
+        simulationId: row.simulation_id,
+      },
+      arguments: row.arguments,
+      argumentHash: row.argument_hash,
+      state: row.state,
+    };
   }
 
   async markAdmissionUncertain(taskId: string): Promise<void> {

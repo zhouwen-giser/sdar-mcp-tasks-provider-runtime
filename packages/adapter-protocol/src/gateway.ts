@@ -3,7 +3,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { adapterClientConstructor } from "./proto.js";
 import { jsonToProtoStruct } from "./struct.js";
 import { ADAPTER_PROTOCOL_VERSION } from "./types.js";
-import type { ExecutionSnapshot, ProviderManifest, StartOperationResponse } from "./types.js";
+import type {
+  AvailabilityCheckInput,
+  CheckAvailabilityResponse,
+  ExecutionSnapshot,
+  ProviderManifest,
+  ReconcileExecutionResponse,
+  StartOperationResponse,
+} from "./types.js";
 
 type AdapterClient = grpc.Client & {
   describeProvider(
@@ -20,6 +27,16 @@ type AdapterClient = grpc.Client & {
     request: unknown,
     options: grpc.CallOptions,
     callback: grpc.requestCallback<StartOperationResponse>,
+  ): grpc.ClientUnaryCall;
+  checkAvailability(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<CheckAvailabilityResponse>,
+  ): grpc.ClientUnaryCall;
+  reconcileExecution(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<ReconcileExecutionResponse>,
   ): grpc.ClientUnaryCall;
 };
 
@@ -73,6 +90,48 @@ export class GrpcAdapterGateway {
     });
   }
 
+  checkAvailability(
+    checks: AvailabilityCheckInput[],
+    options: StartOperationOptions = {},
+  ): Promise<CheckAvailabilityResponse> {
+    return this.#unary<CheckAvailabilityResponse>("checkAvailability", {
+      metadata: this.#metadata(),
+      executionContext: this.#executionContext(options),
+      checks: checks.map((check) => ({
+        requestId: check.requestId,
+        operationName: check.operationName,
+        ...(check.arguments === undefined
+          ? {
+              unresolvedArguments: {
+                knownArguments: jsonToProtoStruct(check.unresolvedArguments?.knownArguments ?? {}),
+                unresolvedPaths: check.unresolvedArguments?.unresolvedPaths ?? [],
+              },
+              argumentsValue: "unresolvedArguments",
+            }
+          : {
+              arguments: jsonToProtoStruct(check.arguments),
+              argumentsValue: "arguments",
+            }),
+        timing: check.timing ?? { start: { mode: "IMMEDIATE" } },
+      })),
+    });
+  }
+
+  reconcileExecution(
+    taskId: string,
+    operationName: string,
+    argumentHash: string,
+    options: StartOperationOptions = {},
+  ): Promise<ReconcileExecutionResponse> {
+    return this.#unary<ReconcileExecutionResponse>("reconcileExecution", {
+      metadata: this.#metadata(),
+      taskId,
+      operationName,
+      argumentHash,
+      executionContext: this.#executionContext(options),
+    });
+  }
+
   startOperation(
     operationName: string,
     argumentsValue: Record<string, unknown>,
@@ -86,12 +145,7 @@ export class GrpcAdapterGateway {
       operationName,
       arguments: jsonToProtoStruct(argumentsValue),
       timing: { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
-      executionContext: {
-        authorizationContextHash: options.authorizationContextHash ?? "r2-development",
-        executionMode: (options.executionMode ?? "live").replace("-", "_").toUpperCase(),
-        simulationId: options.simulationId ?? "",
-        correlationId: randomUUID(),
-      },
+      executionContext: this.#executionContext(options),
       argumentHash:
         options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
       invocationAttempt: options.invocationAttempt ?? 1,
@@ -110,8 +164,22 @@ export class GrpcAdapterGateway {
     };
   }
 
+  #executionContext(options: StartOperationOptions): Record<string, string> {
+    return {
+      authorizationContextHash: options.authorizationContextHash ?? "r2-development",
+      executionMode: (options.executionMode ?? "live").replace("-", "_").toUpperCase(),
+      simulationId: options.simulationId ?? "",
+      correlationId: randomUUID(),
+    };
+  }
+
   #unary<T>(
-    method: "describeProvider" | "getExecution" | "startOperation",
+    method:
+      | "describeProvider"
+      | "getExecution"
+      | "startOperation"
+      | "checkAvailability"
+      | "reconcileExecution",
     request: unknown,
   ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
@@ -133,11 +201,23 @@ export class GrpcAdapterGateway {
           { deadline },
           callback as grpc.requestCallback<ExecutionSnapshot>,
         );
-      } else {
+      } else if (method === "startOperation") {
         this.#client.startOperation(
           request,
           { deadline },
           callback as grpc.requestCallback<StartOperationResponse>,
+        );
+      } else if (method === "checkAvailability") {
+        this.#client.checkAvailability(
+          request,
+          { deadline },
+          callback as grpc.requestCallback<CheckAvailabilityResponse>,
+        );
+      } else {
+        this.#client.reconcileExecution(
+          request,
+          { deadline },
+          callback as grpc.requestCallback<ReconcileExecutionResponse>,
         );
       }
     });

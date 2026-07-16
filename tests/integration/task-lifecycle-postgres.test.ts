@@ -6,6 +6,7 @@ import Fastify from "fastify";
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { z } from "zod";
 import {
   bindMockAdapter,
   createMockAdapterServer,
@@ -16,6 +17,7 @@ import { McpProtocolHandler } from "../../packages/mcp-protocol/src/index.js";
 import { OperationRegistry } from "../../packages/operation-registry/src/index.js";
 import {
   OperationSnapshotRepository,
+  IdempotencyRepository,
   TaskRepository,
   runMigrations,
 } from "../../packages/persistence-postgres/src/index.js";
@@ -34,6 +36,7 @@ const authorization: AuthorizationContext = {
 let adapter: grpc.Server;
 let gateway: GrpcAdapterGateway;
 let engine: TaskEngine;
+let sideEffectCount = 0;
 
 beforeAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS
@@ -41,7 +44,12 @@ beforeAll(async () => {
     task_observation, provider_task, admission_intent, operation_snapshot,
     runtime_schema_migration CASCADE`);
   await runMigrations(pool);
-  adapter = createMockAdapterServer({ providerId: "task-provider" });
+  adapter = createMockAdapterServer({
+    providerId: "task-provider",
+    onStartSideEffect: () => {
+      sideEffectCount += 1;
+    },
+  });
   const port = await bindMockAdapter(adapter, "127.0.0.1:0");
   gateway = new GrpcAdapterGateway({
     endpoint: `127.0.0.1:${String(port)}`,
@@ -49,7 +57,13 @@ beforeAll(async () => {
   });
   const manifest = new OperationRegistry().validate(await gateway.describeProvider());
   const snapshots = await new OperationSnapshotRepository(pool).saveManifest(manifest);
-  engine = new TaskEngine(manifest, snapshots, gateway, new TaskRepository(pool));
+  engine = new TaskEngine(
+    manifest,
+    snapshots,
+    gateway,
+    new TaskRepository(pool),
+    new IdempotencyRepository(pool),
+  );
 });
 
 afterAll(async () => {
@@ -140,6 +154,27 @@ describe("durable task lifecycle", () => {
       ) as unknown as Transport,
     );
     try {
+      const availability = await client.request(
+        {
+          method: "io.sdar/taskExecution/checkAvailability",
+          params: {
+            checks: [
+              {
+                requestId: "mcp-availability",
+                operationName: "durable_task",
+                arguments: { resourceId: "resource-mcp" },
+              },
+            ],
+          },
+        },
+        z.object({
+          profileVersion: z.literal("1.0"),
+          checkedAt: z.string(),
+          checks: z.array(z.object({ availability: z.string() }).loose()),
+        }),
+      );
+      expect(availability.checks[0]?.availability).toBe("available");
+
       const created = await client.request(
         {
           method: "tools/call",
@@ -151,6 +186,27 @@ describe("durable task lifecycle", () => {
       expect(created.task.status).toBe("working");
       const completed = await client.experimental.tasks.getTask(created.task.taskId);
       expect(completed.status).toBe("completed");
+
+      const beforeIdempotentMcp = sideEffectCount;
+      const idempotentParams = {
+        name: "durable_task",
+        arguments: { resourceId: "resource-mcp-idempotent" },
+        _meta: {
+          "io.sdar/taskExecution": { idempotencyKey: "mcp-idempotency-key" },
+        },
+      };
+      const idempotentFirst = await client.request(
+        { method: "tools/call", params: idempotentParams },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      const idempotentDuplicate = await client.request(
+        { method: "tools/call", params: idempotentParams },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      expect(idempotentDuplicate.task.taskId).toBe(idempotentFirst.task.taskId);
+      expect(sideEffectCount - beforeIdempotentMcp).toBe(1);
     } finally {
       await client.close();
       await app.close();
@@ -213,6 +269,144 @@ describe("durable task lifecycle", () => {
       expect(intent.rows[0]?.state).toBe("UNCERTAIN");
     } finally {
       unavailableGateway.close();
+    }
+  });
+
+  it("serializes concurrent idempotent calls and restores task/result across restart", async () => {
+    const before = sideEffectCount;
+    const operation = requiredOperation("durable_task");
+    const secondRuntime = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      new TaskRepository(pool),
+      new IdempotencyRepository(pool),
+    );
+    const [first, duplicate] = await Promise.all([
+      engine.callOperation(
+        operation,
+        { resourceId: "resource-idempotent" },
+        authorization,
+        undefined,
+        "same-task-key",
+      ),
+      secondRuntime.callOperation(
+        operation,
+        { resourceId: "resource-idempotent" },
+        authorization,
+        undefined,
+        "same-task-key",
+      ),
+    ]);
+    expect(first.kind).toBe("task");
+    expect(duplicate.kind).toBe("task");
+    if (first.kind !== "task" || duplicate.kind !== "task") throw new Error("Expected tasks");
+    expect(duplicate.task.taskId).toBe(first.task.taskId);
+    expect(sideEffectCount - before).toBe(1);
+
+    await expect(
+      engine.callOperation(
+        operation,
+        { resourceId: "different-arguments" },
+        authorization,
+        undefined,
+        "same-task-key",
+      ),
+    ).rejects.toThrow("IDEMPOTENCY_KEY_CONFLICT");
+
+    const syncBefore = sideEffectCount;
+    const sync = requiredOperation("echo_sync");
+    const syncFirst = await engine.callOperation(
+      sync,
+      { message: "deduplicated" },
+      authorization,
+      undefined,
+      "same-sync-key",
+    );
+    const syncAgain = await secondRuntime.callOperation(
+      sync,
+      { message: "deduplicated" },
+      authorization,
+      undefined,
+      "same-sync-key",
+    );
+    expect(syncAgain).toEqual(syncFirst);
+    expect(sideEffectCount - syncBefore).toBe(1);
+  });
+
+  it("recovers a pending idempotent admission through Reconcile", async () => {
+    const before = sideEffectCount;
+    const operation = requiredOperation("durable_task");
+    await expect(
+      engine.callOperation(
+        operation,
+        { resourceId: "resource-reconcile", scenario: "response_loss" },
+        authorization,
+        undefined,
+        "response-loss-key",
+      ),
+    ).rejects.toThrow("injected StartOperation response loss");
+
+    const recovered = await engine.callOperation(
+      operation,
+      { resourceId: "resource-reconcile", scenario: "response_loss" },
+      authorization,
+      undefined,
+      "response-loss-key",
+    );
+    expect(recovered.kind).toBe("task");
+    expect(sideEffectCount - before).toBe(1);
+    const rows = await pool.query<{ state: string }>(
+      `SELECT state FROM idempotency_record WHERE idempotency_key='response-loss-key'`,
+    );
+    expect(rows.rows[0]?.state).toBe("COMPLETE");
+  });
+
+  it("maps batched Availability and returns unknown on Adapter transport failure", async () => {
+    const response = await engine.checkAvailability(
+      [
+        { requestId: "available", operationName: "durable_task", arguments: { resourceId: "a" } },
+        {
+          requestId: "restricted",
+          operationName: "durable_task",
+          arguments: { resourceId: "b", scenario: "restricted" },
+        },
+        {
+          requestId: "disabled",
+          operationName: "durable_task",
+          arguments: { resourceId: "c", scenario: "disabled" },
+        },
+      ],
+      authorization,
+    );
+    expect(response.checks.map((check) => check.availability)).toEqual([
+      "available",
+      "restricted",
+      "disabled",
+    ]);
+
+    const unavailable = new GrpcAdapterGateway({
+      endpoint: "127.0.0.1:1",
+      providerId: "task-provider",
+      timeoutMs: 250,
+    });
+    try {
+      const fallbackEngine = new TaskEngine(
+        engine.manifest,
+        engine.operationSnapshotIds,
+        unavailable,
+        new TaskRepository(pool),
+      );
+      const fallback = await fallbackEngine.checkAvailability(
+        [{ requestId: "unknown", operationName: "durable_task", arguments: { resourceId: "u" } }],
+        authorization,
+      );
+      expect(fallback.checks[0]).toMatchObject({
+        availability: "unknown",
+        reasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
+      });
+    } finally {
+      unavailable.close();
     }
   });
 });

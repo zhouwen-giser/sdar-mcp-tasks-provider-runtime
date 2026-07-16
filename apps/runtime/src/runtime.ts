@@ -8,6 +8,7 @@ import type { RuntimeLogger } from "../../../packages/observability/src/index.js
 import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
 import {
   OperationSnapshotRepository,
+  IdempotencyRepository,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
@@ -105,7 +106,13 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       }
       const validated = new OperationRegistry().validate(manifest);
       const snapshotIds = await new OperationSnapshotRepository(pool).saveManifest(validated);
-      const taskEngine = new TaskEngine(validated, snapshotIds, gateway, new TaskRepository(pool));
+      const taskEngine = new TaskEngine(
+        validated,
+        snapshotIds,
+        gateway,
+        new TaskRepository(pool),
+        new IdempotencyRepository(pool),
+      );
       mcpHandler = new McpProtocolHandler(validated, gateway, taskEngine);
       dependencies.adapter = "ready";
     } catch (error) {

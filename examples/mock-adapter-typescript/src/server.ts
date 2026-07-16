@@ -9,6 +9,7 @@ import {
 export interface MockAdapterOptions {
   providerId?: string;
   providerVersion?: string;
+  onStartSideEffect?: (taskId: string) => void;
 }
 
 function notFound(message: string): grpc.ServiceError {
@@ -30,6 +31,62 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
   >();
 
   server.addService(adapterServiceDefinition(), {
+    checkAvailability: (
+      call: grpc.ServerUnaryCall<
+        { checks?: { requestId?: string; operationName?: string; arguments?: unknown }[] },
+        unknown
+      >,
+      callback: grpc.sendUnaryData<unknown>,
+    ) => {
+      const checkedAt = new Date();
+      const validUntil = new Date(checkedAt.getTime() + 10_000);
+      callback(null, {
+        profileVersion: "1.0",
+        checkedAt: timestamp(checkedAt),
+        checks: (call.request.checks ?? []).map((check) => {
+          const argumentsValue = protoStructToJson(check.arguments);
+          if (argumentsValue.scenario === "restricted") {
+            return {
+              requestId: check.requestId,
+              operationName: check.operationName,
+              availability: "RESTRICTED",
+              riskLevel: "HIGH",
+              reasonCode: "PREEMPTIBLE_TASK_ACTIVE",
+              description: "The resource may require preemption.",
+              validUntil: timestamp(validUntil),
+              earliestStartTime: timestamp(validUntil),
+              nextAvailableWindows: [
+                {
+                  startTime: timestamp(validUntil),
+                  endTime: timestamp(new Date(validUntil.getTime() + 60_000)),
+                },
+              ],
+              estimatedDelayMs: "10000",
+              possibleEffects: ["task_preemption", "start_rejection"],
+            };
+          }
+          if (argumentsValue.scenario === "disabled") {
+            return {
+              requestId: check.requestId,
+              operationName: check.operationName,
+              availability: "DISABLED",
+              riskLevel: "LOW",
+              reasonCode: "RESOURCE_DISABLED",
+              description: "The resource is disabled.",
+            };
+          }
+          return {
+            requestId: check.requestId,
+            operationName: check.operationName,
+            availability: "AVAILABLE",
+            riskLevel: "LOW",
+            reasonCode: "AVAILABLE",
+            description: "The operation is currently predicted to be available.",
+            validUntil: timestamp(validUntil),
+          };
+        }),
+      });
+    },
     describeProvider: (
       _call: grpc.ServerUnaryCall<unknown, unknown>,
       callback: grpc.sendUnaryData<unknown>,
@@ -143,6 +200,38 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       execution.snapshot = execution.terminalSnapshot;
       callback(null, execution.snapshot);
     },
+    reconcileExecution: (
+      call: grpc.ServerUnaryCall<{ taskId?: string; argumentHash?: string }, unknown>,
+      callback: grpc.sendUnaryData<unknown>,
+    ) => {
+      const execution = executions.get(call.request.taskId ?? "");
+      if (execution === undefined) {
+        callback(null, {
+          status: "NOT_FOUND",
+          reasonCode: "EXECUTION_NOT_FOUND",
+          message: "No execution is bound to this taskId.",
+          retryable: false,
+        });
+        return;
+      }
+      if (execution.argumentHash !== (call.request.argumentHash ?? "")) {
+        callback(null, {
+          status: "CONFLICT",
+          reasonCode: "ARGUMENT_HASH_CONFLICT",
+          message: "The taskId is bound to different arguments.",
+          retryable: false,
+        });
+        return;
+      }
+      callback(null, {
+        status: "FOUND",
+        snapshot: execution.snapshot,
+        externalExecutionId: execution.externalExecutionId,
+        reasonCode: "EXECUTION_FOUND",
+        message: "Execution recovered.",
+        retryable: false,
+      });
+    },
     startOperation: (
       call: grpc.ServerUnaryCall<
         {
@@ -192,21 +281,27 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       }
       const result = protoStructToJson(call.request.arguments);
       const now = new Date();
+      options.onStartSideEffect?.(taskId);
       if (call.request.operationName === "flex_task" && result.scenario === "terminal") {
+        const externalExecutionId = `inline-${taskId}`;
+        const terminalSnapshot = {
+          taskId,
+          externalExecutionId,
+          state: "SUCCEEDED",
+          revision: "1",
+          reasonCode: "SUCCESS",
+          message: "Task-capable operation completed inline.",
+          result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
+          observedAt: timestamp(now),
+        };
+        executions.set(taskId, {
+          externalExecutionId,
+          argumentHash: call.request.argumentHash ?? "",
+          snapshot: terminalSnapshot,
+          terminalSnapshot,
+        });
         callback(null, {
-          accepted: {
-            externalExecutionId: `inline-${taskId}`,
-            initialSnapshot: {
-              taskId,
-              externalExecutionId: `inline-${taskId}`,
-              state: "SUCCEEDED",
-              revision: "1",
-              reasonCode: "SUCCESS",
-              message: "Task-capable operation completed inline.",
-              result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
-              observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
-            },
-          },
+          accepted: { externalExecutionId, initialSnapshot: terminalSnapshot },
           result: "accepted",
         });
         return;
@@ -240,32 +335,49 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           snapshot: initialSnapshot,
           terminalSnapshot,
         });
+        if (result.scenario === "response_loss") {
+          callback(
+            Object.assign(new Error("injected StartOperation response loss"), {
+              code: grpc.status.UNAVAILABLE,
+            }),
+          );
+          return;
+        }
         callback(null, {
           accepted: { externalExecutionId, initialSnapshot },
           result: "accepted",
         });
         return;
       }
+      const externalExecutionId = `sync-${taskId}`;
+      const terminalSnapshot = {
+        taskId,
+        externalExecutionId,
+        state: "SUCCEEDED",
+        revision: "1",
+        reasonCode: "SUCCESS",
+        message: "Synchronous echo completed.",
+        result: jsonToProtoStruct(result),
+        observedAt: timestamp(now),
+      };
+      executions.set(taskId, {
+        externalExecutionId,
+        argumentHash: call.request.argumentHash ?? "",
+        snapshot: terminalSnapshot,
+        terminalSnapshot,
+      });
       callback(null, {
-        accepted: {
-          externalExecutionId: `sync-${taskId}`,
-          initialSnapshot: {
-            taskId,
-            externalExecutionId: `sync-${taskId}`,
-            state: "SUCCEEDED",
-            revision: "1",
-            reasonCode: "SUCCESS",
-            message: "Synchronous echo completed.",
-            result: jsonToProtoStruct(result),
-            observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
-          },
-        },
+        accepted: { externalExecutionId, initialSnapshot: terminalSnapshot },
         result: "accepted",
       });
     },
   });
 
   return server;
+}
+
+function timestamp(value: Date): { seconds: string; nanos: number } {
+  return { seconds: String(Math.floor(value.getTime() / 1000)), nanos: 0 };
 }
 
 export function bindMockAdapter(server: grpc.Server, address: string): Promise<number> {

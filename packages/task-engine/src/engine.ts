@@ -1,11 +1,24 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import { protoStructToJson } from "../../adapter-protocol/src/index.js";
-import type { ExecutionSnapshot } from "../../adapter-protocol/src/index.js";
+import type {
+  AvailabilityCheckInput,
+  ExecutionSnapshot,
+} from "../../adapter-protocol/src/index.js";
 import type { AuthorizationContext, TaskRecord } from "../../domain/src/index.js";
-import { isTerminalState, mapAdapterSnapshot } from "../../domain/src/index.js";
+import type { AvailabilityCheck, AvailabilityResponseValue } from "../../domain/src/index.js";
+import {
+  isTerminalState,
+  mapAdapterSnapshot,
+  unknownAvailability,
+  validateAvailabilityResponse,
+} from "../../domain/src/index.js";
 import type { ValidatedManifest, ValidatedOperation } from "../../operation-registry/src/index.js";
-import type { TaskRepository } from "../../persistence-postgres/src/index.js";
+import type {
+  IdempotencyRepository,
+  StoredInvocation,
+  TaskRepository,
+} from "../../persistence-postgres/src/index.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -19,6 +32,7 @@ export class TaskEngine {
     readonly operationSnapshotIds: Map<string, string>,
     readonly gateway: GrpcAdapterGateway,
     repository: TaskRepository,
+    readonly idempotency?: IdempotencyRepository,
   ) {
     this.#repository = repository;
   }
@@ -28,19 +42,96 @@ export class TaskEngine {
     argumentsValue: Record<string, unknown>,
     authorization: AuthorizationContext,
     ttlMs?: number,
+    idempotencyKey?: string,
   ): Promise<ToolInvocationResult> {
     operation.validateArguments(argumentsValue);
+    const argumentHash = hashArguments(argumentsValue);
+    if (idempotencyKey !== undefined) {
+      if (!operation.capabilities.idempotency || this.idempotency === undefined) {
+        throw new Error("IDEMPOTENCY_NOT_SUPPORTED");
+      }
+      if (idempotencyKey.length < 1 || idempotencyKey.length > 256) {
+        throw new Error("INVALID_IDEMPOTENCY_KEY");
+      }
+      const outcome = await this.idempotency.execute(
+        { authorization, operationName: operation.name, idempotencyKey, argumentHash },
+        async (stableTaskId, recovering) =>
+          storedInvocation(
+            await this.#executeOperation(
+              operation,
+              argumentsValue,
+              authorization,
+              ttlMs,
+              stableTaskId,
+              recovering,
+              argumentHash,
+            ),
+          ),
+      );
+      return this.#restoreStored(outcome, authorization);
+    }
+    return this.#executeOperation(
+      operation,
+      argumentsValue,
+      authorization,
+      ttlMs,
+      randomUUID(),
+      false,
+      argumentHash,
+    );
+  }
+
+  async checkAvailability(
+    checks: AvailabilityCheck[],
+    authorization: AuthorizationContext,
+  ): Promise<AvailabilityResponseValue> {
+    if (checks.length < 1 || checks.length > 128) throw new Error("INVALID_AVAILABILITY_BATCH");
+    const requestIds = new Set<string>();
+    for (const check of checks) {
+      if (!check.requestId || requestIds.has(check.requestId)) {
+        throw new Error("INVALID_AVAILABILITY_REQUEST_ID");
+      }
+      requestIds.add(check.requestId);
+      const operation = this.manifest.operations.find(
+        (candidate) => candidate.name === check.operationName,
+      );
+      if (!operation?.capabilities.availability) {
+        throw new Error("AVAILABILITY_NOT_SUPPORTED");
+      }
+      if (!isUnresolvedArguments(check.arguments)) operation.validateArguments(check.arguments);
+    }
+    try {
+      const response = await this.gateway.checkAvailability(
+        checks.map(toAdapterAvailabilityCheck),
+        executionOptions(authorization),
+      );
+      const checkedAt = protoTimestampToDate(response.checkedAt);
+      const results = response.checks.map(fromAdapterAvailability);
+      return validateAvailabilityResponse(checkedAt, checks, results);
+    } catch (error) {
+      if (isAvailabilityContractError(error)) throw error;
+      return unknownAvailability(checks);
+    }
+  }
+
+  async #executeOperation(
+    operation: ValidatedOperation,
+    argumentsValue: Record<string, unknown>,
+    authorization: AuthorizationContext,
+    ttlMs: number | undefined,
+    taskId: string,
+    recovering: boolean,
+    argumentHash: string,
+  ): Promise<ToolInvocationResult> {
     if (operation.execution === "SYNCHRONOUS") {
       const response = await this.gateway.startOperation(operation.name, argumentsValue, {
-        authorizationContextHash: authorization.hash,
-        executionMode: authorization.executionMode,
-        simulationId: authorization.simulationId,
+        ...executionOptions(authorization),
+        taskId,
+        argumentHash,
       });
       return { kind: "result", result: resultFromStart(response) };
     }
 
-    const taskId = randomUUID();
-    const argumentHash = hashArguments(argumentsValue);
     const operationSnapshotId = this.operationSnapshotIds.get(operation.name);
     if (operationSnapshotId === undefined) throw new Error("OPERATION_SNAPSHOT_NOT_FOUND");
     const intent = {
@@ -52,16 +143,38 @@ export class TaskEngine {
       arguments: argumentsValue,
       argumentHash,
     };
-    await this.#repository.createAdmissionIntent(intent);
+    const inserted = await this.#repository.createAdmissionIntent(intent);
+    if (!inserted || recovering) {
+      const existing = await this.#repository.getById(taskId);
+      if (existing !== null) return { kind: "task", task: detailedTask(existing) };
+      const reconciliation = await this.gateway.reconcileExecution(
+        taskId,
+        operation.name,
+        argumentHash,
+        executionOptions(authorization),
+      );
+      if (reconciliation.status === "CONFLICT") throw new Error("ADAPTER_RECONCILE_CONFLICT");
+      if (reconciliation.status === "FOUND" && reconciliation.snapshot !== undefined) {
+        return this.#publishReconciled(
+          operation,
+          intent,
+          reconciliation.externalExecutionId || reconciliation.snapshot.externalExecutionId,
+          reconciliation.snapshot,
+          ttlMs,
+          reconciliation as unknown as Record<string, unknown>,
+        );
+      }
+      if (reconciliation.status !== "NOT_FOUND") {
+        throw new Error("ADAPTER_RECONCILE_UNAVAILABLE");
+      }
+    }
 
     let response;
     try {
       response = await this.gateway.startOperation(operation.name, argumentsValue, {
         taskId,
         argumentHash,
-        authorizationContextHash: authorization.hash,
-        executionMode: authorization.executionMode,
-        simulationId: authorization.simulationId,
+        ...executionOptions(authorization),
         invocationAttempt: 1,
       });
     } catch (error) {
@@ -102,6 +215,47 @@ export class TaskEngine {
       await this.#repository.markAdmissionUncertain(taskId);
       throw error;
     }
+    return { kind: "task", task: detailedTask(task) };
+  }
+
+  async #publishReconciled(
+    operation: ValidatedOperation,
+    intent: {
+      taskId: string;
+      providerId: string;
+      operationName: string;
+      operationSnapshotId: string;
+      authorization: AuthorizationContext;
+      arguments: Record<string, unknown>;
+      argumentHash: string;
+    },
+    externalExecutionId: string,
+    snapshotValue: ExecutionSnapshot,
+    ttlMs: number | undefined,
+    adapterResponse: Record<string, unknown>,
+  ): Promise<ToolInvocationResult> {
+    const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
+    if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
+      await this.#repository.completeAdmissionWithoutTask(intent.taskId, adapterResponse);
+      return { kind: "result", result: transition.result ?? transition.error ?? {} };
+    }
+    const task = await this.#repository.publishAccepted({
+      ...intent,
+      externalExecutionId,
+      transition,
+      adapterRevision: Number(snapshotValue.revision),
+      ttlMs: ttlMs ?? 259_200_000,
+      adapterResponse,
+    });
+    return { kind: "task", task: detailedTask(task) };
+  }
+
+  async #restoreStored(
+    outcome: StoredInvocation,
+    authorization: AuthorizationContext,
+  ): Promise<ToolInvocationResult> {
+    if (outcome.kind === "result") return outcome;
+    const task = await this.#repository.getAuthorized(outcome.taskId, authorization);
     return { kind: "task", task: detailedTask(task) };
   }
 
@@ -159,9 +313,7 @@ function rejectionResult(
 }
 
 function hashArguments(value: Record<string, unknown>): string {
-  return createHash("sha256")
-    .update(JSON.stringify(value, Object.keys(value).sort()))
-    .digest("hex");
+  return createHash("sha256").update(canonicalize(value)).digest("hex");
 }
 
 function detailedTask(task: TaskRecord): Record<string, unknown> {
@@ -184,4 +336,137 @@ function detailedTask(task: TaskRecord): Record<string, unknown> {
       },
     },
   };
+}
+
+function storedInvocation(invocation: ToolInvocationResult): StoredInvocation {
+  if (invocation.kind === "result") return invocation;
+  return { kind: "task", taskId: String(invocation.task.taskId) };
+}
+
+function executionOptions(authorization: AuthorizationContext) {
+  return {
+    authorizationContextHash: authorization.hash,
+    executionMode: authorization.executionMode,
+    simulationId: authorization.simulationId,
+  };
+}
+
+function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalize(object[key])}`)
+    .join(",")}}`;
+}
+
+function toAdapterAvailabilityCheck(check: AvailabilityCheck): AvailabilityCheckInput {
+  if (isUnresolvedArguments(check.arguments)) {
+    return {
+      requestId: check.requestId,
+      operationName: check.operationName,
+      unresolvedArguments: {
+        knownArguments: check.arguments.knownArguments,
+        unresolvedPaths: check.arguments.unresolvedPaths,
+      },
+      timing: toAdapterTiming(check.timing),
+    };
+  }
+  return {
+    requestId: check.requestId,
+    operationName: check.operationName,
+    arguments: check.arguments,
+    timing: toAdapterTiming(check.timing),
+  };
+}
+
+function isUnresolvedArguments(value: AvailabilityCheck["arguments"]): value is {
+  unresolved: true;
+  knownArguments: Record<string, unknown>;
+  unresolvedPaths: string[];
+} {
+  return "unresolved" in value && value.unresolved === true;
+}
+
+function toAdapterTiming(timing: AvailabilityCheck["timing"]): Record<string, unknown> {
+  const start = timing?.start;
+  return {
+    start: {
+      mode: (start?.mode ?? "immediate").toUpperCase(),
+      ...(start?.scheduledAt === undefined
+        ? {}
+        : { scheduledAt: dateToProtoTimestamp(new Date(start.scheduledAt)) }),
+      startToleranceMs: String(start?.startToleranceMs ?? 0),
+    },
+    ...(timing?.maxElapsedMs === undefined || timing.maxElapsedMs === null
+      ? {}
+      : { maxElapsedMs: String(timing.maxElapsedMs) }),
+  };
+}
+
+function fromAdapterAvailability(result: {
+  requestId: string;
+  operationName: string;
+  availability: string;
+  riskLevel: string;
+  reasonCode: string;
+  description: string;
+  validUntil?: unknown;
+  earliestStartTime?: unknown;
+  nextAvailableWindows: { startTime?: unknown; endTime?: unknown }[];
+  estimatedDelayMs: string | number;
+  possibleEffects: string[];
+}) {
+  return {
+    requestId: result.requestId,
+    operationName: result.operationName,
+    availability: result.availability.toLowerCase() as
+      "available" | "restricted" | "disabled" | "unknown",
+    riskLevel: result.riskLevel.toLowerCase() as
+      "low" | "medium" | "high" | "critical" | "unspecified",
+    ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}),
+    ...(result.description ? { description: result.description } : {}),
+    ...(hasTimestamp(result.validUntil)
+      ? { validUntil: protoTimestampToDate(result.validUntil).toISOString() }
+      : {}),
+    ...(hasTimestamp(result.earliestStartTime)
+      ? { earliestStartTime: protoTimestampToDate(result.earliestStartTime).toISOString() }
+      : {}),
+    nextAvailableWindows: result.nextAvailableWindows
+      .filter((window) => hasTimestamp(window.startTime) && hasTimestamp(window.endTime))
+      .map((window) => ({
+        startTime: protoTimestampToDate(window.startTime).toISOString(),
+        endTime: protoTimestampToDate(window.endTime).toISOString(),
+      })),
+    estimatedDelayMs: Number(result.estimatedDelayMs),
+    possibleEffects: result.possibleEffects,
+  };
+}
+
+function hasTimestamp(value: unknown): boolean {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "seconds" in value &&
+    Number.isFinite(Number((value as { seconds?: unknown }).seconds)) &&
+    Number((value as { seconds?: unknown }).seconds) !== 0
+  );
+}
+
+function protoTimestampToDate(value: unknown): Date {
+  if (!hasTimestamp(value)) throw new Error("INVALID_AVAILABILITY_TIMESTAMP");
+  const timestamp = value as { seconds: string | number; nanos?: number };
+  return new Date(Number(timestamp.seconds) * 1000 + (timestamp.nanos ?? 0) / 1_000_000);
+}
+
+function dateToProtoTimestamp(value: Date): Record<string, string | number> {
+  if (!Number.isFinite(value.getTime())) throw new Error("INVALID_SCHEDULED_AT");
+  return { seconds: String(Math.floor(value.getTime() / 1000)), nanos: 0 };
+}
+
+function isAvailabilityContractError(error: unknown): boolean {
+  return (
+    error instanceof Error && /^(AVAILABILITY_|AVAILABLE_|RESTRICTED_|INVALID_)/.test(error.message)
+  );
 }

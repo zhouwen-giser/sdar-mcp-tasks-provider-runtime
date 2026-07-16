@@ -5,14 +5,50 @@ import {
   CallToolRequestSchema,
   GetTaskRequestSchema,
   ListToolsRequestSchema,
+  RequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
-import type { AuthorizationContext, ExecutionMode } from "../../domain/src/index.js";
+import type {
+  AuthorizationContext,
+  AvailabilityCheck,
+  ExecutionMode,
+} from "../../domain/src/index.js";
 import type { TaskEngine } from "../../task-engine/src/index.js";
+import { z } from "zod";
+
+const AvailabilityCheckSchema = z.object({
+  requestId: z.string().min(1).max(256),
+  operationName: z.string().min(1).max(64),
+  arguments: z.union([
+    z.record(z.string(), z.unknown()),
+    z.object({
+      unresolved: z.literal(true),
+      knownArguments: z.record(z.string(), z.unknown()),
+      unresolvedPaths: z.array(z.string()).max(256),
+    }),
+  ]),
+  timing: z
+    .object({
+      start: z
+        .object({
+          mode: z.enum(["immediate", "scheduled"]),
+          scheduledAt: z.string().optional(),
+          startToleranceMs: z.number().int().nonnegative().optional(),
+        })
+        .optional(),
+      maxElapsedMs: z.number().int().positive().nullable().optional(),
+    })
+    .optional(),
+});
+
+const CheckAvailabilityRequestSchema = RequestSchema.extend({
+  method: z.literal("io.sdar/taskExecution/checkAvailability"),
+  params: z.object({ checks: z.array(AvailabilityCheckSchema).min(1).max(128) }),
+});
 
 export class McpProtocolHandler {
   constructor(
@@ -71,6 +107,7 @@ export class McpProtocolHandler {
           argumentsValue,
           authorization,
           params.task?.ttl,
+          idempotencyKey(params._meta),
         );
         return invocation.kind === "result" ? invocation.result : { task: invocation.task };
       }
@@ -101,6 +138,14 @@ export class McpProtocolHandler {
     const taskEngine = this.taskEngine;
     if (taskEngine !== undefined) {
       server.setRequestHandler(
+        CheckAvailabilityRequestSchema,
+        ({ params }) =>
+          taskEngine.checkAvailability(
+            params.checks as AvailabilityCheck[],
+            authorization,
+          ) as never,
+      );
+      server.setRequestHandler(
         GetTaskRequestSchema,
         ({ params }) => taskEngine.getTask(params.taskId, authorization) as never,
       );
@@ -114,6 +159,16 @@ export class McpProtocolHandler {
     });
     await transport.handleRequest(request, response, body);
   }
+}
+
+function idempotencyKey(meta: unknown): string | undefined {
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const profile = (meta as Record<string, unknown>)["io.sdar/taskExecution"];
+  if (typeof profile !== "object" || profile === null) return undefined;
+  const key = (profile as Record<string, unknown>).idempotencyKey;
+  if (key === undefined) return undefined;
+  if (typeof key !== "string") throw new Error("INVALID_IDEMPOTENCY_KEY");
+  return key;
 }
 
 function authorizationFromRequest(request: IncomingMessage): AuthorizationContext {
