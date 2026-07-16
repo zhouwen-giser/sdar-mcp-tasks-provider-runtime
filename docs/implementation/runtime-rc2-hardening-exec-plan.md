@@ -4,7 +4,7 @@ Status: active
 Branch: `feature/mcp-tasks-provider-runtime-v1`  
 Immutable baseline: annotated tag `v1.0.0-rc.1` -> `51d68926ba1bc9e935438e750582693aea3ecf4d`  
 Target: annotated tag `v1.0.0-rc.2`  
-Last updated: 2026-07-16 (H0)
+Last updated: 2026-07-16 (H1)
 
 ## Objective and invariants
 
@@ -45,18 +45,18 @@ Every H phase follows this loop:
 
 ## Progress and exit evidence
 
-| Phase | Scope                                                                         | Required evidence                                             | Status      |
-| ----- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | ----------- |
-| H0    | real baseline, six red regressions, plan and matrix                           | baseline assessment, red output, H0 report, push/CI           | in progress |
-| H1    | durable stop command dispatcher and rejection policy                          | T-001..T-006, T-029, T-030; migration; no RPC under DB client | pending     |
-| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | pending     |
-| H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | pending     |
-| H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | pending     |
-| H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | pending     |
-| H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | pending     |
-| H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | pending     |
-| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending     |
-| H9    | docs, full release gate, PR #1, final report and immutable tag                | T-050, all checks green, report-containing tag commit         | pending     |
+| Phase | Scope                                                                         | Required evidence                                             | Status   |
+| ----- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | -------- |
+| H0    | real baseline, six red regressions, plan and matrix                           | baseline assessment, red output, H0 report, push/CI           | complete |
+| H1    | durable stop command dispatcher and rejection policy                          | T-001..T-006, T-029, T-030; migration; no RPC under DB client | complete |
+| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | pending  |
+| H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | pending  |
+| H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | pending  |
+| H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | pending  |
+| H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | pending  |
+| H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | pending  |
+| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending  |
+| H9    | docs, full release gate, PR #1, final report and immutable tag                | T-050, all checks green, report-containing tag commit         | pending  |
 
 ## Planned schema evolution
 
@@ -93,3 +93,12 @@ The tag is never moved.
   Prettier so its verified checksums remain meaningful.
 - 2026-07-16 H0: separate expected-red regressions from normal CI until their owning phases
   implement the fixes; an expected red result is never reported as a passing release gate.
+- 2026-07-16 H0 closure: commits `4bb2820` and `facc38e`; push run `29508056591` and
+  PR run `29508060466` passed quality, Buf and Compose jobs.
+- 2026-07-16 H1: command claim and finalization use separate short database transactions;
+  Adapter RPC runs between them without a checked-out database connection. User cancellation
+  rejection restores only an authoritative Reconcile Snapshot, while mandatory stop rejection
+  fails with `SAFE_STOP_UNCONFIRMED`.
+- 2026-07-16 H1 closure: implementation `3f2d425`; push run `29509615239` and PR run
+  `29509616607` passed `pnpm verify`, Buf lint/compatibility and Compose with both Adapter
+  images. The report closure commit follows the evidence it records.
