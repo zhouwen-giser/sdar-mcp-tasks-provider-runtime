@@ -9,3 +9,5 @@
 | PostgreSQL R4 integration       | CI pending | batch Availability, unknown fallback, MCP method, sync/task duplicate, conflict, two-Runtime concurrency, restart and Reconcile |
 
 The real PostgreSQL suite is mandatory and runs in GitHub Actions; absence of `TEST_DATABASE_URL` is not skipped locally.
+
+Initial pushed run `29494518427` exposed that a NUL-delimited advisory-lock identity cannot be sent as PostgreSQL UTF-8 text. The lock identity now uses unambiguous canonical JSON array encoding before `hashtextextended`; its component binding is unchanged and no SQL constraint/test was weakened.

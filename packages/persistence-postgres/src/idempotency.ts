@@ -114,11 +114,11 @@ function keyValues(input: IdempotencyInput, extra?: unknown): unknown[] {
 }
 
 function lockIdentity(input: IdempotencyInput): string {
-  return [
+  return JSON.stringify([
     input.authorization.hash,
     input.operationName,
     input.idempotencyKey,
     input.authorization.executionMode,
-    input.authorization.simulationId ?? "",
-  ].join("\u0000");
+    input.authorization.simulationId,
+  ]);
 }
