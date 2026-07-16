@@ -53,3 +53,9 @@ export interface ExecutionSnapshot {
   result?: unknown;
   inputRequests?: unknown[];
 }
+
+export interface StartOperationResponse {
+  result: "accepted" | "rejected";
+  accepted?: { externalExecutionId: string; initialSnapshot: ExecutionSnapshot };
+  rejected?: { reasonCode: string; message: string; retryable: boolean };
+}

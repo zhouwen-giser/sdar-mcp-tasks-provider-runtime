@@ -7,7 +7,10 @@ WORKDIR /workspace
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml .npmrc ./
 COPY apps/runtime/package.json apps/runtime/package.json
 COPY packages/adapter-protocol/package.json packages/adapter-protocol/package.json
+COPY packages/mcp-protocol/package.json packages/mcp-protocol/package.json
 COPY packages/observability/package.json packages/observability/package.json
+COPY packages/operation-registry/package.json packages/operation-registry/package.json
+COPY packages/persistence-postgres/package.json packages/persistence-postgres/package.json
 COPY examples/mock-adapter-typescript/package.json examples/mock-adapter-typescript/package.json
 COPY examples/mock-adapter-python/package.json examples/mock-adapter-python/package.json
 RUN pnpm install --frozen-lockfile=false
@@ -20,6 +23,7 @@ WORKDIR /app
 COPY --from=build /workspace/node_modules /app/node_modules
 COPY --from=build /workspace/dist /app/dist
 COPY --from=build /workspace/proto /app/proto
+COPY --from=build /workspace/migrations /app/migrations
 CMD ["node", "dist/apps/runtime/src/main.js"]
 
 FROM runtime AS adapter-ts

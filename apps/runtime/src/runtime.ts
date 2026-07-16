@@ -2,8 +2,14 @@ import Fastify from "fastify";
 import { Pool } from "pg";
 import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index.js";
 import type { ProviderManifest } from "../../../packages/adapter-protocol/src/index.js";
+import { McpProtocolHandler } from "../../../packages/mcp-protocol/src/index.js";
 import { createLogger } from "../../../packages/observability/src/index.js";
 import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
+import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
+import {
+  OperationSnapshotRepository,
+  runMigrations,
+} from "../../../packages/persistence-postgres/src/index.js";
 import type { RuntimeConfig } from "./config.js";
 
 function createHttpServer(logger: RuntimeLogger) {
@@ -41,6 +47,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     recovery: "starting",
   };
   let manifest: ProviderManifest | undefined;
+  let mcpHandler: McpProtocolHandler | undefined;
 
   app.get("/health/live", () => ({ status: "live" }));
   app.get("/health/ready", async (_request, reply) => {
@@ -53,6 +60,24 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (manifest === undefined) return reply.code(503).send({ error: "manifest_not_loaded" });
     return manifest;
   });
+  app.all("/mcp", async (request, reply) => {
+    if (request.method !== "POST") {
+      return reply.code(405).send({
+        jsonrpc: "2.0",
+        error: { code: -32_000, message: "Method not allowed." },
+        id: null,
+      });
+    }
+    if (mcpHandler === undefined) {
+      return reply.code(503).send({
+        jsonrpc: "2.0",
+        error: { code: -32_003, message: "Provider not ready." },
+        id: null,
+      });
+    }
+    reply.hijack();
+    await mcpHandler.handle(request.raw, reply.raw, request.body);
+  });
 
   app.addHook("onClose", async () => {
     gateway.close();
@@ -61,6 +86,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
 
   async function initialize(): Promise<ProviderManifest> {
     try {
+      await runMigrations(pool);
       await pool.query("SELECT 1 AS runtime_database_ready");
       dependencies.database = "ready";
     } catch (error) {
@@ -75,6 +101,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           `Adapter provider id ${manifest.providerId} does not match configured ${config.PROVIDER_ID}`,
         );
       }
+      const validated = new OperationRegistry().validate(manifest);
+      await new OperationSnapshotRepository(pool).saveManifest(validated);
+      mcpHandler = new McpProtocolHandler(validated, gateway);
       dependencies.adapter = "ready";
     } catch (error) {
       dependencies.adapter = "failed";

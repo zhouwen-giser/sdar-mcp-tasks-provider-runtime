@@ -12,6 +12,22 @@ jobs:
   quality:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: sdar
+          POSTGRES_PASSWORD: sdar
+          POSTGRES_DB: sdar_runtime_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sdar -d sdar_runtime_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,6 +59,7 @@ jobs:
       - run: pnpm test:unit
       - run: pnpm test:contract
       - run: pnpm test:integration
+      - run: pnpm test:security
 
   compose-smoke:
     runs-on: ubuntu-24.04

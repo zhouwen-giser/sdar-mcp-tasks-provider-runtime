@@ -20,7 +20,7 @@
     "adapter:python:smoke": "pnpm build && node scripts/python-adapter-smoke.mjs",
     "test:unit": "vitest run tests/unit",
     "test:contract": "vitest run tests/contract",
-    "test:integration": "vitest run tests/integration",
+    "test:integration": "node scripts/require-env.mjs TEST_DATABASE_URL && vitest run tests/integration",
     "test:recovery": "vitest run tests/recovery",
     "test:security": "vitest run tests/security",
     "test:e2e": "vitest run tests/e2e",
@@ -33,6 +33,8 @@
   "dependencies": {
     "@grpc/grpc-js": "1.14.4",
     "@grpc/proto-loader": "0.8.1",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "ajv": "8.17.1",
     "fastify": "5.10.0",
     "google-proto-files": "5.0.2",
     "pg": "8.22.0",

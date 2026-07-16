@@ -1,8 +1,9 @@
 import * as grpc from "@grpc/grpc-js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { adapterClientConstructor } from "./proto.js";
+import { jsonToProtoStruct } from "./struct.js";
 import { ADAPTER_PROTOCOL_VERSION } from "./types.js";
-import type { ExecutionSnapshot, ProviderManifest } from "./types.js";
+import type { ExecutionSnapshot, ProviderManifest, StartOperationResponse } from "./types.js";
 
 type AdapterClient = grpc.Client & {
   describeProvider(
@@ -14,6 +15,11 @@ type AdapterClient = grpc.Client & {
     request: unknown,
     options: grpc.CallOptions,
     callback: grpc.requestCallback<ExecutionSnapshot>,
+  ): grpc.ClientUnaryCall;
+  startOperation(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<StartOperationResponse>,
   ): grpc.ClientUnaryCall;
 };
 
@@ -58,6 +64,28 @@ export class GrpcAdapterGateway {
     });
   }
 
+  startOperation(
+    operationName: string,
+    argumentsValue: Record<string, unknown>,
+  ): Promise<StartOperationResponse> {
+    const taskId = randomUUID();
+    const canonicalArguments = JSON.stringify(argumentsValue, Object.keys(argumentsValue).sort());
+    return this.#unary<StartOperationResponse>("startOperation", {
+      metadata: this.#metadata(),
+      taskId,
+      operationName,
+      arguments: jsonToProtoStruct(argumentsValue),
+      timing: { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
+      executionContext: {
+        authorizationContextHash: "r2-development",
+        executionMode: "LIVE",
+        correlationId: randomUUID(),
+      },
+      argumentHash: createHash("sha256").update(canonicalArguments).digest("hex"),
+      invocationAttempt: 1,
+    });
+  }
+
   close(): void {
     this.#client.close();
   }
@@ -70,7 +98,10 @@ export class GrpcAdapterGateway {
     };
   }
 
-  #unary<T>(method: "describeProvider" | "getExecution", request: unknown): Promise<T> {
+  #unary<T>(
+    method: "describeProvider" | "getExecution" | "startOperation",
+    request: unknown,
+  ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
     return new Promise<T>((resolve, reject) => {
       const callback: grpc.requestCallback<T> = (error, value) => {
@@ -84,11 +115,17 @@ export class GrpcAdapterGateway {
           { deadline },
           callback as grpc.requestCallback<ProviderManifest>,
         );
-      } else {
+      } else if (method === "getExecution") {
         this.#client.getExecution(
           request,
           { deadline },
           callback as grpc.requestCallback<ExecutionSnapshot>,
+        );
+      } else {
+        this.#client.startOperation(
+          request,
+          { deadline },
+          callback as grpc.requestCallback<StartOperationResponse>,
         );
       }
     });

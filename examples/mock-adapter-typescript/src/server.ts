@@ -1,7 +1,10 @@
 import * as grpc from "@grpc/grpc-js";
-import { adapterServiceDefinition } from "../../../packages/adapter-protocol/src/index.js";
-import { ADAPTER_PROTOCOL_VERSION } from "../../../packages/adapter-protocol/src/index.js";
-import { jsonToStruct } from "./struct.js";
+import {
+  adapterServiceDefinition,
+  ADAPTER_PROTOCOL_VERSION,
+  jsonToProtoStruct,
+  protoStructToJson,
+} from "../../../packages/adapter-protocol/src/index.js";
 
 export interface MockAdapterOptions {
   providerId?: string;
@@ -33,13 +36,13 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
             name: "echo_sync",
             description: "Returns the supplied message synchronously.",
             execution: "SYNCHRONOUS",
-            inputSchema: jsonToStruct({
+            inputSchema: jsonToProtoStruct({
               type: "object",
               properties: { message: { type: "string" } },
               required: ["message"],
               additionalProperties: false,
             }),
-            outputSchema: jsonToStruct({
+            outputSchema: jsonToProtoStruct({
               type: "object",
               properties: { message: { type: "string" } },
               required: ["message"],
@@ -61,7 +64,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
             name: "durable_task",
             description: "Reference long-running task used by conformance scenarios.",
             execution: "TASK_REQUIRED",
-            inputSchema: jsonToStruct({
+            inputSchema: jsonToProtoStruct({
               type: "object",
               properties: {
                 resourceId: { type: "string" },
@@ -70,7 +73,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               required: ["resourceId"],
               additionalProperties: false,
             }),
-            outputSchema: jsonToStruct({ type: "object" }),
+            outputSchema: jsonToProtoStruct({ type: "object" }),
             capabilities: {
               availability: true,
               scheduling: true,
@@ -94,6 +97,47 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       callback: grpc.sendUnaryData<unknown>,
     ) => {
       callback(notFound(`Execution ${call.request.taskId ?? "<missing>"} does not exist`));
+    },
+    startOperation: (
+      call: grpc.ServerUnaryCall<
+        {
+          taskId?: string;
+          operationName?: string;
+          arguments?: unknown;
+        },
+        unknown
+      >,
+      callback: grpc.sendUnaryData<unknown>,
+    ) => {
+      if (call.request.operationName !== "echo_sync") {
+        callback(null, {
+          rejected: {
+            reasonCode: "UNSUPPORTED_R1_SCENARIO",
+            message: "R1 only executes echo_sync.",
+            retryable: false,
+          },
+          result: "rejected",
+        });
+        return;
+      }
+      const result = protoStructToJson(call.request.arguments);
+      const now = new Date();
+      callback(null, {
+        accepted: {
+          externalExecutionId: `sync-${call.request.taskId ?? "missing"}`,
+          initialSnapshot: {
+            taskId: call.request.taskId,
+            externalExecutionId: `sync-${call.request.taskId ?? "missing"}`,
+            state: "SUCCEEDED",
+            revision: "1",
+            reasonCode: "SUCCESS",
+            message: "Synchronous echo completed.",
+            result: jsonToProtoStruct(result),
+            observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
+          },
+        },
+        result: "accepted",
+      });
     },
   });
 
