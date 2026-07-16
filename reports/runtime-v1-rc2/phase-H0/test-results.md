@@ -17,14 +17,21 @@ The six red tests must fail on rc.1 and are not skipped.
 
 ## H0 pre-commit rerun
 
-| Command | Result | Tests | Notes |
-|---|---|---:|---|
-| `pnpm format:check` | PASS | n/a | portable CRLF handling; task package excluded unchanged |
-| `pnpm lint` | PASS | n/a | includes H0 guard source |
-| `pnpm typecheck` | PASS | n/a | includes H0 guard source |
-| `pnpm test:unit` | PASS | 24/24 | no skip |
-| `pnpm test:rc2:red` | EXPECTED FAIL | 0/6 | all six rc.1 defect guards failed as required |
+| Command             | Result        | Tests | Notes                                                   |
+| ------------------- | ------------- | ----: | ------------------------------------------------------- |
+| `pnpm format:check` | PASS          |   n/a | portable CRLF handling; task package excluded unchanged |
+| `pnpm lint`         | PASS          |   n/a | includes H0 guard source                                |
+| `pnpm typecheck`    | PASS          |   n/a | includes H0 guard source                                |
+| `pnpm test:unit`    | PASS          | 24/24 | no skip                                                 |
+| `pnpm test:rc2:red` | EXPECTED FAIL |   0/6 | all six rc.1 defect guards failed as required           |
 
 An expected-red result is not counted as a passing release test. Its complete six-failure result
 is the H0 reproducer evidence; owning phases must turn it green and add the required real-layer
 tests.
+
+## First pushed CI
+
+GitHub Actions push run `29507898216` passed `compose-smoke` but its `quality` job stopped at
+`format:check`: this report had been appended after its earlier local formatting pass. No product
+test ran or was hidden after that fail-fast gate. The report was reformatted and the complete
+local format check rerun before the corrective push.
