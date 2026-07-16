@@ -30,6 +30,9 @@ import { createAuthorizationResolver } from "./security.js";
 import type { AuthorizationResolver } from "./security.js";
 
 const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
+// SDK 1.29.0 defines omitted sessionIdGenerator as explicit stateless mode.
+// Its exact-optional type rejects spelling the property as `undefined`.
+const StatelessTransportOptions = Object.freeze({});
 const RuntimeCallToolRequestSchema = CallToolRequestSchema.extend({
   params: CallToolRequestSchema.shape.params.extend({
     // Accept the field long enough to map malformed TTL values to JSON-RPC
@@ -253,7 +256,7 @@ export class McpProtocolHandler {
       );
     }
 
-    const transport = new StreamableHTTPServerTransport();
+    const transport = new StreamableHTTPServerTransport(StatelessTransportOptions);
     await server.connect(transport as unknown as Transport);
     response.once("close", () => {
       void transport.close();

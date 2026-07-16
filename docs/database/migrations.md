@@ -56,4 +56,10 @@ confirmation time. Existing active finite-TTL Tasks receive a fresh protected wi
 upgrade; existing terminal Tasks retain their result for their stored TTL or the 24-hour default.
 Partial indexes support batched `FOR UPDATE SKIP LOCKED` expiry and purge across Runtime replicas.
 
+`012_idempotency_claim_lease.sql` replaces the connection-scoped advisory-lock execution window
+with a durable owner/expiry claim and attempt counter. Existing PENDING rc.1/rc.2 rows receive an
+already-due migration recovery lease; COMPLETE rows retain their payload and no lease. The new
+partial index orders takeover work by lease expiry. Runtime claims in a short transaction,
+performs Adapter work without a checked-out PoolClient, and completes with an owner CAS.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

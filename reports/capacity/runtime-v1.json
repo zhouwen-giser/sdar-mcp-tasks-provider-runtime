@@ -1,35 +1,35 @@
 {
   "version": "1.0.0-rc.1",
-  "generatedAt": "2026-07-16T17:23:19.731Z",
+  "generatedAt": "2026-07-16T23:03:51.949Z",
   "environment": {
-    "node": "v22.23.1",
-    "platform": "linux/x64",
+    "node": "v22.14.0",
+    "platform": "win32/x64",
     "cpuLogicalCount": 16,
-    "memoryBytes": 12545503232,
+    "memoryBytes": 34085838848,
     "database": "TEST_DATABASE_URL target (credentials redacted)",
     "topology": "single Runtime, single TypeScript Adapter, sequential MCP HTTP client"
   },
   "workloads": {
     "synchronousTool": {
       "iterations": 100,
-      "durationMs": 820.183759,
-      "throughputPerSecond": 121.92389681298236,
+      "durationMs": 1008.2826000000001,
+      "throughputPerSecond": 99.1785437931786,
       "latencyMs": {
-        "p50": 7.803582000000006,
-        "p95": 11.180155999999897,
-        "p99": 13.363585000000057,
-        "max": 22.252091000000064
+        "p50": 9.499299999999948,
+        "p95": 13.709100000000035,
+        "p99": 20.042599999999993,
+        "max": 23.297199999999975
       }
     },
     "durableTaskCreateAndGet": {
       "iterations": 25,
-      "durationMs": 1040.18707,
-      "throughputPerSecond": 24.034138397817234,
+      "durationMs": 1177.3890000000001,
+      "throughputPerSecond": 21.2334241274549,
       "latencyMs": {
-        "p50": 39.434847999999874,
-        "p95": 51.17439400000012,
-        "p99": 61.230477000000064,
-        "max": 61.230477000000064
+        "p50": 46.24519999999984,
+        "p95": 59.16379999999981,
+        "p99": 63.04470000000015,
+        "max": 63.04470000000015
       }
     }
   }

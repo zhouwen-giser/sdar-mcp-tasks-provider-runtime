@@ -19,3 +19,8 @@ The authoritative RC measurement is generated in GitHub Actions with the exact
 release dependencies and uploaded as release evidence. A material regression in
 the same runner/topology must be explained even when functional verification
 still passes.
+
+H7 also records the production runtime image baseline at
+`reports/image/runtime-v1-rc2.json`. The audit compares two build filesystem/config shapes,
+requires the `node` user, rejects development/test/documentation payloads and enforces a 150 MB
+compressed image ceiling. This is a regression guard, not a universal deployment limit.

@@ -2,6 +2,11 @@
 
 The Streamable HTTP endpoint is `POST /mcp`. It uses the official TypeScript MCP SDK while every SDK import remains inside `packages/mcp-protocol`.
 
+The endpoint is explicitly stateless under SDK 1.29.0: every POST creates an independent Server
+and transport, no MCP session id or resumable event store is issued, and GET/DELETE session
+lifecycle plus Task status notifications are not advertised. Durable Task ids, PostgreSQL state
+and `tasks/get`/`tasks/result` polling provide continuity across requests and replicas.
+
 At startup Runtime calls Adapter DescribeProvider, validates and hashes the Manifest, persists immutable operation snapshots, and builds one Tool per operation. Resource instances remain Tool arguments and never expand the catalog.
 
 Initialization declares Tools and both task extensions. Profile booleans are derived from Runtime support and loaded operation capabilities. Every Tool publishes `_meta["io.sdar/taskExecution"]` with execution mode and supported scheduling, elapsed-time, observation, input, cancellation and idempotency features.

@@ -17,8 +17,11 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 if (databaseUrl === undefined) throw new Error("TEST_DATABASE_URL is required for E2E tests");
 
 let adapter: grpc.Server;
+let adapterPort: number;
 let runtime: RuntimeApplication;
 let client: Client;
+let transport: StreamableHTTPClientTransport;
+let runtimeUrl: URL;
 
 beforeAll(async () => {
   const pool = new Pool({ connectionString: databaseUrl });
@@ -29,7 +32,7 @@ beforeAll(async () => {
   await pool.end();
 
   adapter = createMockAdapterServer({ providerId: "e2e-provider" });
-  const adapterPort = await bindMockAdapter(adapter, "127.0.0.1:0");
+  adapterPort = await bindMockAdapter(adapter, "127.0.0.1:0");
   runtime = createRuntime(
     loadRuntimeConfig({
       DATABASE_URL: databaseUrl,
@@ -39,20 +42,19 @@ beforeAll(async () => {
       LOG_LEVEL: "warn",
       SCHEDULER_POLL_MS: "1000",
       RECOVERY_POLL_MS: "5000",
+      ADAPTER_RPC_TIMEOUT_MS: "250",
+      ADAPTER_HEALTH_POLL_MS: "100",
+      ADAPTER_HEALTH_FAILURE_THRESHOLD: "1",
     }),
   );
   await runtime.initialize();
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("Runtime did not bind");
+  runtimeUrl = new URL(`http://127.0.0.1:${String(address.port)}/mcp`);
   client = new Client({ name: "runtime-e2e", version: "1.0.0" });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${String(address.port)}/mcp`), {
-      requestInit: {
-        headers: { "x-sdar-subject": "e2e-user", "x-sdar-tenant": "e2e-tenant" },
-      },
-    }) as unknown as Transport,
-  );
+  transport = clientTransport();
+  await client.connect(transport as unknown as Transport);
 });
 
 afterAll(async () => {
@@ -100,4 +102,63 @@ describe("independently deployed Runtime stack", () => {
     const completed = await client.experimental.tasks.getTask(created.task.taskId);
     expect(completed).toMatchObject({ status: "completed" });
   });
+
+  it("T-046 serves repeated requests and multiple clients in explicit stateless mode", async () => {
+    expect(transport.sessionId).toBeUndefined();
+    await expect(client.listTools()).resolves.toHaveProperty("tools.length", 3);
+    await expect(client.listTools()).resolves.toHaveProperty("tools.length", 3);
+
+    const secondTransport = clientTransport();
+    const secondClient = new Client({ name: "runtime-e2e-second", version: "1.0.0" });
+    try {
+      await secondClient.connect(secondTransport as unknown as Transport);
+      expect(secondTransport.sessionId).toBeUndefined();
+      await expect(secondClient.listTools()).resolves.toHaveProperty("tools.length", 3);
+    } finally {
+      await secondClient.close();
+    }
+  });
+
+  it("T-041/T-042 attributes Adapter loss and automatically restores readiness", async () => {
+    await shutdown(adapter);
+    const unavailable = await waitForReadiness("failed");
+    expect(unavailable.statusCode).toBe(503);
+    expect(unavailable.json()).toMatchObject({
+      status: "not_ready",
+      dependencies: { database: "ready", adapter: "failed" },
+    });
+    expect((await runtime.app.inject({ method: "GET", url: "/health/live" })).statusCode).toBe(200);
+
+    adapter = createMockAdapterServer({ providerId: "e2e-provider" });
+    expect(await bindMockAdapter(adapter, `127.0.0.1:${String(adapterPort)}`)).toBe(adapterPort);
+    const recovered = await waitForReadiness("ready");
+    expect(recovered.statusCode).toBe(200);
+    expect(recovered.json()).toMatchObject({
+      status: "ready",
+      dependencies: { database: "ready", adapter: "ready" },
+    });
+  });
 });
+
+function clientTransport(): StreamableHTTPClientTransport {
+  return new StreamableHTTPClientTransport(runtimeUrl, {
+    requestInit: {
+      headers: { "x-sdar-subject": "e2e-user", "x-sdar-tenant": "e2e-tenant" },
+    },
+  });
+}
+
+async function waitForReadiness(adapterStatus: "ready" | "failed") {
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    const response = await runtime.app.inject({ method: "GET", url: "/health/ready" });
+    const body = response.json<{ dependencies?: { adapter?: unknown } }>();
+    if (body.dependencies?.adapter === adapterStatus) return response;
+    if (Date.now() >= deadline) throw new Error(`Adapter did not become ${adapterStatus}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+function shutdown(server: grpc.Server): Promise<void> {
+  return new Promise((resolve) => server.tryShutdown(() => resolve()));
+}

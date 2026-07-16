@@ -26,6 +26,7 @@ import {
   TtlCleaner,
 } from "../../../packages/task-engine/src/index.js";
 import type { RuntimeConfig } from "./config.js";
+import { BoundedRateLimiter } from "./rate-limiter.js";
 
 function createHttpServer(logger: RuntimeLogger, bodyLimit: number) {
   return Fastify({ loggerInstance: logger, bodyLimit });
@@ -37,6 +38,8 @@ export interface RuntimeDependencies {
   database: "starting" | "ready" | "failed";
   adapter: "starting" | "ready" | "failed";
   recovery: "starting" | "ready" | "failed";
+  scheduler: "starting" | "ready" | "failed";
+  commandDispatcher: "starting" | "ready" | "failed";
   ttlCleaner: "starting" | "ready" | "failed";
 }
 
@@ -52,7 +55,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   const logger = createLogger(config.LOG_LEVEL);
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
-  const pool = new Pool({ connectionString: config.DATABASE_URL, max: 10 });
+  const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
   const gateway = new GrpcAdapterGateway({
     endpoint: config.ADAPTER_ENDPOINT,
@@ -65,6 +68,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     database: "starting",
     adapter: "starting",
     recovery: "starting",
+    scheduler: "starting",
+    commandDispatcher: "starting",
     ttlCleaner: "starting",
   };
   let manifest: ProviderManifest | undefined;
@@ -73,23 +78,22 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let recoveryTimer: NodeJS.Timeout | undefined;
   let commandDispatcherTimer: NodeJS.Timeout | undefined;
   let ttlCleanerTimer: NodeJS.Timeout | undefined;
+  let adapterHealthTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
   let ttlCleanerTicking = false;
-  const rateWindows = new Map<string, { startedAt: number; count: number }>();
+  let adapterHealthTicking = false;
+  let adapterHealthFailures = 0;
+  const rateLimiter = new BoundedRateLimiter(
+    config.RATE_LIMIT_MAX,
+    config.RATE_LIMIT_WINDOW_MS,
+    config.RATE_LIMIT_MAX_KEYS,
+  );
 
   app.addHook("onRequest", async (request, reply) => {
     if (request.url !== "/mcp") return;
-    const now = Date.now();
-    const current = rateWindows.get(request.ip);
-    const window =
-      current === undefined || now - current.startedAt >= config.RATE_LIMIT_WINDOW_MS
-        ? { startedAt: now, count: 0 }
-        : current;
-    window.count += 1;
-    rateWindows.set(request.ip, window);
-    if (window.count > config.RATE_LIMIT_MAX) {
+    if (!rateLimiter.consume(request.ip).allowed) {
       metrics.increment("sdar_rate_limited_total");
       return reply.code(429).send({ error: "rate_limit_exceeded" });
     }
@@ -158,6 +162,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (recoveryTimer !== undefined) clearInterval(recoveryTimer);
     if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
     if (ttlCleanerTimer !== undefined) clearInterval(ttlCleanerTimer);
+    if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
     gateway.close();
     await pool.end();
   });
@@ -180,13 +185,18 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         );
       }
       const validated = new OperationRegistry().validate(manifest);
+      dependencies.adapter = "ready";
       const snapshotIds = await new OperationSnapshotRepository(pool).saveManifest(validated);
       const taskEngine = new TaskEngine(
         validated,
         snapshotIds,
         gateway,
         new TaskRepository(pool),
-        new IdempotencyRepository(pool, () => metrics.increment("sdar_idempotency_hits_total")),
+        new IdempotencyRepository(pool, () => metrics.increment("sdar_idempotency_hits_total"), {
+          leaseMs: config.IDEMPOTENCY_LEASE_MS,
+          waitTimeoutMs: config.IDEMPOTENCY_WAIT_TIMEOUT_MS,
+          pollMs: config.IDEMPOTENCY_POLL_MS,
+        }),
         undefined,
         metrics,
         (event) => logger.info(event, "task trace"),
@@ -222,7 +232,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         "startup recovery scanned",
       );
       await scheduler.tick();
+      dependencies.scheduler = "ready";
       await commandDispatcher.tick();
+      dependencies.commandDispatcher = "ready";
       await ttlCleaner.tick();
       dependencies.ttlCleaner = "ready";
       schedulerTimer = setInterval(() => {
@@ -230,8 +242,11 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         schedulerTicking = true;
         void scheduler
           .tick()
+          .then(() => {
+            dependencies.scheduler = "ready";
+          })
           .catch((error: unknown) => {
-            dependencies.database = "failed";
+            dependencies.scheduler = "failed";
             logger.error({ err: error }, "scheduler tick failed");
           })
           .finally(() => {
@@ -244,8 +259,11 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         commandDispatcherTicking = true;
         void commandDispatcher
           .tick()
+          .then(() => {
+            dependencies.commandDispatcher = "ready";
+          })
           .catch((error: unknown) => {
-            dependencies.database = "failed";
+            dependencies.commandDispatcher = "failed";
             logger.error({ err: error }, "command dispatcher tick failed");
           })
           .finally(() => {
@@ -262,7 +280,6 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             dependencies.ttlCleaner = "ready";
           })
           .catch((error: unknown) => {
-            dependencies.database = "failed";
             dependencies.ttlCleaner = "failed";
             logger.error({ err: error }, "TTL cleaner tick failed");
           })
@@ -277,13 +294,11 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         void recovery
           .scan()
           .then((scan) => {
-            dependencies.database = "ready";
             dependencies.recovery = "ready";
             metrics.increment("sdar_recovery_total", { outcome: "scan" });
             logger.debug({ recovery: scan, providerId: validated.providerId }, "recovery scanned");
           })
           .catch((error: unknown) => {
-            dependencies.database = "failed";
             dependencies.recovery = "failed";
             metrics.increment("sdar_recovery_total", { outcome: "error" });
             logger.error({ err: error, providerId: validated.providerId }, "recovery scan failed");
@@ -293,9 +308,35 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.RECOVERY_POLL_MS);
       recoveryTimer.unref();
-      dependencies.adapter = "ready";
+      adapterHealthTimer = setInterval(() => {
+        if (adapterHealthTicking) return;
+        adapterHealthTicking = true;
+        void gateway
+          .describeProvider()
+          .then((description) => {
+            if (description.providerId !== config.PROVIDER_ID) {
+              throw new Error("ADAPTER_HEALTH_IDENTITY_MISMATCH");
+            }
+            adapterHealthFailures = 0;
+            dependencies.adapter = "ready";
+          })
+          .catch((error: unknown) => {
+            adapterHealthFailures += 1;
+            if (adapterHealthFailures >= config.ADAPTER_HEALTH_FAILURE_THRESHOLD) {
+              dependencies.adapter = "failed";
+            }
+            logger.warn(
+              { err: error, failures: adapterHealthFailures },
+              "Adapter health probe failed",
+            );
+          })
+          .finally(() => {
+            adapterHealthTicking = false;
+          });
+      }, config.ADAPTER_HEALTH_POLL_MS);
+      adapterHealthTimer.unref();
     } catch (error) {
-      dependencies.adapter = "failed";
+      if (dependencies.adapter === "starting") dependencies.adapter = "failed";
       throw error;
     }
 

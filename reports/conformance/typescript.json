@@ -2,7 +2,7 @@
   "profileVersion": "1.0",
   "adapterLanguage": "typescript",
   "providerId": "conformance-typescript",
-  "generatedAt": "2026-07-16T17:22:53.641Z",
+  "generatedAt": "2026-07-16T23:00:52.987Z",
   "status": "passed",
   "groups": [
     {
@@ -12,12 +12,12 @@
         {
           "name": "manifest and synchronous Tool",
           "status": "passed",
-          "durationMs": 110.56738300000006
+          "durationMs": 107.57490000000007
         },
         {
           "name": "task_required lifecycle",
           "status": "passed",
-          "durationMs": 64.17216699999994
+          "durationMs": 76.34610000000009
         }
       ]
     },
@@ -28,7 +28,7 @@
         {
           "name": "availability states and windows",
           "status": "passed",
-          "durationMs": 8.168924999999945
+          "durationMs": 5.4379999999998745
         }
       ]
     },
@@ -39,7 +39,7 @@
         {
           "name": "durable scheduled start",
           "status": "passed",
-          "durationMs": 69.62718100000006
+          "durationMs": 64.50819999999999
         }
       ]
     },
@@ -50,17 +50,17 @@
         {
           "name": "multi-round input_required",
           "status": "passed",
-          "durationMs": 175.68548599999986
+          "durationMs": 167.17759999999998
         },
         {
           "name": "Ack-only cancel and command idempotency",
           "status": "passed",
-          "durationMs": 88.50016900000014
+          "durationMs": 94.57940000000008
         },
         {
           "name": "idempotency duplicate and conflict",
           "status": "passed",
-          "durationMs": 17.11999199999991
+          "durationMs": 27.72109999999998
         }
       ]
     },
@@ -71,17 +71,17 @@
         {
           "name": "response-loss Reconcile",
           "status": "passed",
-          "durationMs": 17.945157999999992
+          "durationMs": 30.72609999999986
         },
         {
           "name": "Adapter identity conflict",
           "status": "passed",
-          "durationMs": 4.778957999999875
+          "durationMs": 13.383800000000065
         },
         {
           "name": "terminal irreversibility and outbox idempotency",
           "status": "passed",
-          "durationMs": 35.63764699999979
+          "durationMs": 45.01319999999987
         }
       ]
     }

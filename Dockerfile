@@ -16,14 +16,17 @@ COPY packages/persistence-postgres/package.json packages/persistence-postgres/pa
 COPY packages/task-engine/package.json packages/task-engine/package.json
 COPY examples/mock-adapter-typescript/package.json examples/mock-adapter-typescript/package.json
 COPY examples/mock-adapter-python/package.json examples/mock-adapter-python/package.json
-RUN pnpm install --frozen-lockfile=false
+RUN pnpm install --frozen-lockfile
 COPY . .
 RUN pnpm build
+
+FROM build AS production-dependencies
+RUN CI=true pnpm prune --prod
 
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-COPY --from=build /workspace/node_modules /app/node_modules
+COPY --from=production-dependencies /workspace/node_modules /app/node_modules
 COPY --from=build /workspace/dist /app/dist
 COPY --from=build /workspace/proto /app/proto
 COPY --from=build /workspace/migrations /app/migrations

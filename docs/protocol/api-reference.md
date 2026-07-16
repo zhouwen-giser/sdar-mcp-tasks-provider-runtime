@@ -17,6 +17,10 @@
 from the startup Manifest snapshot. Authentication is described in the
 configuration reference.
 
+`POST /mcp` is stateless. Responses do not issue `Mcp-Session-Id`; repeated requests and multiple
+clients may reach any replica. Runtime does not support Streamable HTTP GET/DELETE session
+lifecycle, SSE resumption/event storage, or `notifications/tasks` in rc.2.
+
 Task TTL is handle retention, not an execution deadline. Active Tasks are never expired and a
 finite active handle is renewed by lifecycle activity or the TTL cleaner. Terminal Tasks remain
 queryable until `terminalAt + ttl`; an omitted terminal TTL uses at least 24 hours. An authorized

@@ -2,7 +2,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -111,14 +111,15 @@ try {
 }
 
 function preparePython(directory) {
-  const python = "python3";
+  const python =
+    process.env.SDAR_CONFORMANCE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
   const sitePackages = resolve(directory, "site-packages");
   const example = resolve(root, "examples/mock-adapter-python");
   const generated = resolve(example, "generated");
   const protoDirectory = resolve(root, "proto/io/sdar/mcp/tasks/adapter/v1");
   const environment = {
     ...process.env,
-    PYTHONPATH: [sitePackages, process.env.PYTHONPATH].filter(Boolean).join(":"),
+    PYTHONPATH: [sitePackages, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
   };
   execFileSync(
     python,
