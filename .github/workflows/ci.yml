@@ -1,0 +1,81 @@
+name: runtime-ci
+
+on:
+  push:
+    branches: [main, feature/mcp-tasks-provider-runtime-v1]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: sdar
+          POSTGRES_PASSWORD: sdar
+          POSTGRES_DB: sdar_runtime_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U sdar -d sdar_runtime_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.13.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: 1.57.2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
+      - run: buf lint proto
+      - name: Check Protobuf compatibility
+        run: |
+          if git cat-file -e origin/main:proto/buf.yaml 2>/dev/null; then
+            buf breaking proto --against '.git#branch=origin/main,subdir=proto'
+          else
+            echo "No Protobuf baseline on origin/main; lint/generation are the R1 baseline."
+          fi
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-reports
+          path: reports/conformance/*.json
+          if-no-files-found: warn
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence
+          path: |
+            reports/capacity/*.json
+            reports/sbom/*.json
+          if-no-files-found: warn
+
+  compose-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose config -q
+      - run: docker compose build runtime adapter-typescript
+      - run: docker compose --profile python-adapter build adapter-python
+      - run: docker compose up --detach --wait --wait-timeout 120
+      - run: curl --fail --silent --show-error http://127.0.0.1:8080/health/ready
+      - if: always()
+        run: docker compose down --volumes

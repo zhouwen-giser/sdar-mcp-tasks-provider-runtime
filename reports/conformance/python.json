@@ -1,0 +1,77 @@
+{
+  "profileVersion": "1.0",
+  "adapterLanguage": "python",
+  "providerId": "conformance-python",
+  "generatedAt": "2026-07-16T12:55:35.697Z",
+  "status": "passed",
+  "groups": [
+    {
+      "id": "P0",
+      "status": "passed",
+      "tests": [
+        {
+          "name": "manifest and synchronous Tool",
+          "status": "passed",
+          "durationMs": 30.66809899999953
+        },
+        { "name": "task_required lifecycle", "status": "passed", "durationMs": 29.614305999999488 }
+      ]
+    },
+    {
+      "id": "P1",
+      "status": "passed",
+      "tests": [
+        {
+          "name": "availability states and windows",
+          "status": "passed",
+          "durationMs": 2.0952669999996942
+        }
+      ]
+    },
+    {
+      "id": "P2",
+      "status": "passed",
+      "tests": [
+        { "name": "durable scheduled start", "status": "passed", "durationMs": 35.836091000000124 }
+      ]
+    },
+    {
+      "id": "P3",
+      "status": "passed",
+      "tests": [
+        {
+          "name": "multi-round input_required",
+          "status": "passed",
+          "durationMs": 67.90822399999979
+        },
+        {
+          "name": "Ack-only cancel and command idempotency",
+          "status": "passed",
+          "durationMs": 21.558930000000146
+        },
+        {
+          "name": "idempotency duplicate and conflict",
+          "status": "passed",
+          "durationMs": 15.407865999999558
+        }
+      ]
+    },
+    {
+      "id": "P4",
+      "status": "passed",
+      "tests": [
+        { "name": "response-loss Reconcile", "status": "passed", "durationMs": 16.359575000000405 },
+        {
+          "name": "Adapter identity conflict",
+          "status": "passed",
+          "durationMs": 4.842654000000039
+        },
+        {
+          "name": "terminal irreversibility and outbox idempotency",
+          "status": "passed",
+          "durationMs": 17.449972999999773
+        }
+      ]
+    }
+  ]
+}

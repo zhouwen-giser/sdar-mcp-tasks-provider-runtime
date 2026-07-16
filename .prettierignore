@@ -1,0 +1,13 @@
+node_modules
+dist
+coverage
+references/**/*.docx
+references/**
+SDAR_MCP_Tasks_Runtime_Codex_Goal_Task_Package_V1.0.md
+CODEX_GOAL_PROMPT.md
+QUICK_START_CODEX.md
+TASK_TRACEABILITY_MATRIX.md
+templates/**
+docs/SDAR_MCP_Tasks_Runtime_RC2_Hardening_Codex_Goal_Task_Package_V1.0/**
+packages/adapter-protocol/generated
+pnpm-lock.yaml

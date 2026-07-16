@@ -1,0 +1,304 @@
+import * as grpc from "@grpc/grpc-js";
+import Fastify from "fastify";
+import { readFileSync } from "node:fs";
+import { Pool } from "pg";
+import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index.js";
+import type { ProviderManifest } from "../../../packages/adapter-protocol/src/index.js";
+import {
+  createAuthorizationResolver,
+  McpProtocolHandler,
+} from "../../../packages/mcp-protocol/src/index.js";
+import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
+import { createLogger, RuntimeMetrics } from "../../../packages/observability/src/index.js";
+import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
+import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
+import {
+  OperationSnapshotRepository,
+  IdempotencyRepository,
+  TaskRepository,
+  runMigrations,
+} from "../../../packages/persistence-postgres/src/index.js";
+import {
+  DurableCommandDispatcher,
+  DurableScheduler,
+  RecoveryManager,
+  TaskEngine,
+} from "../../../packages/task-engine/src/index.js";
+import type { RuntimeConfig } from "./config.js";
+
+function createHttpServer(logger: RuntimeLogger, bodyLimit: number) {
+  return Fastify({ loggerInstance: logger, bodyLimit });
+}
+
+type RuntimeHttpServer = ReturnType<typeof createHttpServer>;
+
+export interface RuntimeDependencies {
+  database: "starting" | "ready" | "failed";
+  adapter: "starting" | "ready" | "failed";
+  recovery: "starting" | "ready" | "failed";
+}
+
+export interface RuntimeApplication {
+  app: RuntimeHttpServer;
+  gateway: GrpcAdapterGateway;
+  pool: Pool;
+  dependencies: RuntimeDependencies;
+  initialize(): Promise<ProviderManifest>;
+}
+
+export function createRuntime(config: RuntimeConfig): RuntimeApplication {
+  const logger = createLogger(config.LOG_LEVEL);
+  const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
+  const metrics = new RuntimeMetrics();
+  const pool = new Pool({ connectionString: config.DATABASE_URL, max: 10 });
+  const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
+  const gateway = new GrpcAdapterGateway({
+    endpoint: config.ADAPTER_ENDPOINT,
+    providerId: config.PROVIDER_ID,
+    credentials: adapterCredentials(config),
+    timeoutMs: config.ADAPTER_RPC_TIMEOUT_MS,
+    onRpc: (method, outcome) => metrics.increment("sdar_adapter_rpc_total", { method, outcome }),
+  });
+  const dependencies: RuntimeDependencies = {
+    database: "starting",
+    adapter: "starting",
+    recovery: "starting",
+  };
+  let manifest: ProviderManifest | undefined;
+  let mcpHandler: McpProtocolHandler | undefined;
+  let schedulerTimer: NodeJS.Timeout | undefined;
+  let recoveryTimer: NodeJS.Timeout | undefined;
+  let commandDispatcherTimer: NodeJS.Timeout | undefined;
+  let schedulerTicking = false;
+  let recoveryTicking = false;
+  let commandDispatcherTicking = false;
+  const rateWindows = new Map<string, { startedAt: number; count: number }>();
+
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.url !== "/mcp") return;
+    const now = Date.now();
+    const current = rateWindows.get(request.ip);
+    const window =
+      current === undefined || now - current.startedAt >= config.RATE_LIMIT_WINDOW_MS
+        ? { startedAt: now, count: 0 }
+        : current;
+    window.count += 1;
+    rateWindows.set(request.ip, window);
+    if (window.count > config.RATE_LIMIT_MAX) {
+      metrics.increment("sdar_rate_limited_total");
+      return reply.code(429).send({ error: "rate_limit_exceeded" });
+    }
+  });
+
+  app.get("/health/live", () => ({ status: "live" }));
+  app.get("/health/ready", async (_request, reply) => {
+    if (dependencies.database !== "starting") {
+      try {
+        await pool.query("SELECT 1");
+        dependencies.database = "ready";
+      } catch {
+        dependencies.database = "failed";
+      }
+    }
+    const ready = Object.values(dependencies).every((status) => status === "ready");
+    return reply
+      .code(ready ? 200 : 503)
+      .send({ status: ready ? "ready" : "not_ready", dependencies });
+  });
+  app.get("/metrics", async (_request, reply) => {
+    const taskStates = await pool.query<{ internal_state: string; count: string }>(
+      "SELECT internal_state, count(*) FROM provider_task GROUP BY internal_state",
+    );
+    const pendingOutbox = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM outbox_event WHERE published_at IS NULL",
+    );
+    const gauges: Record<string, number> = {
+      sdar_outbox_pending: Number(pendingOutbox.rows[0]?.count ?? 0),
+    };
+    for (const row of taskStates.rows) {
+      gauges[`sdar_task_state{state="${row.internal_state}"}`] = Number(row.count);
+    }
+    return reply.type("text/plain; version=0.0.4").send(metrics.render(gauges));
+  });
+  app.get("/internal/provider", async (_request, reply) => {
+    if (manifest === undefined) return reply.code(503).send({ error: "manifest_not_loaded" });
+    return manifest;
+  });
+  app.all("/mcp", async (request, reply) => {
+    if (request.method !== "POST") {
+      return reply.code(405).send({
+        jsonrpc: "2.0",
+        error: { code: -32_000, message: "Method not allowed." },
+        id: null,
+      });
+    }
+    if (mcpHandler === undefined) {
+      return reply.code(503).send({
+        jsonrpc: "2.0",
+        error: { code: -32_003, message: "Provider not ready." },
+        id: null,
+      });
+    }
+    try {
+      resolveAuthorization(request.raw);
+    } catch {
+      return reply.code(401).send({ error: "authentication_failed" });
+    }
+    reply.hijack();
+    await mcpHandler.handle(request.raw, reply.raw, request.body);
+  });
+
+  app.addHook("onClose", async () => {
+    if (schedulerTimer !== undefined) clearInterval(schedulerTimer);
+    if (recoveryTimer !== undefined) clearInterval(recoveryTimer);
+    if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
+    gateway.close();
+    await pool.end();
+  });
+
+  async function initialize(): Promise<ProviderManifest> {
+    try {
+      await runMigrations(pool);
+      await pool.query("SELECT 1 AS runtime_database_ready");
+      dependencies.database = "ready";
+    } catch (error) {
+      dependencies.database = "failed";
+      throw error;
+    }
+
+    try {
+      manifest = await gateway.describeProvider();
+      if (manifest.providerId !== config.PROVIDER_ID) {
+        throw new Error(
+          `Adapter provider id ${manifest.providerId} does not match configured ${config.PROVIDER_ID}`,
+        );
+      }
+      const validated = new OperationRegistry().validate(manifest);
+      const snapshotIds = await new OperationSnapshotRepository(pool).saveManifest(validated);
+      const taskEngine = new TaskEngine(
+        validated,
+        snapshotIds,
+        gateway,
+        new TaskRepository(pool),
+        new IdempotencyRepository(pool, () => metrics.increment("sdar_idempotency_hits_total")),
+        undefined,
+        metrics,
+        (event) => logger.info(event, "task trace"),
+      );
+      mcpHandler = new McpProtocolHandler(validated, gateway, taskEngine, {
+        resolveAuthorization,
+        maxArgumentBytes: config.ARGUMENT_MAX_BYTES,
+        maxJsonDepth: config.ARGUMENT_MAX_DEPTH,
+        maxJsonNodes: config.ARGUMENT_MAX_NODES,
+      });
+      const taskRepository = new TaskRepository(pool);
+      const scheduler = new DurableScheduler(validated, gateway, taskRepository);
+      const commandDispatcher = new DurableCommandDispatcher(gateway, taskRepository);
+      const recovery = new RecoveryManager(taskEngine, taskRepository, (error, taskId) => {
+        logger.warn(
+          { err: error, taskId, providerId: validated.providerId },
+          "task recovery deferred",
+        );
+      });
+      const recovered = await recovery.scan();
+      metrics.increment("sdar_recovery_total", { outcome: "scan" });
+      dependencies.recovery = "ready";
+      logger.info(
+        { recovery: recovered, providerId: validated.providerId },
+        "startup recovery scanned",
+      );
+      await scheduler.tick();
+      await commandDispatcher.tick();
+      schedulerTimer = setInterval(() => {
+        if (schedulerTicking) return;
+        schedulerTicking = true;
+        void scheduler
+          .tick()
+          .catch((error: unknown) => {
+            dependencies.database = "failed";
+            logger.error({ err: error }, "scheduler tick failed");
+          })
+          .finally(() => {
+            schedulerTicking = false;
+          });
+      }, config.SCHEDULER_POLL_MS);
+      schedulerTimer.unref();
+      commandDispatcherTimer = setInterval(() => {
+        if (commandDispatcherTicking) return;
+        commandDispatcherTicking = true;
+        void commandDispatcher
+          .tick()
+          .catch((error: unknown) => {
+            dependencies.database = "failed";
+            logger.error({ err: error }, "command dispatcher tick failed");
+          })
+          .finally(() => {
+            commandDispatcherTicking = false;
+          });
+      }, config.SCHEDULER_POLL_MS);
+      commandDispatcherTimer.unref();
+      recoveryTimer = setInterval(() => {
+        if (recoveryTicking) return;
+        recoveryTicking = true;
+        void recovery
+          .scan()
+          .then((scan) => {
+            dependencies.database = "ready";
+            dependencies.recovery = "ready";
+            metrics.increment("sdar_recovery_total", { outcome: "scan" });
+            logger.debug({ recovery: scan, providerId: validated.providerId }, "recovery scanned");
+          })
+          .catch((error: unknown) => {
+            dependencies.database = "failed";
+            dependencies.recovery = "failed";
+            metrics.increment("sdar_recovery_total", { outcome: "error" });
+            logger.error({ err: error, providerId: validated.providerId }, "recovery scan failed");
+          })
+          .finally(() => {
+            recoveryTicking = false;
+          });
+      }, config.RECOVERY_POLL_MS);
+      recoveryTimer.unref();
+      dependencies.adapter = "ready";
+    } catch (error) {
+      dependencies.adapter = "failed";
+      throw error;
+    }
+
+    logger.info(
+      { providerId: manifest.providerId, providerVersion: manifest.providerVersion },
+      "runtime dependencies initialized",
+    );
+    return manifest;
+  }
+
+  return { app, gateway, pool, dependencies, initialize };
+}
+
+function authenticationOptions(config: RuntimeConfig): AuthenticationOptions {
+  if (config.AUTH_MODE === "development") return { mode: "development" };
+  if (config.AUTH_MODE === "trusted_headers") return { mode: "trusted_headers" };
+  if (config.JWT_HS256_SECRET === undefined) throw new Error("JWT_HS256_SECRET_REQUIRED");
+  return {
+    mode: "jwt_hs256",
+    secret: config.JWT_HS256_SECRET,
+    ...(config.JWT_ISSUER === undefined ? {} : { issuer: config.JWT_ISSUER }),
+    ...(config.JWT_AUDIENCE === undefined ? {} : { audience: config.JWT_AUDIENCE }),
+  };
+}
+
+function adapterCredentials(config: RuntimeConfig): grpc.ChannelCredentials {
+  if (config.ADAPTER_TLS_MODE === "disabled") return grpc.credentials.createInsecure();
+  if (
+    config.ADAPTER_TLS_CA_PATH === undefined ||
+    config.ADAPTER_TLS_CERT_PATH === undefined ||
+    config.ADAPTER_TLS_KEY_PATH === undefined
+  ) {
+    throw new Error("ADAPTER_MTLS_FILES_REQUIRED");
+  }
+  return grpc.credentials.createSsl(
+    readFileSync(config.ADAPTER_TLS_CA_PATH),
+    readFileSync(config.ADAPTER_TLS_KEY_PATH),
+    readFileSync(config.ADAPTER_TLS_CERT_PATH),
+  );
+}

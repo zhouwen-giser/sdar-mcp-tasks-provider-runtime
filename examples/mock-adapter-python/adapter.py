@@ -1,0 +1,526 @@
+"""Durable Python reference Adapter used by cross-language conformance."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+import grpc
+from google.protobuf.json_format import MessageToDict, ParseDict
+from google.protobuf.struct_pb2 import Struct
+from google.protobuf.timestamp_pb2 import Timestamp
+
+from generated import adapter_pb2, adapter_pb2_grpc
+
+
+def json_struct(value: dict[str, Any]) -> Struct:
+    message = Struct()
+    ParseDict(value, message)
+    return message
+
+
+def now_timestamp() -> Timestamp:
+    value = Timestamp()
+    value.GetCurrentTime()
+    return value
+
+
+class DurableStore:
+    """Atomic JSON store; process memory is never the execution authority."""
+
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = threading.Lock()
+        if not self.path.exists():
+            self._write({"version": 1, "records": {}})
+
+    def get(self, key: str) -> dict[str, Any] | None:
+        with self.lock:
+            value = self._read()["records"].get(key)
+            return None if value is None else json.loads(json.dumps(value))
+
+    def set(self, key: str, value: dict[str, Any]) -> None:
+        with self.lock:
+            document = self._read()
+            document["records"][key] = value
+            self._write(document)
+
+    def _read(self) -> dict[str, Any]:
+        value = json.loads(self.path.read_text(encoding="utf-8"))
+        if value.get("version") != 1 or not isinstance(value.get("records"), dict):
+            raise RuntimeError("INVALID_ADAPTER_STATE_FILE")
+        return value
+
+    def _write(self, value: dict[str, Any]) -> None:
+        descriptor, temporary = tempfile.mkstemp(prefix=self.path.name, dir=self.path.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(value, stream, separators=(",", ":"))
+                stream.write("\n")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, self.path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+
+class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
+    def __init__(self, store: DurableStore) -> None:
+        self.store = store
+
+    async def DescribeProvider(self, request, context):  # noqa: N802
+        del request, context
+        return adapter_pb2.ProviderManifest(
+            adapter_protocol_version="1.0",
+            provider_id=os.getenv("PROVIDER_ID", "mock-provider-python"),
+            provider_type="reference",
+            provider_version="1.0.0",
+            inventory_mode=adapter_pb2.RUNTIME_VISIBLE,
+            operations=[self._echo_operation(), self._task_operation(), self._flex_operation()],
+        )
+
+    async def CheckAvailability(self, request, context):  # noqa: N802
+        del context
+        checked_at = now_timestamp()
+        results = []
+        for check in request.checks:
+            arguments = MessageToDict(check.arguments) if check.HasField("arguments") else {}
+            scenario = arguments.get("scenario")
+            availability = adapter_pb2.AVAILABLE
+            reason = "AVAILABLE"
+            description = "The operation is currently predicted to be available."
+            risk = adapter_pb2.LOW
+            effects: list[str] = []
+            if scenario == "disabled":
+                availability = adapter_pb2.DISABLED
+                reason = "RESOURCE_DISABLED"
+                description = "The resource is disabled."
+            elif scenario == "restricted":
+                availability = adapter_pb2.RESTRICTED
+                reason = "PREEMPTIBLE_TASK_ACTIVE"
+                description = "The resource may require preemption."
+                risk = adapter_pb2.HIGH
+                effects = ["task_preemption", "start_rejection"]
+            results.append(
+                adapter_pb2.AvailabilityResult(
+                    request_id=check.request_id,
+                    operation_name=check.operation_name,
+                    availability=availability,
+                    risk_level=risk,
+                    reason_code=reason,
+                    description=description,
+                    possible_effects=effects,
+                    valid_until=checked_at,
+                    earliest_start_time=checked_at,
+                )
+            )
+        return adapter_pb2.CheckAvailabilityResponse(
+            profile_version="1.0", checked_at=checked_at, checks=results
+        )
+
+    async def StartOperation(self, request, context):  # noqa: N802
+        arguments = MessageToDict(request.arguments)
+        existing = self.store.get(request.task_id)
+        binding = self._binding(request)
+        if existing is not None:
+            if existing["binding"] != binding:
+                await context.abort(grpc.StatusCode.ALREADY_EXISTS, "taskId identity conflict")
+            return self._accepted(existing)
+
+        if request.operation_name not in {"echo_sync", "durable_task", "flex_task"}:
+            return adapter_pb2.StartOperationResponse(
+                rejected=adapter_pb2.AdmissionRejected(
+                    reason_code="UNSUPPORTED_OPERATION",
+                    message="Unknown reference operation.",
+                    retryable=False,
+                )
+            )
+
+        task_id = request.task_id
+        external_id = f"python-{task_id}"
+        if request.operation_name == "echo_sync":
+            snapshot = self._snapshot_dict(
+                task_id, external_id, "SUCCEEDED", 1, "SUCCESS", "Echo completed.", arguments
+            )
+            execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
+        elif request.operation_name == "flex_task" and arguments.get("scenario") == "terminal":
+            snapshot = self._snapshot_dict(
+                task_id,
+                external_id,
+                "SUCCEEDED",
+                1,
+                "SUCCESS",
+                "Task-capable operation completed inline.",
+                {"resourceId": arguments.get("resourceId"), "completed": True},
+            )
+            execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
+        else:
+            input_required = arguments.get("scenario") in {"input_required", "multi_round_input"}
+            snapshot = self._snapshot_dict(
+                task_id,
+                external_id,
+                "WAITING_INPUT" if input_required else "RUNNING",
+                1,
+                "APPROVAL_REQUIRED" if input_required else "STARTED",
+                "Approval input is required." if input_required else "Reference task is running.",
+            )
+            if input_required:
+                snapshot["input_requests"] = [
+                    {
+                        "key": "approval",
+                        "description": "Approve the reference operation.",
+                        "schema": {"type": "boolean"},
+                        "required": True,
+                    }
+                ]
+            terminal = self._snapshot_dict(
+                task_id,
+                external_id,
+                "SUCCEEDED",
+                2,
+                "SUCCESS",
+                "Reference task completed.",
+                {"resourceId": arguments.get("resourceId"), "completed": True},
+            )
+            execution = self._execution(binding, external_id, snapshot, terminal, arguments)
+            execution["waiting_for_input"] = input_required
+            execution["input_round"] = 1 if arguments.get("scenario") == "multi_round_input" else 0
+
+        self.store.set(task_id, execution)
+        if arguments.get("scenario") == "response_loss":
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "injected StartOperation response loss")
+        return self._accepted(execution)
+
+    async def GetExecution(self, request, context):  # noqa: N802
+        execution = self.store.get(request.task_id)
+        if execution is None:
+            await context.abort(grpc.StatusCode.NOT_FOUND, "execution does not exist")
+        if not execution.get("waiting_for_input") and not execution.get("hold_snapshot"):
+            execution["snapshot"] = execution["terminal_snapshot"]
+            self.store.set(request.task_id, execution)
+        return self._snapshot(execution["snapshot"])
+
+    async def ReconcileExecution(self, request, context):  # noqa: N802
+        del context
+        execution = self.store.get(request.task_id)
+        if execution is None:
+            return adapter_pb2.ReconcileExecutionResponse(
+                status=adapter_pb2.NOT_FOUND,
+                reason_code="EXECUTION_NOT_FOUND",
+                message="No execution is bound to this taskId.",
+            )
+        if execution["binding"]["argument_hash"] != request.argument_hash:
+            return adapter_pb2.ReconcileExecutionResponse(
+                status=adapter_pb2.CONFLICT,
+                reason_code="ARGUMENT_HASH_CONFLICT",
+                message="The taskId is bound to different arguments.",
+            )
+        return adapter_pb2.ReconcileExecutionResponse(
+            status=adapter_pb2.FOUND,
+            snapshot=self._snapshot(execution["snapshot"]),
+            external_execution_id=execution["external_execution_id"],
+            reason_code="EXECUTION_FOUND",
+            message="Execution recovered.",
+        )
+
+    async def RequestCancel(self, request, context):  # noqa: N802
+        execution = self.store.get(request.identity.task_id)
+        if execution is None:
+            return self._ack(False, "EXECUTION_NOT_FOUND", "Execution does not exist.", request)
+        key = f"cancel:{request.identity.command_sequence}"
+        existing = execution["command_acks"].get(key)
+        if existing is not None:
+            return adapter_pb2.CommandAck(**existing)
+        if execution["arguments"].get("scenario") == "natural_completion":
+            execution["snapshot"] = execution["terminal_snapshot"]
+        else:
+            revision = int(execution["snapshot"]["revision"]) + 1
+            execution["snapshot"] = self._snapshot_dict(
+                request.identity.task_id,
+                execution["external_execution_id"],
+                "CANCELLED",
+                revision,
+                "SAFE_STOP_CONFIRMED",
+                "Reference execution safely stopped.",
+            )
+            execution["terminal_snapshot"] = execution["snapshot"]
+        ack = self._ack_dict(True, "STOP_ACCEPTED", "Safe stop accepted.", request)
+        execution["command_acks"][key] = ack
+        self.store.set(request.identity.task_id, execution)
+        if execution["arguments"].get("scenario") == "cancel_response_loss":
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "injected RequestCancel response loss")
+        return adapter_pb2.CommandAck(**ack)
+
+    async def UpdateExecution(self, request, context):  # noqa: N802
+        del context
+        execution = self.store.get(request.identity.task_id)
+        if execution is None:
+            return self._ack(False, "EXECUTION_NOT_FOUND", "Execution does not exist.", request)
+        key = f"update:{request.identity.command_sequence}"
+        existing = execution["command_acks"].get(key)
+        if existing is not None:
+            return adapter_pb2.CommandAck(**existing)
+        expected = "comment" if execution.get("input_round") == 2 else "approval"
+        accepted = execution.get("waiting_for_input") and all(
+            value.input_request_key == expected for value in request.inputs
+        )
+        if accepted and execution["arguments"].get("scenario") == "multi_round_input" and expected == "approval":
+            execution["input_round"] = 2
+            execution["snapshot"] = self._snapshot_dict(
+                request.identity.task_id,
+                execution["external_execution_id"],
+                "WAITING_INPUT",
+                2,
+                "COMMENT_REQUIRED",
+                "A second input round is required.",
+            )
+            execution["snapshot"]["input_requests"] = [
+                {
+                    "key": "comment",
+                    "description": "Provide an audit comment.",
+                    "schema": {"type": "string", "minLength": 1},
+                    "required": True,
+                }
+            ]
+        elif accepted:
+            execution["waiting_for_input"] = False
+            revision = 3 if execution.get("input_round") == 2 else 2
+            execution["snapshot"] = self._snapshot_dict(
+                request.identity.task_id,
+                execution["external_execution_id"],
+                "RUNNING",
+                revision,
+                "INPUT_ACCEPTED",
+                "Input accepted; execution resumed.",
+            )
+            execution["terminal_snapshot"]["revision"] = revision + 1
+        ack = self._ack_dict(
+            bool(accepted),
+            "INPUT_ACCEPTED" if accepted else "INPUT_REJECTED",
+            "Input accepted." if accepted else "Input was not expected.",
+            request,
+        )
+        execution["command_acks"][key] = ack
+        self.store.set(request.identity.task_id, execution)
+        return adapter_pb2.CommandAck(**ack)
+
+    async def PauseExecution(self, request, context):  # noqa: N802
+        del context
+        return self._pause_resume(request, "PAUSED", "pause")
+
+    async def ResumeExecution(self, request, context):  # noqa: N802
+        del context
+        return self._pause_resume(request, "RESUMING", "resume")
+
+    def _pause_resume(self, request, state: str, command: str):
+        execution = self.store.get(request.identity.task_id)
+        if execution is None:
+            return self._ack(False, "EXECUTION_NOT_FOUND", "Execution does not exist.", request)
+        key = f"{command}:{request.identity.command_sequence}"
+        existing = execution["command_acks"].get(key)
+        if existing is not None:
+            return adapter_pb2.CommandAck(**existing)
+        revision = int(execution["snapshot"]["revision"]) + 1
+        execution["snapshot"] = self._snapshot_dict(
+            request.identity.task_id,
+            execution["external_execution_id"],
+            state,
+            revision,
+            "PAUSED_BY_CLIENT" if command == "pause" else "RESUMED_BY_CLIENT",
+            "Execution paused." if command == "pause" else "Execution resuming.",
+        )
+        execution["hold_snapshot"] = command == "pause"
+        if command == "resume":
+            execution["terminal_snapshot"]["revision"] = revision + 1
+        ack = self._ack_dict(True, f"{command.upper()}_ACCEPTED", f"{command} accepted.", request)
+        execution["command_acks"][key] = ack
+        self.store.set(request.identity.task_id, execution)
+        return adapter_pb2.CommandAck(**ack)
+
+    @staticmethod
+    def _binding(request) -> dict[str, Any]:
+        return {
+            "operation_name": request.operation_name,
+            "argument_hash": request.argument_hash,
+            "authorization_context_hash": request.execution_context.authorization_context_hash,
+            "execution_mode": request.execution_context.execution_mode,
+            "simulation_id": request.execution_context.simulation_id,
+        }
+
+    @staticmethod
+    def _execution(binding, external_id, snapshot, terminal, arguments):
+        return {
+            "binding": binding,
+            "external_execution_id": external_id,
+            "snapshot": snapshot,
+            "terminal_snapshot": terminal,
+            "arguments": arguments,
+            "waiting_for_input": False,
+            "hold_snapshot": False,
+            "input_round": 0,
+            "command_acks": {},
+        }
+
+    @staticmethod
+    def _snapshot_dict(task_id, external_id, state, revision, reason, message, result=None):
+        return {
+            "task_id": task_id,
+            "external_execution_id": external_id,
+            "state": state,
+            "revision": revision,
+            "reason_code": reason,
+            "message": message,
+            "retryable": False,
+            "result": result,
+            "input_requests": [],
+        }
+
+    @staticmethod
+    def _snapshot(value):
+        requests = [
+            adapter_pb2.InputRequest(
+                key=item["key"],
+                description=item["description"],
+                input_schema=json_struct(item["schema"]),
+                required=item["required"],
+            )
+            for item in value.get("input_requests", [])
+        ]
+        return adapter_pb2.ExecutionSnapshot(
+            task_id=value["task_id"],
+            external_execution_id=value["external_execution_id"],
+            state=getattr(adapter_pb2, value["state"]),
+            revision=value["revision"],
+            reason_code=value["reason_code"],
+            message=value["message"],
+            retryable=value.get("retryable", False),
+            result=json_struct(value["result"] or {}),
+            input_requests=requests,
+            observed_at=now_timestamp(),
+        )
+
+    def _accepted(self, execution):
+        return adapter_pb2.StartOperationResponse(
+            accepted=adapter_pb2.ExecutionAccepted(
+                external_execution_id=execution["external_execution_id"],
+                initial_snapshot=self._snapshot(execution["snapshot"]),
+            )
+        )
+
+    @staticmethod
+    def _ack_dict(accepted, reason, message, request):
+        return {
+            "accepted": accepted,
+            "reason_code": reason,
+            "message": message,
+            "command_sequence": request.identity.command_sequence,
+        }
+
+    def _ack(self, accepted, reason, message, request):
+        return adapter_pb2.CommandAck(**self._ack_dict(accepted, reason, message, request))
+
+    @staticmethod
+    def _echo_operation():
+        return adapter_pb2.OperationDefinition(
+            name="echo_sync",
+            description="Returns the supplied message synchronously.",
+            execution=adapter_pb2.SYNCHRONOUS,
+            input_schema=json_struct(
+                {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                }
+            ),
+            output_schema=json_struct({"type": "object"}),
+            capabilities=adapter_pb2.OperationCapabilities(availability=True, idempotency=True),
+            resource_binding=adapter_pb2.ResourceBinding(mode=adapter_pb2.ResourceBinding.NONE),
+        )
+
+    @staticmethod
+    def _task_operation():
+        return adapter_pb2.OperationDefinition(
+            name="durable_task",
+            description="Python durable reference task.",
+            execution=adapter_pb2.TASK_REQUIRED,
+            input_schema=json_struct(
+                {
+                    "type": "object",
+                    "properties": {
+                        "resourceId": {"type": "string"},
+                        "scenario": {"type": "string"},
+                    },
+                    "required": ["resourceId"],
+                    "additionalProperties": False,
+                }
+            ),
+            output_schema=json_struct({"type": "object"}),
+            capabilities=adapter_pb2.OperationCapabilities(
+                availability=True,
+                scheduling=True,
+                max_elapsed=True,
+                cancel=True,
+                pause_resume=True,
+                input_required=True,
+                idempotency=True,
+                observations=True,
+            ),
+            resource_binding=adapter_pb2.ResourceBinding(
+                mode=adapter_pb2.ResourceBinding.ARGUMENT_REFERENCE,
+                resource_id_json_pointer="/resourceId",
+            ),
+        )
+
+    @staticmethod
+    def _flex_operation():
+        return adapter_pb2.OperationDefinition(
+            name="flex_task",
+            description="Python task-capable reference operation.",
+            execution=adapter_pb2.TASK_CAPABLE,
+            input_schema=json_struct(
+                {
+                    "type": "object",
+                    "properties": {
+                        "resourceId": {"type": "string"},
+                        "scenario": {"type": "string", "enum": ["terminal", "running"]},
+                    },
+                    "required": ["resourceId", "scenario"],
+                    "additionalProperties": False,
+                }
+            ),
+            output_schema=json_struct({"type": "object"}),
+            capabilities=adapter_pb2.OperationCapabilities(
+                availability=True, idempotency=True, observations=True
+            ),
+            resource_binding=adapter_pb2.ResourceBinding(
+                mode=adapter_pb2.ResourceBinding.ARGUMENT_REFERENCE,
+                resource_id_json_pointer="/resourceId",
+            ),
+        )
+
+
+async def serve() -> None:
+    host = os.getenv("ADAPTER_HOST", "0.0.0.0")
+    port = int(os.getenv("ADAPTER_PORT", "7001"))
+    state_path = os.getenv("ADAPTER_STATE_PATH", "/tmp/sdar-python-adapter-state.json")
+    server = grpc.aio.server()
+    adapter_pb2_grpc.add_ResourceProviderAdapterServicer_to_server(
+        ReferenceAdapter(DurableStore(state_path)), server
+    )
+    server.add_insecure_port(f"{host}:{port}")
+    await server.start()
+    logging.info("Python mock Adapter listening on %s:%d", host, port)
+    await server.wait_for_termination()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    asyncio.run(serve())

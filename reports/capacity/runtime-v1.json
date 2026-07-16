@@ -1,0 +1,36 @@
+{
+  "version": "1.0.0-rc.1",
+  "generatedAt": "2026-07-16T13:14:04.679Z",
+  "environment": {
+    "node": "v22.23.1",
+    "platform": "linux/x64",
+    "cpuLogicalCount": 4,
+    "memoryBytes": 16765382656,
+    "database": "PostgreSQL 17 GitHub Actions service",
+    "topology": "single Runtime, single TypeScript Adapter, sequential MCP HTTP client"
+  },
+  "workloads": {
+    "synchronousTool": {
+      "iterations": 100,
+      "durationMs": 763.688443,
+      "throughputPerSecond": 130.94345071816153,
+      "latencyMs": {
+        "p50": 4.344946000000164,
+        "p95": 18.16740299999998,
+        "p99": 64.53656699999999,
+        "max": 121.93421899999998
+      }
+    },
+    "durableTaskCreateAndGet": {
+      "iterations": 25,
+      "durationMs": 1282.6015679999998,
+      "throughputPerSecond": 19.491633741710817,
+      "latencyMs": {
+        "p50": 18.919130000000223,
+        "p95": 217.67950399999995,
+        "p99": 229.2338279999999,
+        "max": 229.2338279999999
+      }
+    }
+  }
+}
