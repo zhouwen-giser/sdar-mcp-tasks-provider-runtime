@@ -27,6 +27,9 @@ requested mTLS or JWT authentication.
 | `RATE_LIMIT_WINDOW_MS`        | `60000`               | Rate window, 1 second–1 hour                          |
 | `SCHEDULER_POLL_MS`           | `1000`                | Durable due/deadline worker interval                  |
 | `RECOVERY_POLL_MS`            | `5000`                | Nonterminal reconcile interval                        |
+| `TTL_CLEANER_POLL_MS`         | `60000`               | Logical-expiry and purge worker interval              |
+| `TTL_PURGE_GRACE_MS`          | `86400000`            | Expiry-to-purge delay, 1 second–7 days                |
+| `TTL_CLEANER_BATCH_SIZE`      | `128`                 | Maximum rows claimed per cleaner stage and tick       |
 
 `development` authentication is limited to local Compose. `trusted_headers`
 requires an authenticating proxy that strips client-supplied

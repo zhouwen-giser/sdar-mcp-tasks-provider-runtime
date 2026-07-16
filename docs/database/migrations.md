@@ -50,4 +50,10 @@ external execution id. Start and recovery already bind a Task and execution in o
 transaction; the unique partial index makes a second Task binding fail atomically even if an
 Adapter violates its identity contract.
 
+`011_task_handle_retention.sql` turns `ttl_ms` into an executable Task-handle lifecycle. It adds
+the renewable handle expiry, terminal time, logical expiry, purge boundary and last Adapter
+confirmation time. Existing active finite-TTL Tasks receive a fresh protected window during
+upgrade; existing terminal Tasks retain their result for their stored TTL or the 24-hour default.
+Partial indexes support batched `FOR UPDATE SKIP LOCKED` expiry and purge across Runtime replicas.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

@@ -4,9 +4,11 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
   CancelTaskRequestSchema,
+  ErrorCode,
   GetTaskPayloadRequestSchema,
   GetTaskRequestSchema,
   ListToolsRequestSchema,
+  McpError,
   RequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -14,6 +16,7 @@ import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
 import type { AvailabilityCheck, TaskExecutionTiming } from "../../domain/src/index.js";
+import { TaskExpiredError } from "../../domain/src/index.js";
 import type { TaskEngine } from "../../task-engine/src/index.js";
 import { z } from "zod";
 import { createAuthorizationResolver } from "./security.js";
@@ -189,34 +192,59 @@ export class McpProtocolHandler {
             authorization,
           ) as never,
       );
-      server.setRequestHandler(
-        GetTaskRequestSchema,
-        ({ params }) => taskEngine.getTask(params.taskId, authorization) as never,
-      );
-      server.setRequestHandler(
-        GetTaskPayloadRequestSchema,
-        ({ params }) => taskEngine.getTaskResult(params.taskId, authorization) as never,
-      );
-      server.setRequestHandler(
-        CancelTaskRequestSchema,
-        ({ params }) => taskEngine.cancelTask(params.taskId, authorization) as never,
-      );
-      server.setRequestHandler(UpdateTaskRequestSchema, ({ params }) => {
+      server.setRequestHandler(GetTaskRequestSchema, async ({ params }) => {
+        try {
+          return await taskEngine.getTask(params.taskId, authorization);
+        } catch (error) {
+          throw mapTaskReadError(error);
+        }
+      });
+      server.setRequestHandler(GetTaskPayloadRequestSchema, async ({ params }) => {
+        try {
+          return await taskEngine.getTaskResult(params.taskId, authorization);
+        } catch (error) {
+          throw mapTaskReadError(error);
+        }
+      });
+      server.setRequestHandler(CancelTaskRequestSchema, async ({ params }) => {
+        try {
+          return await taskEngine.cancelTask(params.taskId, authorization);
+        } catch (error) {
+          throw mapTaskReadError(error);
+        }
+      });
+      server.setRequestHandler(UpdateTaskRequestSchema, async ({ params }) => {
         assertJsonLimits(
           params.inputs,
           this.options.maxArgumentBytes ?? 1_048_576,
           this.options.maxJsonDepth ?? 32,
           this.options.maxJsonNodes ?? 10_000,
         );
-        return taskEngine.updateTask(params.taskId, params.inputs, authorization);
+        try {
+          return await taskEngine.updateTask(params.taskId, params.inputs, authorization);
+        } catch (error) {
+          throw mapTaskReadError(error);
+        }
       });
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/pause"),
-        ({ params }) => taskEngine.controlTask(params.taskId, "PAUSE", authorization) as never,
+        async ({ params }) => {
+          try {
+            return await taskEngine.controlTask(params.taskId, "PAUSE", authorization);
+          } catch (error) {
+            throw mapTaskReadError(error);
+          }
+        },
       );
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/resume"),
-        ({ params }) => taskEngine.controlTask(params.taskId, "RESUME", authorization) as never,
+        async ({ params }) => {
+          try {
+            return await taskEngine.controlTask(params.taskId, "RESUME", authorization);
+          } catch (error) {
+            throw mapTaskReadError(error);
+          }
+        },
       );
     }
 
@@ -228,6 +256,15 @@ export class McpProtocolHandler {
     });
     await transport.handleRequest(request, response, body);
   }
+}
+
+function mapTaskReadError(error: unknown): unknown {
+  if (error instanceof TaskExpiredError) {
+    return new McpError(ErrorCode.InvalidParams, "Task handle expired.", {
+      reasonCode: "TASK_EXPIRED",
+    });
+  }
+  return error;
 }
 
 function idempotencyKey(meta: unknown): string | undefined {

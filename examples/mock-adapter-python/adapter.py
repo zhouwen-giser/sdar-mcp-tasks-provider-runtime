@@ -206,6 +206,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         execution = self.store.get(request.task_id)
         if execution is None:
             await context.abort(grpc.StatusCode.NOT_FOUND, "execution does not exist")
+        if execution["arguments"].get("scenario") == "get_transient_failure":
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "injected GetExecution transient failure")
         if not execution.get("waiting_for_input") and not execution.get("hold_snapshot"):
             execution["snapshot"] = execution["terminal_snapshot"]
             self.store.set(request.task_id, execution)
@@ -219,6 +221,13 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 status=adapter_pb2.NOT_FOUND,
                 reason_code="EXECUTION_NOT_FOUND",
                 message="No execution is bound to this taskId.",
+            )
+        if execution["arguments"].get("scenario") == "get_transient_failure":
+            return adapter_pb2.ReconcileExecutionResponse(
+                status=adapter_pb2.TRANSIENT_UNAVAILABLE,
+                reason_code="ADAPTER_TRANSIENT_UNAVAILABLE",
+                message="Injected Adapter outage.",
+                retryable=True,
             )
         if (
             execution["binding"] != self._binding(request)

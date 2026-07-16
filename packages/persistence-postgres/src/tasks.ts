@@ -6,7 +6,7 @@ import type {
   TaskExecutionTiming,
   TaskRecord,
 } from "../../domain/src/index.js";
-import { isTerminalState } from "../../domain/src/index.js";
+import { isTerminalState, TaskExpiredError } from "../../domain/src/index.js";
 
 export interface AdmissionIntentInput {
   taskId: string;
@@ -146,6 +146,11 @@ interface TaskRow {
   adapter_revision: string;
   observation_revision: string;
   ttl_ms: string | null;
+  handle_expires_at: Date | null;
+  terminal_at: Date | null;
+  expired_at: Date | null;
+  purge_after: Date | null;
+  last_confirmed_at: Date | null;
   poll_interval_ms: number;
   created_at: Date;
   updated_at: Date;
@@ -319,6 +324,13 @@ export class TaskRepository {
           1,
         ],
       );
+      await initializeTaskRetention(
+        client,
+        input.taskId,
+        input.transition.internalState,
+        input.acceptedAt,
+        input.ttlMs,
+      );
       await insertObservation(client, input.taskId, 1, input.transition, {
         source: "adapter",
         adapterRevision: input.adapterRevision,
@@ -382,6 +394,13 @@ export class TaskRepository {
           input.deadlineAt,
         ],
       );
+      await initializeTaskRetention(
+        client,
+        input.taskId,
+        "SCHEDULED",
+        input.acceptedAt,
+        input.ttlMs,
+      );
       await client.query(
         `INSERT INTO task_observation
           (task_id, revision, type, occurred_at, message, substate, source, payload)
@@ -416,15 +435,23 @@ export class TaskRepository {
   }
 
   async getAuthorized(taskId: string, authorization: AuthorizationContext): Promise<TaskRecord> {
-    const result = await this.pool.query<TaskRow>(
-      `SELECT * FROM provider_task
+    const result = await this.pool.query<TaskRow & { handle_expired: boolean }>(
+      `SELECT *,
+              (internal_state LIKE 'TERMINAL_%'
+               AND handle_expires_at IS NOT NULL
+               AND handle_expires_at <= clock_timestamp()) AS handle_expired
+       FROM provider_task
        WHERE task_id=$1 AND authorization_context_hash=$2 AND execution_mode=$3
          AND simulation_id IS NOT DISTINCT FROM $4`,
       [taskId, authorization.hash, authorization.executionMode, authorization.simulationId],
     );
     const row = result.rows[0];
     if (row === undefined) throw new Error("TASK_NOT_FOUND");
-    return fromRow(row);
+    const task = fromRow(row);
+    if (task.expiredAt !== null || row.handle_expired) {
+      throw new TaskExpiredError();
+    }
+    return task;
   }
 
   async getById(taskId: string): Promise<TaskRecord | null> {
@@ -1772,9 +1799,21 @@ export class TaskRepository {
       const existingRow = locked.rows[0];
       if (existingRow === undefined) throw new Error("TASK_NOT_FOUND");
       const existing = fromRow(existingRow);
-      if (isTerminalState(existing.internalState) || adapterRevision <= existing.adapterRevision) {
+      if (isTerminalState(existing.internalState) || adapterRevision < existing.adapterRevision) {
         await client.query("COMMIT");
         return existing;
+      }
+      if (adapterRevision === existing.adapterRevision) {
+        const confirmedAt = new Date();
+        const confirmed = await client.query<TaskRow>(
+          `UPDATE provider_task SET last_confirmed_at=$2
+           WHERE task_id=$1 RETURNING *`,
+          [taskId, confirmedAt],
+        );
+        await client.query("COMMIT");
+        const row = confirmed.rows[0];
+        if (row === undefined) throw new Error("TASK_CONFIRMATION_NOT_RETURNED");
+        return fromRow(row);
       }
       const applied = await transitionTask(client, {
         taskId,
@@ -1888,6 +1927,18 @@ async function transitionTask(
   if (update.invocationAttempt !== undefined) add("invocation_attempt", update.invocationAttempt);
   if (update.recoveryAttempts !== undefined) add("recovery_attempts", update.recoveryAttempts);
   if (update.lastReconciledAt !== undefined) add("last_reconciled_at", update.lastReconciledAt);
+  const resultingState = update.internalState ?? existing.internal_state;
+  const ttlMs = existing.ttl_ms === null ? null : Number(existing.ttl_ms);
+  if (isTerminalState(resultingState)) {
+    const terminalAt = request.observation.occurredAt;
+    add("terminal_at", terminalAt);
+    add("handle_expires_at", new Date(terminalAt.getTime() + (ttlMs ?? 86_400_000)));
+  } else if (ttlMs !== null) {
+    add("handle_expires_at", new Date(request.observation.occurredAt.getTime() + ttlMs));
+  }
+  if (request.observation.source === "adapter") {
+    add("last_confirmed_at", request.observation.occurredAt);
+  }
 
   const updated = await client.query<TaskRow>(
     `UPDATE provider_task SET ${assignments.join(", ")} WHERE task_id=$1 RETURNING *`,
@@ -2224,6 +2275,11 @@ function fromRow(row: TaskRow): TaskRecord {
     adapterRevision: Number(row.adapter_revision),
     observationRevision: Number(row.observation_revision),
     ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
+    handleExpiresAt: row.handle_expires_at,
+    terminalAt: row.terminal_at,
+    expiredAt: row.expired_at,
+    purgeAfter: row.purge_after,
+    lastConfirmedAt: row.last_confirmed_at,
     pollIntervalMs: row.poll_interval_ms,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -2244,4 +2300,28 @@ function fromRow(row: TaskRow): TaskRecord {
     recoveryAttempts: row.recovery_attempts,
     lastReconciledAt: row.last_reconciled_at,
   };
+}
+
+async function initializeTaskRetention(
+  client: PoolClient,
+  taskId: string,
+  state: TaskRecord["internalState"],
+  acceptedAt: Date,
+  ttlMs: number | null,
+): Promise<void> {
+  const terminal = isTerminalState(state);
+  const effectiveTtlMs = ttlMs ?? (terminal ? 86_400_000 : null);
+  await client.query(
+    `UPDATE provider_task
+     SET terminal_at=$2,
+         handle_expires_at=$3,
+         last_confirmed_at=$4
+     WHERE task_id=$1`,
+    [
+      taskId,
+      terminal ? acceptedAt : null,
+      effectiveTtlMs === null ? null : new Date(acceptedAt.getTime() + effectiveTtlMs),
+      acceptedAt,
+    ],
+  );
 }

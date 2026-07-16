@@ -25,6 +25,9 @@ const EnvironmentSchema = z
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
     SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
     RECOVERY_POLL_MS: z.coerce.number().int().min(500).max(300_000).default(5_000),
+    TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
+    TTL_PURGE_GRACE_MS: z.coerce.number().int().min(1_000).max(604_800_000).default(86_400_000),
+    TTL_CLEANER_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(128),
   })
   .superRefine((value, context) => {
     if (

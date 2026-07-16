@@ -1,7 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CallToolResultSchema, CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  CallToolResultSchema,
+  CreateTaskResultSchema,
+  ErrorCode,
+} from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
@@ -26,6 +30,7 @@ import {
   DurableCommandDispatcher,
   DurableScheduler,
   TaskEngine,
+  TtlCleaner,
 } from "../../packages/task-engine/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -1671,6 +1676,239 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(audit.rows[0]?.count).toBe("1");
+  });
+
+  it("T-023 renews a finite active Task handle instead of expiring or purging it", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-active-ttl", scenario: "hold" },
+      authorization,
+      1_000,
+    );
+    if (created.kind !== "task") throw new Error("Expected active TTL Task");
+    const taskId = String(created.task.taskId);
+    await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
+      taskId,
+    ]);
+    const result = await new TtlCleaner(new TaskRepository(pool), {
+      purgeGraceMs: 60_000,
+    }).tick(new Date("2000-01-02T00:00:00Z"));
+    expect(result.renewed).toBeGreaterThanOrEqual(1);
+    const retained = await new TaskRepository(pool).getById(taskId);
+    expect(retained).toMatchObject({ internalState: "RUNNING", expiredAt: null });
+    expect(retained?.handleExpiresAt?.getTime()).toBeGreaterThan(
+      new Date("2000-01-02T00:00:00Z").getTime(),
+    );
+  });
+
+  it("T-024 retains a terminal Task result before its TTL expires", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-terminal-retained" },
+      authorization,
+      60_000,
+    );
+    if (created.kind !== "task") throw new Error("Expected retained terminal Task");
+    const taskId = String(created.task.taskId);
+    const completed = await engine.getTask(taskId, authorization);
+    expect(completed).toMatchObject({ status: "completed" });
+    expect(completed.result).toMatchObject({
+      structuredContent: { resourceId: "rc2-terminal-retained" },
+    });
+    const retained = await new TaskRepository(pool).getById(taskId);
+    expect(retained?.terminalAt).not.toBeNull();
+    expect(retained?.handleExpiresAt?.getTime()).toBeGreaterThan(
+      retained?.terminalAt?.getTime() ?? Number.POSITIVE_INFINITY,
+    );
+
+    const defaultCreated = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-terminal-default-retention" },
+      authorization,
+    );
+    if (defaultCreated.kind !== "task") throw new Error("Expected default-retention Task");
+    const defaultTaskId = String(defaultCreated.task.taskId);
+    await engine.getTask(defaultTaskId, authorization);
+    const defaultRetained = await new TaskRepository(pool).getById(defaultTaskId);
+    if (defaultRetained?.ttlMs === null || defaultRetained?.ttlMs === undefined) {
+      throw new Error("Expected manifest default terminal retention");
+    }
+    expect(defaultRetained.ttlMs).toBeGreaterThanOrEqual(86_400_000);
+    expect(
+      (defaultRetained.handleExpiresAt?.getTime() ?? 0) -
+        (defaultRetained.terminalAt?.getTime() ?? Number.POSITIVE_INFINITY),
+    ).toBe(defaultRetained.ttlMs);
+  });
+
+  it("T-026 lets concurrent TTL cleaners expire and purge each Task exactly once", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-ttl-concurrency" },
+      authorization,
+      1_000,
+      "rc2-ttl-concurrency-key",
+    );
+    if (created.kind !== "task") throw new Error("Expected TTL concurrency Task");
+    const taskId = String(created.task.taskId);
+    await engine.getTask(taskId, authorization);
+    await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
+      taskId,
+    ]);
+    await pool.query(
+      `INSERT INTO task_input_request(task_id,request_key,schema,status,description,required)
+       VALUES ($1,'retention-proof','{}'::jsonb,'ANSWERED','retention proof',false)`,
+      [taskId],
+    );
+    await pool.query(
+      `INSERT INTO task_command(task_id,command_sequence,command_type,request_hash,state,payload)
+       VALUES ($1,99,'UPDATE',$2,'EXHAUSTED','{}'::jsonb)`,
+      [taskId, "f".repeat(64)],
+    );
+    const first = new TtlCleaner(new TaskRepository(pool), { purgeGraceMs: 60_000 });
+    const second = new TtlCleaner(new TaskRepository(pool), { purgeGraceMs: 60_000 });
+    const expired = await Promise.all([
+      first.tick(new Date("2000-01-02T00:00:00Z")),
+      second.tick(new Date("2000-01-02T00:00:00Z")),
+    ]);
+    expect(expired.reduce((sum, result) => sum + result.expired, 0)).toBe(1);
+    const logicallyExpired = await new TaskRepository(pool).getById(taskId);
+    expect(logicallyExpired?.expiredAt).not.toBeNull();
+    expect(logicallyExpired?.purgeAfter?.getTime()).toBeGreaterThan(
+      logicallyExpired?.expiredAt?.getTime() ?? Number.POSITIVE_INFINITY,
+    );
+    const expiryEvents = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM outbox_event WHERE aggregate_id=$1 AND event_type='task.expired'",
+      [taskId],
+    );
+    expect(expiryEvents.rows[0]?.count).toBe("1");
+    await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
+      taskId,
+    ]);
+    const purged = await Promise.all([
+      first.tick(new Date("2000-01-03T00:00:00Z")),
+      second.tick(new Date("2000-01-03T00:00:00Z")),
+    ]);
+    expect(purged.reduce((sum, result) => sum + result.purged, 0)).toBe(1);
+    const residue = await pool.query<{ count: string }>(
+      `SELECT (
+         (SELECT count(*) FROM provider_task WHERE task_id=$1) +
+         (SELECT count(*) FROM task_observation WHERE task_id=$1) +
+         (SELECT count(*) FROM task_input_request WHERE task_id=$1) +
+         (SELECT count(*) FROM task_command WHERE task_id=$1) +
+         (SELECT count(*) FROM admission_intent WHERE task_id=$1) +
+         (SELECT count(*) FROM idempotency_record WHERE task_id=$1) +
+         (SELECT count(*) FROM outbox_event WHERE aggregate_id=$1)
+       )::text AS count`,
+      [taskId],
+    );
+    expect(residue.rows[0]?.count).toBe("0");
+  });
+
+  it("T-025 returns an explicit Invalid Params error for an expired Task handle", async () => {
+    const handler = new McpProtocolHandler(engine.manifest, gateway, engine, {
+      resolveAuthorization: () => authorization,
+    });
+    const app = Fastify();
+    app.post("/mcp", async (request, reply) => {
+      reply.hijack();
+      await handler.handle(request.raw, reply.raw, request.body);
+    });
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (address === null || typeof address === "string") throw new Error("MCP did not bind");
+    const client = new Client({ name: "rc2-ttl-wire", version: "1.0.0" });
+    await client.connect(
+      new StreamableHTTPClientTransport(
+        new URL(`http://127.0.0.1:${String(address.port)}/mcp`),
+      ) as unknown as Transport,
+    );
+    try {
+      const created = await client.request(
+        {
+          method: "tools/call",
+          params: { name: "durable_task", arguments: { resourceId: "rc2-expired-wire" } },
+        },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      await client.experimental.tasks.getTask(created.task.taskId);
+      await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
+        created.task.taskId,
+      ]);
+      await expect(client.experimental.tasks.getTask(created.task.taskId)).rejects.toMatchObject({
+        code: ErrorCode.InvalidParams,
+        data: { reasonCode: "TASK_EXPIRED" },
+      });
+      await expect(
+        client.experimental.tasks.getTaskResult(created.task.taskId, CallToolResultSchema),
+      ).rejects.toMatchObject({
+        code: ErrorCode.InvalidParams,
+        data: { reasonCode: "TASK_EXPIRED" },
+      });
+      await expect(client.experimental.tasks.cancelTask(created.task.taskId)).rejects.toMatchObject(
+        {
+          code: ErrorCode.InvalidParams,
+          data: { reasonCode: "TASK_EXPIRED" },
+        },
+      );
+      await expect(
+        client.request(
+          {
+            method: "tasks/update",
+            params: { taskId: created.task.taskId, inputs: { approval: true } },
+          },
+          z.object({}).loose(),
+        ),
+      ).rejects.toMatchObject({
+        code: ErrorCode.InvalidParams,
+        data: { reasonCode: "TASK_EXPIRED" },
+      });
+      await expect(
+        engine.getTask(created.task.taskId, { ...authorization, hash: "b".repeat(64) }),
+      ).rejects.toThrow("TASK_NOT_FOUND");
+    } finally {
+      await client.close();
+      await app.close();
+    }
+  });
+
+  it("T-027 returns persisted state with stale metadata during a transient Adapter outage", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-stale-read", scenario: "get_transient_failure" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected degraded-read Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    const stale = await engine.getTask(taskId, authorization);
+    expect(stale).toMatchObject({ status: "working" });
+    const metadata = stale._meta as Record<string, unknown>;
+    const profile = metadata["io.sdar/taskExecution"] as Record<string, unknown>;
+    expect(profile).toMatchObject({
+      snapshotFreshness: "stale",
+      degradedReasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
+    });
+    expect(typeof profile.lastConfirmedAt).toBe("string");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(await repository.getById(taskId)).toEqual(before);
+  });
+
+  it("T-028 never masks an Adapter identity conflict as a stale read", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-conflict-not-stale", scenario: "get_external_identity_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected identity-conflict Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    await expect(engine.getTask(taskId, authorization)).rejects.toThrow(
+      "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH",
+    );
+    expect(await repository.getById(taskId)).toEqual(before);
   });
 });
 

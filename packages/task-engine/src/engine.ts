@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
+import * as grpc from "@grpc/grpc-js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import {
   protoStructToJson,
@@ -56,6 +57,7 @@ export interface TaskTraceEvent {
   resourceRef: string | null;
   executionMode: string;
   correlationId: string | null;
+  error?: string;
 }
 
 export class TaskEngine {
@@ -484,18 +486,54 @@ export class TaskEngine {
       task.internalState !== "STARTING"
     ) {
       if (task.externalExecutionId === null) return detailedTask(task);
-      const snapshot = await this.gateway.getExecution(
-        task.taskId,
-        task.externalExecutionId,
-        executionOptions(authorization),
-      );
-      await this.#validateTaskSnapshot(task, operation.name, snapshot);
-      task = await this.#repository.applySnapshot(
-        task.taskId,
-        Number(snapshot.revision),
-        stopTransition(task, snapshot, this.clock.now()),
-        normalizeInputRequests(snapshot),
-      );
+      try {
+        const snapshot = await this.gateway.getExecution(
+          task.taskId,
+          task.externalExecutionId,
+          executionOptions(authorization),
+        );
+        await this.#validateTaskSnapshot(task, operation.name, snapshot);
+        task = await this.#repository.applySnapshot(
+          task.taskId,
+          Number(snapshot.revision),
+          stopTransition(task, snapshot, this.clock.now()),
+          normalizeInputRequests(snapshot),
+        );
+      } catch (error) {
+        if (!isTransientAdapterReadError(error)) throw error;
+        setImmediate(() => {
+          void this.reconcileTask(task, operation)
+            .then((outcome) => {
+              this.metrics?.increment("sdar_recovery_total", {
+                outcome: `degraded_read_${outcome}`,
+              });
+            })
+            .catch((reconcileError: unknown) => {
+              this.metrics?.increment("sdar_recovery_total", {
+                outcome: "degraded_read_error",
+              });
+              this.onTrace?.({
+                event: "task.degraded_reconcile_failed",
+                providerId: task.providerId,
+                taskId: task.taskId,
+                operationName: operation.name,
+                resourceRef: resourceReference(operation, task.arguments),
+                executionMode: task.executionMode,
+                correlationId: authorization.correlationId ?? null,
+                error: reconcileError instanceof Error ? reconcileError.message : "unknown",
+              });
+            });
+        });
+        return detailedTask(
+          task,
+          await this.#repository.listInputRequests(task.taskId),
+          await this.#repository.listObservations(task.taskId),
+          {
+            snapshotFreshness: "stale",
+            degradedReasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
+          },
+        );
+      }
     }
     return detailedTask(
       task,
@@ -896,6 +934,10 @@ function detailedTask(
     adapterRevision: number | null;
     payload: Record<string, unknown>;
   }[] = [],
+  readStatus: {
+    snapshotFreshness: "fresh" | "stale";
+    degradedReasonCode?: string;
+  } = { snapshotFreshness: "fresh" },
 ): Record<string, unknown> {
   return {
     taskId: task.taskId,
@@ -923,6 +965,11 @@ function detailedTask(
         substate: task.substate,
         observationRevision: task.observationRevision,
         executionMode: task.executionMode,
+        snapshotFreshness: readStatus.snapshotFreshness,
+        lastConfirmedAt: task.lastConfirmedAt?.toISOString() ?? null,
+        ...(readStatus.degradedReasonCode === undefined
+          ? {}
+          : { degradedReasonCode: readStatus.degradedReasonCode }),
         timing: {
           acceptedAt: task.acceptedAt.toISOString(),
           notBefore: task.notBefore?.toISOString(),
@@ -950,6 +997,21 @@ function detailedTask(
       },
     },
   };
+}
+
+function isTransientAdapterReadError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = (error as { code?: unknown }).code;
+  return (
+    typeof code === "number" &&
+    [
+      grpc.status.CANCELLED,
+      grpc.status.DEADLINE_EXCEEDED,
+      grpc.status.RESOURCE_EXHAUSTED,
+      grpc.status.ABORTED,
+      grpc.status.UNAVAILABLE,
+    ].includes(code)
+  );
 }
 
 function deadlineReached(message: string, completedAt: Date) {

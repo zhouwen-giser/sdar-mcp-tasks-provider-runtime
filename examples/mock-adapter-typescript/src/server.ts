@@ -210,6 +210,14 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         callback(notFound(`Execution ${taskId || "<missing>"} does not exist`));
         return;
       }
+      if (execution.scenario === "get_transient_failure") {
+        callback(
+          Object.assign(new Error("injected GetExecution transient failure"), {
+            code: grpc.status.UNAVAILABLE,
+          }),
+        );
+        return;
+      }
       if ((execution.holdReads ?? 0) > 0) {
         execution.holdReads = (execution.holdReads ?? 1) - 1;
       } else if (!execution.waitingForInput && !execution.holdSnapshot) {
@@ -243,6 +251,15 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           reasonCode: "EXECUTION_NOT_FOUND",
           message: "No execution is bound to this taskId.",
           retryable: false,
+        });
+        return;
+      }
+      if (execution.scenario === "get_transient_failure") {
+        callback(null, {
+          status: "TRANSIENT_UNAVAILABLE",
+          reasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
+          message: "Injected Adapter outage.",
+          retryable: true,
         });
         return;
       }

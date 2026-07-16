@@ -40,6 +40,11 @@ export interface TaskRecord {
   adapterRevision: number;
   observationRevision: number;
   ttlMs: number | null;
+  handleExpiresAt: Date | null;
+  terminalAt: Date | null;
+  expiredAt: Date | null;
+  purgeAfter: Date | null;
+  lastConfirmedAt: Date | null;
   pollIntervalMs: number;
   createdAt: Date;
   updatedAt: Date;
