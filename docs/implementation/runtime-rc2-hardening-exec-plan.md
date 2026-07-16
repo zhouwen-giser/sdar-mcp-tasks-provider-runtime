@@ -4,7 +4,7 @@ Status: active
 Branch: `feature/mcp-tasks-provider-runtime-v1`  
 Immutable baseline: annotated tag `v1.0.0-rc.1` -> `51d68926ba1bc9e935438e750582693aea3ecf4d`  
 Target: annotated tag `v1.0.0-rc.2`  
-Last updated: 2026-07-16 (H1)
+Last updated: 2026-07-16 (H2)
 
 ## Objective and invariants
 
@@ -49,7 +49,7 @@ Every H phase follows this loop:
 | ----- | ----------------------------------------------------------------------------- | ------------------------------------------------------------- | -------- |
 | H0    | real baseline, six red regressions, plan and matrix                           | baseline assessment, red output, H0 report, push/CI           | complete |
 | H1    | durable stop command dispatcher and rejection policy                          | T-001..T-006, T-029, T-030; migration; no RPC under DB client | complete |
-| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | pending  |
+| H2    | immediate watchdog, late response compensation, scheduled retry               | T-007..T-013; multi-instance/response-loss evidence           | complete |
 | H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | pending  |
 | H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | pending  |
 | H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | pending  |
@@ -102,3 +102,11 @@ The tag is never moved.
 - 2026-07-16 H1 closure: implementation `3f2d425`; push run `29509615239` and PR run
   `29509616607` passed `pnpm verify`, Buf lint/compatibility and Compose with both Adapter
   images. The report closure commit follows the evidence it records.
+- 2026-07-16 H2: persist start attempts and retry anchors; never retry an uncertain Start before
+  Reconcile `NOT_FOUND`; late/queued immediate execution enters durable safe-stop compensation.
+- 2026-07-16 H2 upstream event: PR #1 was externally merged while H2 was in progress, and
+  governance commit `075d8dc` reached both `main` and the target branch. H2 implementation
+  `20d4598` was committed first, then remote target `e768f52` was merged without conflict as
+  `a14d4b3`. Draft PR #3 now carries the remaining H2-H9 delta so PR-context checks continue.
+- 2026-07-16 H2 closure: push run `29511568781`, PR runtime run `29511591880`, and
+  governance quality/Compose runs `29511590472`/`29511590473` all succeeded.
