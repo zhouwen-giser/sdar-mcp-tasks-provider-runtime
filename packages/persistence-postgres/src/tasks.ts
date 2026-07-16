@@ -48,6 +48,10 @@ export interface PendingCommandRecord {
   commandSequence: number;
   commandType: "CANCEL" | "UPDATE" | "PAUSE" | "RESUME";
   payload: Record<string, unknown>;
+  state: "PENDING" | "CLAIMED" | "RETRY_WAIT" | "ACKNOWLEDGED" | "REJECTED" | "EXHAUSTED";
+  attemptCount: number;
+  claimOwner: string | null;
+  stopReason: string | null;
 }
 
 export interface InputRequestRecord {
@@ -373,25 +377,28 @@ export class TaskRepository {
   }
 
   async withRecoveryLock<T>(taskId: string, recover: () => Promise<T>): Promise<T | null> {
-    const client = await this.pool.connect();
+    const leaseKey = `sdar-recovery:${taskId}`;
+    const ownerId = randomUUID();
+    const claimed = await this.pool.query(
+      `INSERT INTO runtime_lease(lease_key, owner_id, fencing_token, expires_at)
+       VALUES ($1,$2,1,clock_timestamp() + interval '30 seconds')
+       ON CONFLICT (lease_key) DO UPDATE SET
+         owner_id=EXCLUDED.owner_id,
+         fencing_token=runtime_lease.fencing_token+1,
+         expires_at=EXCLUDED.expires_at,
+         updated_at=clock_timestamp()
+       WHERE runtime_lease.expires_at <= clock_timestamp()
+       RETURNING lease_key`,
+      [leaseKey, ownerId],
+    );
+    if (claimed.rowCount !== 1) return null;
     try {
-      await client.query("BEGIN");
-      const lock = await client.query<{ acquired: boolean }>(
-        "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS acquired",
-        [`sdar-recovery:${taskId}`],
-      );
-      if (lock.rows[0]?.acquired !== true) {
-        await client.query("ROLLBACK");
-        return null;
-      }
-      const result = await recover();
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
+      return await recover();
     } finally {
-      client.release();
+      await this.pool.query("DELETE FROM runtime_lease WHERE lease_key=$1 AND owner_id=$2", [
+        leaseKey,
+        ownerId,
+      ]);
     }
   }
 
@@ -401,9 +408,14 @@ export class TaskRepository {
       command_sequence: string;
       command_type: PendingCommandRecord["commandType"];
       payload: Record<string, unknown>;
+      state: PendingCommandRecord["state"];
+      attempt_count: number;
+      claim_owner: string | null;
+      stop_reason: string | null;
     }>(
-      `SELECT task_id, command_sequence, command_type, payload
-       FROM task_command WHERE task_id=$1 AND state='PENDING'
+      `SELECT task_id, command_sequence, command_type, payload, state, attempt_count,
+              claim_owner, stop_reason
+       FROM task_command WHERE task_id=$1 AND state IN ('PENDING','CLAIMED','RETRY_WAIT')
        ORDER BY command_sequence`,
       [taskId],
     );
@@ -412,7 +424,80 @@ export class TaskRepository {
       commandSequence: Number(row.command_sequence),
       commandType: row.command_type,
       payload: row.payload,
+      state: row.state,
+      attemptCount: row.attempt_count,
+      claimOwner: row.claim_owner,
+      stopReason: row.stop_reason,
     }));
+  }
+
+  async claimDueCancelCommands(
+    now: Date,
+    ownerId: string,
+    leaseMilliseconds = 30_000,
+    limit = 32,
+  ): Promise<PendingCommandRecord[]> {
+    const result = await this.pool.query<{
+      task_id: string;
+      command_sequence: string;
+      command_type: PendingCommandRecord["commandType"];
+      payload: Record<string, unknown>;
+      state: PendingCommandRecord["state"];
+      attempt_count: number;
+      claim_owner: string | null;
+      stop_reason: string | null;
+    }>(
+      `WITH due AS (
+         SELECT task_id, command_sequence FROM task_command
+         WHERE command_type='CANCEL'
+           AND ((state IN ('PENDING','RETRY_WAIT') AND next_attempt_at <= $1)
+             OR (state='CLAIMED' AND claim_until <= $1))
+         ORDER BY priority DESC, next_attempt_at, created_at, task_id, command_sequence
+         FOR UPDATE SKIP LOCKED LIMIT $4
+       )
+       UPDATE task_command command SET state='CLAIMED', claim_owner=$2,
+         claim_until=$1 + ($3::text || ' milliseconds')::interval,
+         attempt_count=attempt_count+1, updated_at=clock_timestamp()
+       FROM due WHERE command.task_id=due.task_id
+         AND command.command_sequence=due.command_sequence
+       RETURNING command.task_id, command.command_sequence, command.command_type,
+         command.payload, command.state, command.attempt_count, command.claim_owner,
+         command.stop_reason`,
+      [now, ownerId, leaseMilliseconds, limit],
+    );
+    return result.rows.map((row) => ({
+      taskId: row.task_id,
+      commandSequence: Number(row.command_sequence),
+      commandType: row.command_type,
+      payload: row.payload,
+      state: row.state,
+      attemptCount: row.attempt_count,
+      claimOwner: row.claim_owner,
+      stopReason: row.stop_reason,
+    }));
+  }
+
+  async retryClaimedCommand(
+    command: PendingCommandRecord,
+    nextAttemptAt: Date,
+    errorCode: string,
+    errorMessage: string,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE task_command SET state='RETRY_WAIT', next_attempt_at=$4,
+         claim_owner=NULL, claim_until=NULL, last_error_code=$5,
+         last_error_message=$6, updated_at=clock_timestamp()
+       WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+      [
+        command.taskId,
+        command.commandSequence,
+        command.claimOwner,
+        nextAttemptAt,
+        errorCode,
+        errorMessage,
+      ],
+    );
+    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
   }
 
   async noteRecovery(taskId: string): Promise<void> {
@@ -625,7 +710,7 @@ export class TaskRepository {
       await client.query("BEGIN");
       const expired = await client.query<TaskRow>(
         `SELECT * FROM provider_task
-         WHERE deadline_at <= $1 AND cancel_requested=false
+         WHERE deadline_at <= $1 AND stop_reason IS DISTINCT FROM 'DEADLINE_REACHED'
            AND external_execution_id IS NOT NULL
            AND internal_state NOT LIKE 'TERMINAL_%'
          ORDER BY deadline_at, task_id FOR UPDATE SKIP LOCKED LIMIT $2`,
@@ -633,28 +718,53 @@ export class TaskRepository {
       );
       const claimed: DeadlineStopRecord[] = [];
       for (const row of expired.rows) {
+        const active = await client.query<{ command_sequence: string }>(
+          `SELECT command_sequence FROM task_command
+           WHERE task_id=$1 AND command_type='CANCEL'
+             AND state IN ('PENDING','CLAIMED','RETRY_WAIT','ACKNOWLEDGED')
+           ORDER BY command_sequence DESC LIMIT 1`,
+          [row.task_id],
+        );
+        const activeSequence = active.rows[0]?.command_sequence;
         const updated = await client.query<TaskRow>(
-          `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
+          `UPDATE provider_task SET
+             next_command_sequence=next_command_sequence + CASE WHEN $2::bigint IS NULL THEN 1 ELSE 0 END,
              internal_state='STOPPING', mcp_status='working', substate='stopping',
              status_message='Deadline reached; safe stop requested.', cancel_requested=true,
              stop_reason='DEADLINE_REACHED', version=version+1, updated_at=clock_timestamp()
            WHERE task_id=$1 RETURNING *`,
-          [row.task_id],
+          [row.task_id, activeSequence ?? null],
         );
         const taskRow = updated.rows[0];
         if (taskRow === undefined) throw new Error("DEADLINE_CLAIM_LOST");
-        const commandSequence = Number(taskRow.next_command_sequence);
-        await client.query(
-          `INSERT INTO task_command
-            (task_id, command_sequence, command_type, request_hash, state, payload)
-           VALUES ($1,$2,'CANCEL',$3,'PENDING',$4::jsonb)`,
-          [
-            taskRow.task_id,
-            commandSequence,
-            commandHash("DEADLINE_REACHED"),
-            JSON.stringify({ reason: "DEADLINE_REACHED" }),
-          ],
-        );
+        const commandSequence = Number(activeSequence ?? taskRow.next_command_sequence);
+        if (activeSequence === undefined) {
+          await client.query(
+            `INSERT INTO task_command
+              (task_id, command_sequence, command_type, request_hash, state, payload,
+               stop_reason, priority, previous_internal_state, previous_mcp_status,
+               previous_substate, previous_status_message, next_attempt_at)
+             VALUES ($1,$2,'CANCEL',$3,'PENDING',$4::jsonb,'DEADLINE_REACHED',100,$5,$6,$7,$8,$9)`,
+            [
+              taskRow.task_id,
+              commandSequence,
+              commandHash("DEADLINE_REACHED"),
+              JSON.stringify({ reason: "DEADLINE_REACHED" }),
+              row.internal_state,
+              row.mcp_status,
+              row.substate,
+              row.status_message,
+              now,
+            ],
+          );
+        } else {
+          await client.query(
+            `UPDATE task_command SET stop_reason='DEADLINE_REACHED', priority=100,
+               payload=$3::jsonb, updated_at=clock_timestamp()
+             WHERE task_id=$1 AND command_sequence=$2`,
+            [taskRow.task_id, commandSequence, JSON.stringify({ reason: "DEADLINE_REACHED" })],
+          );
+        }
         await insertOutbox(client, taskRow.task_id, "task.cancel_requested", {
           reason: "DEADLINE_REACHED",
         });
@@ -721,9 +831,16 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
+      );
+      const previous = locked.rows[0];
+      if (previous === undefined) throw new Error("TASK_NOT_FOUND");
       const existing = await client.query<{ command_sequence: string }>(
         `SELECT command_sequence FROM task_command
          WHERE task_id=$1 AND command_type='CANCEL'
+           AND state IN ('PENDING','CLAIMED','RETRY_WAIT','ACKNOWLEDGED')
          ORDER BY command_sequence LIMIT 1`,
         [taskId],
       );
@@ -737,15 +854,27 @@ export class TaskRepository {
            mcp_status='working', substate='stopping', status_message='Cancellation requested.',
            version=version+1, updated_at=clock_timestamp()
          WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
-         RETURNING next_command_sequence`,
+         RETURNING next_command_sequence, internal_state, mcp_status, substate, status_message`,
         [taskId],
       );
       const sequence = updated.rows[0]?.next_command_sequence;
       if (sequence === undefined) throw new Error("TASK_ALREADY_TERMINAL");
       await client.query(
-        `INSERT INTO task_command(task_id, command_sequence, command_type, request_hash, state)
-         VALUES ($1,$2,'CANCEL',$3,'PENDING')`,
-        [taskId, sequence, requestHash],
+        `INSERT INTO task_command
+          (task_id, command_sequence, command_type, request_hash, state, payload,
+           stop_reason, priority, previous_internal_state, previous_mcp_status,
+           previous_substate, previous_status_message)
+         VALUES ($1,$2,'CANCEL',$3,'PENDING',$4::jsonb,'USER_REQUESTED',10,$5,$6,$7,$8)`,
+        [
+          taskId,
+          sequence,
+          requestHash,
+          JSON.stringify({ reason: "USER_REQUESTED" }),
+          previous.internal_state,
+          previous.mcp_status,
+          previous.substate,
+          previous.status_message,
+        ],
       );
       await insertOutbox(client, taskId, "task.cancel_requested", {});
       await client.query("COMMIT");
@@ -812,6 +941,169 @@ export class TaskRepository {
        updated_at=clock_timestamp() WHERE task_id=$1 AND command_sequence=$2`,
       [taskId, sequence, accepted ? "ACKNOWLEDGED" : "REJECTED", JSON.stringify(ack)],
     );
+  }
+
+  async acknowledgeClaimedCommand(
+    command: PendingCommandRecord,
+    ack: Record<string, unknown>,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE task_command SET state='ACKNOWLEDGED', adapter_ack=$4::jsonb,
+         claim_owner=NULL, claim_until=NULL, last_error_code=NULL,
+         last_error_message=NULL, updated_at=clock_timestamp()
+       WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+      [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
+    );
+    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+  }
+
+  async rejectUserCancel(
+    command: PendingCommandRecord,
+    adapterRevision: number,
+    transition: SnapshotTransition,
+    ack: Record<string, unknown>,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
+      );
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("TASK_NOT_FOUND");
+      if (isTerminalState(fromRow(row).internalState)) {
+        await client.query(
+          `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+             last_error_code='TASK_TERMINAL', updated_at=clock_timestamp()
+           WHERE task_id=$1 AND command_sequence=$2`,
+          [command.taskId, command.commandSequence],
+        );
+        await client.query("COMMIT");
+        return fromRow(row);
+      }
+      const updated = await client.query<TaskRow>(
+        `UPDATE provider_task SET internal_state=$2, mcp_status=$3, substate=$4,
+           status_message=$5, result=$6::jsonb, error=$7::jsonb,
+           adapter_revision=GREATEST(adapter_revision,$8), cancel_requested=false,
+           stop_reason=NULL, version=version+1, updated_at=clock_timestamp()
+         WHERE task_id=$1 RETURNING *`,
+        [
+          command.taskId,
+          transition.internalState,
+          transition.mcpStatus,
+          transition.substate,
+          transition.statusMessage,
+          jsonOrNull(transition.result),
+          jsonOrNull(transition.error),
+          adapterRevision,
+        ],
+      );
+      const updatedRow = updated.rows[0];
+      if (updatedRow === undefined) throw new Error("TASK_UPDATE_NOT_RETURNED");
+      const revision = await nextObservationRevision(client, command.taskId);
+      await insertObservation(client, command.taskId, revision, {
+        ...transition,
+        observationType: "task.cancel_rejected",
+      });
+      await insertOutbox(client, command.taskId, "task.cancel_rejected", {
+        commandSequence: command.commandSequence,
+      });
+      await client.query(
+        `UPDATE task_command SET state='REJECTED', adapter_ack=$4::jsonb,
+           claim_owner=NULL, claim_until=NULL, last_error_code=$5,
+           last_error_message=$6, updated_at=clock_timestamp()
+         WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+        [
+          command.taskId,
+          command.commandSequence,
+          command.claimOwner,
+          JSON.stringify(ack),
+          typeof ack.reasonCode === "string" ? ack.reasonCode : "CANCEL_REJECTED",
+          typeof ack.message === "string" ? ack.message : "Adapter rejected cancellation.",
+        ],
+      );
+      await client.query("COMMIT");
+      return fromRow(updatedRow);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async failSafeStopUnconfirmed(
+    command: PendingCommandRecord,
+    message: string,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query<TaskRow>(
+        `UPDATE provider_task SET internal_state='TERMINAL_FAILED', mcp_status='failed',
+           substate=NULL, status_message=$2, result=NULL, error=$3::jsonb,
+           version=version+1, updated_at=clock_timestamp()
+         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%' RETURNING *`,
+        [
+          command.taskId,
+          message,
+          JSON.stringify({
+            code: -32603,
+            message,
+            data: { reasonCode: "SAFE_STOP_UNCONFIRMED" },
+          }),
+        ],
+      );
+      const row = updated.rows[0];
+      if (row === undefined) {
+        const existing = await client.query<TaskRow>(
+          "SELECT * FROM provider_task WHERE task_id=$1",
+          [command.taskId],
+        );
+        const existingRow = existing.rows[0];
+        if (existingRow === undefined) throw new Error("TASK_NOT_FOUND");
+        await client.query(
+          `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+             last_error_code='TASK_TERMINAL', last_error_message=$4,
+             updated_at=clock_timestamp()
+           WHERE task_id=$1 AND command_sequence=$2 AND claim_owner=$3`,
+          [command.taskId, command.commandSequence, command.claimOwner, message],
+        );
+        await client.query("COMMIT");
+        return fromRow(existingRow);
+      }
+      const revision = await nextObservationRevision(client, command.taskId);
+      await insertObservation(client, command.taskId, revision, {
+        internalState: "TERMINAL_FAILED",
+        mcpStatus: "failed",
+        substate: null,
+        statusMessage: message,
+        result: null,
+        error: row.error,
+        terminal: true,
+        observationType: "task.failed",
+      });
+      await insertOutbox(client, command.taskId, "task.safe_stop_unconfirmed", {
+        reasonCode: "SAFE_STOP_UNCONFIRMED",
+        stopReason: command.stopReason,
+        severity: "critical",
+      });
+      await client.query(
+        `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+           last_error_code='SAFE_STOP_UNCONFIRMED', last_error_message=$4,
+           updated_at=clock_timestamp()
+         WHERE task_id=$1 AND command_sequence=$2 AND claim_owner=$3`,
+        [command.taskId, command.commandSequence, command.claimOwner, message],
+      );
+      await client.query("COMMIT");
+      return fromRow(row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async completeInputAnswers(
@@ -888,6 +1180,14 @@ export class TaskRepository {
       await insertObservation(client, taskId, adapterRevision, transition);
       await upsertInputRequests(client, taskId, inputRequests);
       await insertOutbox(client, taskId, "task.updated", { status: transition.mcpStatus });
+      if (transition.terminal) {
+        await client.query(
+          `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+             last_error_code='TASK_TERMINAL', updated_at=clock_timestamp()
+           WHERE task_id=$1 AND state IN ('PENDING','CLAIMED','RETRY_WAIT')`,
+          [taskId],
+        );
+      }
       await client.query("COMMIT");
       const updatedRow = updated.rows[0];
       if (updatedRow === undefined) throw new Error("TASK_UPDATE_NOT_RETURNED");
@@ -917,6 +1217,15 @@ async function insertObservation(
       JSON.stringify({ substate: transition.substate }),
     ],
   );
+}
+
+async function nextObservationRevision(client: PoolClient, taskId: string): Promise<number> {
+  const result = await client.query<{ revision: string }>(
+    `SELECT COALESCE(max(revision),0)+1 AS revision
+     FROM task_observation WHERE task_id=$1`,
+    [taskId],
+  );
+  return Number(result.rows[0]?.revision ?? 1);
 }
 
 async function upsertInputRequests(

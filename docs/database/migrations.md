@@ -21,4 +21,12 @@ The Runtime never returns a task identifier before `provider_task`, its initial 
 
 `006_recovery_hardening.sql` persists admission timing/TTL anchors needed to recover a response-lost start without a new client call, adds Task recovery attempt/audit fields, and creates partial recovery indexes. Recovery workers take a transaction-scoped PostgreSQL advisory lock per taskId before replaying a pending command or applying a Reconcile Snapshot. Confirmed Adapter `NOT_FOUND` after an external binding becomes an explicit technical failure; transient unavailability leaves the last confirmed Task unchanged.
 
+`007_durable_command_dispatch.sql` upgrades cancellation and mandatory-stop commands to a
+recoverable dispatch state machine. It adds claim owner/expiry, attempt count, next-attempt
+time, rejection diagnostics, stop priority/reason and the previous Task state needed for an
+authoritative user-cancel rollback. Partial indexes enforce one active stop per Task and make
+due work claimable by multiple Runtime instances. The migration removes the rc.1 global
+request-hash uniqueness rule so a permanently rejected user cancellation can be followed by a
+new stable command sequence, while retaining duplicate coalescing for active commands.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

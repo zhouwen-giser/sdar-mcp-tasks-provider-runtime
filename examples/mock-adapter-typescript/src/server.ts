@@ -25,6 +25,7 @@ interface MockExecution {
   holdSnapshot?: boolean;
   holdReads?: number;
   inputRound?: number;
+  cancelAttempts?: number;
   commandAcks: Record<string, Record<string, unknown>>;
 }
 
@@ -269,6 +270,36 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       const existingAck = execution.commandAcks[commandKey];
       if (existingAck !== undefined) {
         callback(null, existingAck);
+        return;
+      }
+      execution.cancelAttempts = (execution.cancelAttempts ?? 0) + 1;
+      if (execution.scenario === "cancel_permanent_reject") {
+        executions.set(taskId, execution);
+        callback(null, {
+          accepted: false,
+          reasonCode: "CANCEL_NOT_PERMITTED",
+          message: "Reference execution rejected user cancellation.",
+          commandSequence: call.request.identity?.commandSequence ?? "1",
+        });
+        return;
+      }
+      if (execution.scenario === "cancel_retryable_reject" && execution.cancelAttempts === 1) {
+        executions.set(taskId, execution);
+        callback(null, {
+          accepted: false,
+          reasonCode: "TRANSIENT_UNAVAILABLE",
+          message: "Reference execution requests a retry.",
+          commandSequence: call.request.identity?.commandSequence ?? "1",
+        });
+        return;
+      }
+      if (execution.scenario === "cancel_transport_failure") {
+        executions.set(taskId, execution);
+        callback(
+          Object.assign(new Error("injected cancel transport failure"), {
+            code: grpc.status.UNAVAILABLE,
+          }),
+        );
         return;
       }
       options.onControlSideEffect?.(taskId, "cancel");

@@ -19,6 +19,7 @@ import {
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
 import {
+  DurableCommandDispatcher,
   DurableScheduler,
   RecoveryManager,
   TaskEngine,
@@ -67,8 +68,10 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let mcpHandler: McpProtocolHandler | undefined;
   let schedulerTimer: NodeJS.Timeout | undefined;
   let recoveryTimer: NodeJS.Timeout | undefined;
+  let commandDispatcherTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
+  let commandDispatcherTicking = false;
   const rateWindows = new Map<string, { startedAt: number; count: number }>();
 
   app.addHook("onRequest", async (request, reply) => {
@@ -148,6 +151,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   app.addHook("onClose", async () => {
     if (schedulerTimer !== undefined) clearInterval(schedulerTimer);
     if (recoveryTimer !== undefined) clearInterval(recoveryTimer);
+    if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
     gateway.close();
     await pool.end();
   });
@@ -189,6 +193,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       });
       const taskRepository = new TaskRepository(pool);
       const scheduler = new DurableScheduler(validated, gateway, taskRepository);
+      const commandDispatcher = new DurableCommandDispatcher(gateway, taskRepository);
       const recovery = new RecoveryManager(taskEngine, taskRepository, (error, taskId) => {
         logger.warn(
           { err: error, taskId, providerId: validated.providerId },
@@ -203,6 +208,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         "startup recovery scanned",
       );
       await scheduler.tick();
+      await commandDispatcher.tick();
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
         schedulerTicking = true;
@@ -217,6 +223,20 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.SCHEDULER_POLL_MS);
       schedulerTimer.unref();
+      commandDispatcherTimer = setInterval(() => {
+        if (commandDispatcherTicking) return;
+        commandDispatcherTicking = true;
+        void commandDispatcher
+          .tick()
+          .catch((error: unknown) => {
+            dependencies.database = "failed";
+            logger.error({ err: error }, "command dispatcher tick failed");
+          })
+          .finally(() => {
+            commandDispatcherTicking = false;
+          });
+      }, config.SCHEDULER_POLL_MS);
+      commandDispatcherTimer.unref();
       recoveryTimer = setInterval(() => {
         if (recoveryTicking) return;
         recoveryTicking = true;

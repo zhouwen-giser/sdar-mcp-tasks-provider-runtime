@@ -567,23 +567,7 @@ export class TaskEngine {
     });
     if (isTerminalState(task.internalState)) return detailedTask(task);
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
-    const command = await this.#repository.beginCancel(taskId, requestHash);
-    if (!command.duplicate) {
-      const ack = await this.gateway.requestCancel(
-        task.taskId,
-        task.operationName,
-        task.argumentHash,
-        "USER_REQUESTED",
-        command.sequence,
-        executionOptions(authorization),
-      );
-      await this.#repository.acknowledgeCommand(
-        taskId,
-        command.sequence,
-        ack.accepted,
-        ack as unknown as Record<string, unknown>,
-      );
-    }
+    await this.#repository.beginCancel(taskId, requestHash);
     task = (await this.#repository.getById(taskId)) ?? task;
     return detailedTask(task);
   }

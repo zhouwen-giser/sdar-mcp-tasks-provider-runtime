@@ -22,7 +22,11 @@ import {
   TaskRepository,
   runMigrations,
 } from "../../packages/persistence-postgres/src/index.js";
-import { DurableScheduler, TaskEngine } from "../../packages/task-engine/src/index.js";
+import {
+  DurableCommandDispatcher,
+  DurableScheduler,
+  TaskEngine,
+} from "../../packages/task-engine/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (databaseUrl === undefined)
@@ -288,6 +292,7 @@ describe("durable task lifecycle", () => {
       expect((await client.experimental.tasks.cancelTask(cancelTask.task.taskId)).status).toBe(
         "working",
       );
+      await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
       expect((await client.experimental.tasks.getTask(cancelTask.task.taskId)).status).toBe(
         "cancelled",
       );
@@ -627,6 +632,12 @@ describe("durable task lifecycle", () => {
     expect(await scheduler.tick()).toMatchObject({ deadlineStops: 1 });
     const stopping = await new TaskRepository(pool).getById(String(created.task.taskId));
     expect(stopping).toMatchObject({ mcpStatus: "working", internalState: "STOPPING" });
+    await new DurableCommandDispatcher(
+      gateway,
+      new TaskRepository(pool),
+      clock,
+      "deadline-proof-dispatcher",
+    ).tick();
     const completed = await timedEngine.getTask(String(created.task.taskId), authorization);
     expect(completed).toMatchObject({
       status: "completed",
@@ -711,6 +722,8 @@ describe("durable task lifecycle", () => {
       (acknowledged._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
     ).toMatchObject({ substate: "stopping" });
     await engine.cancelTask(taskId, authorization);
+    expect(controlSideEffectCount - before).toBe(0);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     expect(controlSideEffectCount - before).toBe(1);
     expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
 
@@ -722,6 +735,7 @@ describe("durable task lifecycle", () => {
     if (race.kind !== "task") throw new Error("Expected race task");
     const raceId = String(race.task.taskId);
     expect(await engine.cancelTask(raceId, authorization)).toMatchObject({ status: "working" });
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     expect(await engine.getTask(raceId, authorization)).toMatchObject({
       status: "completed",
       result: { structuredContent: { outcome: "success" } },
@@ -757,6 +771,12 @@ describe("durable task lifecycle", () => {
       "deadline-race-worker",
     );
     await deadlineScheduler.tick();
+    await new DurableCommandDispatcher(
+      gateway,
+      new TaskRepository(pool),
+      deadlineClock,
+      "deadline-dispatcher",
+    ).tick();
     const controlsBeforeDuplicate = controlSideEffectCount;
     await deadlineEngine.cancelTask(String(deadlineTask.task.taskId), authorization);
     expect(controlSideEffectCount).toBe(controlsBeforeDuplicate);
@@ -804,6 +824,230 @@ describe("durable task lifecycle", () => {
     expect((await outbox.pending()).some((candidate) => candidate.eventId === event.eventId)).toBe(
       false,
     );
+  });
+
+  it("T-001/T-029/T-030 persists cancel before transport failure and retries after restart", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-cancel-transport", scenario: "cancel_transport_failure" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected cancellable task");
+    const taskId = String(created.task.taskId);
+    const started = performance.now();
+    expect(await engine.cancelTask(taskId, authorization)).toMatchObject({ status: "working" });
+    expect(performance.now() - started).toBeLessThan(100);
+    const repository = new TaskRepository(pool);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STOPPING",
+      cancelRequested: true,
+    });
+    expect(await new DurableCommandDispatcher(gateway, repository).tick()).toMatchObject({
+      retried: 1,
+    });
+    const first = await pool.query<{ state: string; attempt_count: number }>(
+      "SELECT state, attempt_count FROM task_command WHERE task_id=$1",
+      [taskId],
+    );
+    expect(first.rows[0]).toMatchObject({ state: "RETRY_WAIT", attempt_count: 1 });
+    await pool.query(
+      "UPDATE task_command SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE task_id=$1",
+      [taskId],
+    );
+    expect(
+      await new DurableCommandDispatcher(
+        gateway,
+        new TaskRepository(pool),
+        undefined,
+        "restart",
+      ).tick(),
+    ).toMatchObject({ retried: 1 });
+    expect(await repository.getById(taskId)).toMatchObject({ internalState: "STOPPING" });
+  });
+
+  it("T-001 releases the database connection before a slow cancel RPC", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-cancel-no-db-connection" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected cancellable task");
+    const taskId = String(created.task.taskId);
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      "UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z' WHERE task_id<>$1 AND state IN ('PENDING','RETRY_WAIT')",
+      [taskId],
+    );
+
+    const singleConnectionPool = new Pool({ connectionString: databaseUrl, max: 1 });
+    let releaseRpc!: () => void;
+    let notifyRpcStarted!: () => void;
+    const rpcStarted = new Promise<void>((resolve) => {
+      notifyRpcStarted = resolve;
+    });
+    const rpcRelease = new Promise<void>((resolve) => {
+      releaseRpc = resolve;
+    });
+    const slowGateway = {
+      requestCancel: async () => {
+        notifyRpcStarted();
+        await rpcRelease;
+        return { accepted: true, commandSequence: "1", reasonCode: "", message: "accepted" };
+      },
+    } as unknown as GrpcAdapterGateway;
+    const dispatch = new DurableCommandDispatcher(
+      slowGateway,
+      new TaskRepository(singleConnectionPool),
+      undefined,
+      "single-connection-worker",
+    ).tick();
+    await rpcStarted;
+    try {
+      await expect(
+        Promise.race([
+          singleConnectionPool.query("SELECT 1 AS ready"),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("DATABASE_CONNECTION_HELD_DURING_RPC")), 500),
+          ),
+        ]),
+      ).resolves.toBeDefined();
+    } finally {
+      releaseRpc();
+      await dispatch;
+      await singleConnectionPool.end();
+    }
+  });
+
+  it("T-002 retries a retryable cancel rejection and completes from safe-stop proof", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T16:00:00Z"));
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-cancel-retry", scenario: "cancel_retryable_reject" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected cancellable task");
+    const taskId = String(created.task.taskId);
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      "UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z' WHERE task_id<>$1 AND state='RETRY_WAIT'",
+      [taskId],
+    );
+    const dispatcher = new DurableCommandDispatcher(
+      gateway,
+      new TaskRepository(pool),
+      clock,
+      "retry-worker",
+    );
+    expect(await dispatcher.tick()).toMatchObject({ retried: 1 });
+    clock.advance(250);
+    expect(await dispatcher.tick()).toMatchObject({ acknowledged: 1 });
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
+  });
+
+  it("T-003 restores authoritative state after permanent user cancel rejection", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-cancel-rejected", scenario: "cancel_permanent_reject" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected cancellable task");
+    const taskId = String(created.task.taskId);
+    await engine.cancelTask(taskId, authorization);
+    expect(
+      await new DurableCommandDispatcher(
+        gateway,
+        new TaskRepository(pool),
+        undefined,
+        "reject",
+      ).tick(),
+    ).toMatchObject({ rejected: 1 });
+    expect(await new TaskRepository(pool).getById(taskId)).toMatchObject({
+      internalState: "RUNNING",
+      cancelRequested: false,
+      stopReason: null,
+    });
+    const first = await pool.query<{ command_sequence: string; state: string }>(
+      "SELECT command_sequence, state FROM task_command WHERE task_id=$1",
+      [taskId],
+    );
+    expect(first.rows[0]).toMatchObject({ command_sequence: "1", state: "REJECTED" });
+    await engine.cancelTask(taskId, authorization);
+    const commands = await pool.query<{ command_sequence: string }>(
+      "SELECT command_sequence FROM task_command WHERE task_id=$1 ORDER BY command_sequence",
+      [taskId],
+    );
+    expect(commands.rows.map((row) => row.command_sequence)).toEqual(["1", "2"]);
+    await pool.query(
+      "UPDATE task_command SET state='EXHAUSTED' WHERE task_id=$1 AND state='PENDING'",
+      [taskId],
+    );
+  });
+
+  it("T-004/T-005 keeps deadline stopping on transient failure and fails permanent rejection", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T17:00:00Z"));
+    const deadlineEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      new TaskRepository(pool),
+      undefined,
+      clock,
+    );
+    const create = async (resourceId: string, scenario: string) => {
+      const invocation = await deadlineEngine.callOperation(
+        requiredOperation("durable_task"),
+        { resourceId, scenario },
+        authorization,
+        undefined,
+        undefined,
+        { start: { mode: "immediate", startToleranceMs: 0 }, maxElapsedMs: 1_000 },
+      );
+      if (invocation.kind !== "task") throw new Error("Expected deadline task");
+      return String(invocation.task.taskId);
+    };
+    const transientId = await create("rc2-deadline-transient", "cancel_transport_failure");
+    const rejectedId = await create("rc2-deadline-rejected", "cancel_permanent_reject");
+    await pool.query(
+      "UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z' WHERE task_id NOT IN ($1,$2) AND state='RETRY_WAIT'",
+      [transientId, rejectedId],
+    );
+    clock.advance(1_001);
+    const repository = new TaskRepository(pool);
+    expect(
+      await new DurableScheduler(engine.manifest, gateway, repository, clock, "deadline-h1").tick(),
+    ).toMatchObject({ deadlineStops: 2 });
+    const dispatched = await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      clock,
+      "deadline-h1-dispatch",
+    ).tick();
+    expect(dispatched).toMatchObject({ retried: 1, exhausted: 1 });
+    expect(await repository.getById(transientId)).toMatchObject({ internalState: "STOPPING" });
+    expect(await repository.getById(rejectedId)).toMatchObject({
+      internalState: "TERMINAL_FAILED",
+      error: { data: { reasonCode: "SAFE_STOP_UNCONFIRMED" } },
+    });
+  });
+
+  it("T-006 coalesces concurrent duplicate cancel into one durable command", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-cancel-concurrent" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected cancellable task");
+    const taskId = String(created.task.taskId);
+    await Promise.all([
+      engine.cancelTask(taskId, authorization),
+      engine.cancelTask(taskId, authorization),
+      engine.cancelTask(taskId, authorization),
+    ]);
+    const commands = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='CANCEL'",
+      [taskId],
+    );
+    expect(commands.rows[0]?.count).toBe("1");
   });
 });
 

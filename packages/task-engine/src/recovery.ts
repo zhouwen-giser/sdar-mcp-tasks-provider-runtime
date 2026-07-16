@@ -50,6 +50,7 @@ export class RecoveryManager {
           if (task === null || task.internalState.startsWith("TERMINAL_")) return "terminal";
           const pending = await this.repository.listPendingCommands(task.taskId);
           for (const command of pending) {
+            if (command.commandType === "CANCEL") continue;
             await this.engine.replayPendingCommand(task, command);
             result.commandsReplayed += 1;
           }

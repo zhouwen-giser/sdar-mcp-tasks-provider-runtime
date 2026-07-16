@@ -45,7 +45,11 @@ describe("Adapter Protocol v1", () => {
 
   it("keeps the Python Adapter source syntactically valid", () => {
     expect(() =>
-      execFileSync("python3", ["-m", "py_compile", "examples/mock-adapter-python/adapter.py"]),
+      execFileSync(process.platform === "win32" ? "python" : "python3", [
+        "-m",
+        "py_compile",
+        "examples/mock-adapter-python/adapter.py",
+      ]),
     ).not.toThrow();
   });
 });

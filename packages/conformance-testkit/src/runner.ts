@@ -15,7 +15,11 @@ import {
   TaskRepository,
   runMigrations,
 } from "../../persistence-postgres/src/index.js";
-import { DurableScheduler, TaskEngine } from "../../task-engine/src/index.js";
+import {
+  DurableCommandDispatcher,
+  DurableScheduler,
+  TaskEngine,
+} from "../../task-engine/src/index.js";
 
 export interface ConformanceOptions {
   language: "typescript" | "python";
@@ -189,6 +193,7 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
         "cancel was terminal early",
       );
       await engine.cancelTask(taskId, authorization);
+      await new DurableCommandDispatcher(gateway, repository).tick();
       assert(
         (await engine.getTask(taskId, authorization)).status === "cancelled",
         "cancel proof missing",

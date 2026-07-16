@@ -16,7 +16,11 @@ import {
   TaskRepository,
   runMigrations,
 } from "../../packages/persistence-postgres/src/index.js";
-import { RecoveryManager, TaskEngine } from "../../packages/task-engine/src/index.js";
+import {
+  DurableCommandDispatcher,
+  RecoveryManager,
+  TaskEngine,
+} from "../../packages/task-engine/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (databaseUrl === undefined) throw new Error("TEST_DATABASE_URL is required for recovery tests");
@@ -93,7 +97,7 @@ describe("Runtime startup and fault recovery", () => {
     });
   });
 
-  it("replays a pending cancel command without repeating the Adapter side effect", async () => {
+  it("dispatches a recovered cancel command without repeating the Adapter side effect", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "pending-cancel", scenario: "cancel_response_loss" },
@@ -102,10 +106,8 @@ describe("Runtime startup and fault recovery", () => {
     if (created.kind !== "task") throw new Error("Expected recoverable task");
     const taskId = String(created.task.taskId);
     const before = controlSideEffects;
-    await expect(engine.cancelTask(taskId, authorization)).rejects.toThrow(
-      "injected RequestCancel response loss",
-    );
-    expect(controlSideEffects - before).toBe(1);
+    expect(await engine.cancelTask(taskId, authorization)).toMatchObject({ status: "working" });
+    expect(controlSideEffects - before).toBe(0);
     expect(
       (
         await pool.query<{ state: string }>(
@@ -115,8 +117,14 @@ describe("Runtime startup and fault recovery", () => {
       ).rows[0]?.state,
     ).toBe("PENDING");
 
-    const scan = await new RecoveryManager(engine, new TaskRepository(pool)).scan();
-    expect(scan.commandsReplayed).toBe(1);
+    const dispatcher = new DurableCommandDispatcher(gateway, new TaskRepository(pool));
+    expect(await dispatcher.tick()).toMatchObject({ retried: 1 });
+    expect(controlSideEffects - before).toBe(1);
+    await pool.query(
+      "UPDATE task_command SET next_attempt_at=clock_timestamp()-interval '1 second' WHERE task_id=$1",
+      [taskId],
+    );
+    expect(await dispatcher.tick()).toMatchObject({ acknowledged: 1 });
     expect(controlSideEffects - before).toBe(1);
     expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
   });

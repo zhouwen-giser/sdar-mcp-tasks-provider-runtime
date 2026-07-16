@@ -17,7 +17,7 @@ describe("rc.1 hardening red baseline", () => {
   it("T-029: returns a durable cancel acknowledgement without waiting for Adapter RPC", () => {
     const body = methodBody(engine, "cancelTask", "updateTask");
     expect(body).not.toContain("await this.gateway.requestCancel");
-    expect(body).toContain("commandDispatcher");
+    expect(body).toContain("await this.#repository.beginCancel");
   });
 
   it("T-007: scans immediate tasks that exceed latestStartAt", () => {

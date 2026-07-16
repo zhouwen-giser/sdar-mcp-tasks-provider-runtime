@@ -98,27 +98,7 @@ export class DurableScheduler {
     }
 
     const expired = await this.repository.claimExpiredDeadlines(now);
-    for (const { task, commandSequence } of expired) {
-      const ack = await this.gateway.requestCancel(
-        task.taskId,
-        task.operationName,
-        task.argumentHash,
-        "DEADLINE_REACHED",
-        commandSequence,
-        {
-          authorizationContextHash: task.authorizationContextHash,
-          executionMode: task.executionMode,
-          simulationId: task.simulationId,
-        },
-      );
-      await this.repository.acknowledgeCommand(
-        task.taskId,
-        commandSequence,
-        ack.accepted,
-        ack as unknown as Record<string, unknown>,
-      );
-      if (ack.accepted) result.deadlineStops += 1;
-    }
+    result.deadlineStops += expired.length;
     return result;
   }
 }
