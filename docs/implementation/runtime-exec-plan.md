@@ -38,7 +38,7 @@ implementation.
 | R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | completed (`28d35d9`, CI green)                |
 | R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | completed (`3b896ca`, fix `e619a1d`, CI green) |
 | R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | completed (`bb5e941`, fix `e5736f7`, CI green) |
-| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | pending                                        |
+| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | implementation complete; exit CI pending       |
 | R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | pending                                        |
 
 ## Phase execution details
@@ -162,6 +162,13 @@ security, real PostgreSQL and Compose gates.
 - Complete durable TS and Python scenarios for availability, sync/async,
   scheduled/input, cancel, idempotency, reconcile, conflict, and terminal rules.
 - Run the same HTTP/gRPC scenarios against both Adapter processes.
+
+Implementation: complete. Both reference Adapters expose the same three
+operations and persist execution/Snapshot/command binding in atomic state files.
+The Testkit restarts each process on the same state, requires Reconcile FOUND,
+then runs identical P0-P4 MCP/gRPC/PostgreSQL scenarios and emits JSON reports
+validated by a versioned schema. Remote dual-language CI is pending because the
+local host has neither Docker access nor Python pip.
 
 ### R9 — release candidate
 

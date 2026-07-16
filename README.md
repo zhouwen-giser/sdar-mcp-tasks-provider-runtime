@@ -27,4 +27,6 @@ docker compose --profile python-adapter build adapter-python
 
 Runtime startup runs durable scheduling and recovery before readiness. Authentication, execution-mode isolation, mutual TLS, limits, recovery behavior, and Prometheus metrics are documented in [`docs/operations/security-recovery.md`](docs/operations/security-recovery.md).
 
+Adapter authors can run the dual-language P0-P4 workflow described in [`docs/conformance/adapter-testkit.md`](docs/conformance/adapter-testkit.md); its JSON reports use a published repository schema.
+
 Root commands for all release gates are discoverable in `package.json`; `pnpm verify` becomes the complete RC gate as R8-R9 add their assigned suites.

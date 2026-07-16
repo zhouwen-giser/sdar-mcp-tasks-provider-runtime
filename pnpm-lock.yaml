@@ -84,6 +84,8 @@ importers:
 
   packages/adapter-protocol: {}
 
+  packages/conformance-testkit: {}
+
   packages/domain: {}
 
   packages/mcp-protocol: {}

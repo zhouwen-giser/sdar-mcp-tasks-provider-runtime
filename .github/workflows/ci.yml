@@ -61,6 +61,13 @@ jobs:
       - run: pnpm test:integration
       - run: pnpm test:recovery
       - run: pnpm test:security
+      - run: pnpm test:conformance
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-reports
+          path: reports/conformance/*.json
+          if-no-files-found: warn
 
   compose-smoke:
     runs-on: ubuntu-24.04

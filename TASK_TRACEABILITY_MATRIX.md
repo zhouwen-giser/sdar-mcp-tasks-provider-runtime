@@ -8,7 +8,7 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 |---|---|---|---|---|---|
 | RQ-MCP | Profile 5-8、33 | R2-R6 | `packages/mcp-protocol`, `apps/runtime` | contract/e2e | VERIFIED (R6 CI) |
 | RQ-REG | Runtime 4 | R2 | `packages/operation-registry` | unit/integration/security | VERIFIED (R2 CI) |
-| RQ-ADAPTER | Adapter 4-15 | R1-R8 | `proto`, `packages/adapter-protocol` | proto/contract/cross-language | PLANNED |
+| RQ-ADAPTER | Adapter 4-15 | R1-R8 | `proto`, `packages/adapter-protocol`, examples | proto/contract/cross-language | IN PROGRESS (R8 IMPLEMENTED) |
 | RQ-STATE | Profile 5、17、24；Runtime 5 | R3-R6 | `packages/domain`, `packages/task-engine` | state matrix/terminal CAS | VERIFIED (R6 CI) |
 | RQ-ADMISSION | Runtime 6、8、10 | R3-R4 | task engine/PostgreSQL repositories | PG/gRPC crash-window/recovery | IN PROGRESS (R3 CORE) |
 | RQ-AVAIL | Profile 8-11 | R4 | domain/task engine/MCP/gRPC | four-state/window/unknown E2E | VERIFIED (R4 CI) |
@@ -21,4 +21,4 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 | RQ-PERSIST | Runtime 8 | R2-R7 | `migrations`, PostgreSQL package | migration/integration | VERIFIED (R7 CI) |
 | RQ-SEC | Profile 20、34-35 | R2、R7 | security and protocol boundaries | auth/mode/fuzz | VERIFIED (R7 CI) |
 | RQ-OBSERVABILITY | Runtime 12 | R1、R7-R9 | `packages/observability` | metrics/log redaction | IN PROGRESS (R7 IMPLEMENTED) |
-| RQ-CONFORMANCE | Profile 37-39 | R8-R9 | `packages/conformance-testkit` | P0-P4/cross-language | PLANNED |
+| RQ-CONFORMANCE | Profile 37-39 | R8-R9 | `packages/conformance-testkit` | P0-P4/cross-language | IN PROGRESS (R8 IMPLEMENTED) |
