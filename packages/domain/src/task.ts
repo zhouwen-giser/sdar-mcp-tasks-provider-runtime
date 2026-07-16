@@ -93,13 +93,16 @@ function businessResult(
   return {
     content: [{ type: "text", text: snapshot.message || outcome }],
     isError,
-    structuredContent: {
-      outcome,
-      reasonCode: snapshot.reasonCode || outcome.toUpperCase(),
-      retryable: snapshot.retryable,
-      completedAt: new Date().toISOString(),
-      ...(snapshot.result ?? {}),
-    },
+    structuredContent:
+      outcome === "success"
+        ? (snapshot.result ?? {})
+        : {
+            outcome,
+            reasonCode: snapshot.reasonCode || outcome.toUpperCase(),
+            retryable: snapshot.retryable,
+            completedAt: new Date().toISOString(),
+            ...(snapshot.result ?? {}),
+          },
   };
 }
 
@@ -160,7 +163,14 @@ export function mapAdapterSnapshot(snapshot: AdapterSnapshotLike): SnapshotTrans
         "TERMINAL_FAILED",
         "failed",
         null,
-        { code: -32603, message: snapshot.message },
+        {
+          code: -32603,
+          message: "Task execution failed.",
+          data: {
+            reasonCode: snapshot.reasonCode || "TECHNICAL_EXECUTION_FAILED",
+            retryable: snapshot.retryable,
+          },
+        },
         snapshot,
       );
     default:

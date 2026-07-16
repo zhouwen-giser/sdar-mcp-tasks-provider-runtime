@@ -126,7 +126,7 @@ describe("durable task lifecycle", () => {
     expect(completed).toMatchObject({ taskId, status: "completed" });
     expect(completed.result).toMatchObject({
       isError: false,
-      structuredContent: { outcome: "success", resourceId: "resource-1" },
+      structuredContent: { resourceId: "resource-1", completed: true },
     });
 
     const repository = new TaskRepository(pool);
@@ -155,7 +155,7 @@ describe("durable task lifecycle", () => {
     );
     expect(result).toMatchObject({
       kind: "result",
-      result: { structuredContent: { outcome: "success", resourceId: "resource-inline" } },
+      result: { structuredContent: { resourceId: "resource-inline", completed: true } },
     });
     const after = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
     expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
@@ -1090,7 +1090,9 @@ describe("durable task lifecycle", () => {
     await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     expect(await engine.getTask(raceId, authorization)).toMatchObject({
       status: "completed",
-      result: { structuredContent: { outcome: "success" } },
+      result: {
+        structuredContent: { resourceId: "resource-natural-race", completed: true },
+      },
     });
 
     const deadlineClock = new FakeClock(new Date("2026-07-16T15:00:00Z"));

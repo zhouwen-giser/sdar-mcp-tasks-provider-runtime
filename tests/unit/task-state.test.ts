@@ -26,14 +26,19 @@ describe("Adapter Snapshot mapping", () => {
     });
   });
 
+  it("maps successful Adapter output directly to structuredContent", () => {
+    const mapped = mapAdapterSnapshot(snapshot("SUCCEEDED"));
+    expect(mapped.mcpStatus).toBe("completed");
+    expect(mapped.result).toMatchObject({ isError: false, structuredContent: { value: 1 } });
+  });
+
   it.each([
-    ["SUCCEEDED", "completed", false, "success"],
-    ["BUSINESS_FAILED", "completed", true, "business_failure"],
-    ["PARTIALLY_COMPLETED", "completed", true, "partial_completion"],
-  ])("maps %s to structured completed result", (adapterState, status, isError, outcome) => {
+    ["BUSINESS_FAILED", "business_failure"],
+    ["PARTIALLY_COMPLETED", "partial_completion"],
+  ])("maps %s to a structured business result", (adapterState, outcome) => {
     const mapped = mapAdapterSnapshot(snapshot(adapterState));
-    expect(mapped.mcpStatus).toBe(status);
-    expect(mapped.result).toMatchObject({ isError, structuredContent: { outcome } });
+    expect(mapped.mcpStatus).toBe("completed");
+    expect(mapped.result).toMatchObject({ isError: true, structuredContent: { outcome } });
   });
 
   it("uses failed only for technical failure and cancelled for proven cancellation", () => {

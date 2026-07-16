@@ -68,4 +68,26 @@ describe("Operation Registry", () => {
     invalidOperation.inputSchema = jsonToProtoStruct(schema);
     expect(() => new OperationRegistry().validate(invalid)).toThrow("MANIFEST_SCHEMA_TOO_DEEP");
   });
+
+  it("retains the Adapter output validator and enforces result JSON limits", () => {
+    const value = manifest();
+    const operation = value.operations[0];
+    if (operation === undefined) throw new Error("fixture operation missing");
+    operation.outputSchema = jsonToProtoStruct({
+      type: "object",
+      properties: { message: { type: "string" } },
+      required: ["message"],
+      additionalProperties: false,
+    });
+    const validated = new OperationRegistry().validate(value).operations[0];
+    if (validated === undefined) throw new Error("validated operation missing");
+
+    expect(() => validated.validateOutput({ message: "valid" })).not.toThrow();
+    expect(() => validated.validateOutput({ message: 42 })).toThrow(
+      "ADAPTER_OUTPUT_SCHEMA_MISMATCH",
+    );
+    expect(() => validated.validateOutput({ message: "x".repeat(1_048_576) })).toThrow(
+      "ADAPTER_RESULT_TOO_LARGE",
+    );
+  });
 });

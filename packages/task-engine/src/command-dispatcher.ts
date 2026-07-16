@@ -1,14 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
-  protoStructToJson,
   validateAdapterSnapshotIdentity,
   validateCommandAckIdentity,
 } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { Clock } from "../../domain/src/index.js";
-import { isTerminalState, mapAdapterSnapshot, systemClock } from "../../domain/src/index.js";
+import { isTerminalState, systemClock } from "../../domain/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { PendingCommandRecord, TaskRepository } from "../../persistence-postgres/src/index.js";
+import { validatedSnapshotTransition } from "./result-contract.js";
 
 export interface CommandDispatcherTickResult {
   claimed: number;
@@ -145,13 +145,7 @@ export class DurableCommandDispatcher {
         await this.repository.rejectUserCancel(
           command,
           Number(snapshot.revision),
-          mapAdapterSnapshot({
-            state: snapshot.state,
-            reasonCode: snapshot.reasonCode,
-            message: snapshot.message,
-            retryable: snapshot.retryable,
-            result: protoStructToJson(snapshot.result),
-          }),
+          validatedSnapshotTransition(operation, snapshot),
           ack as unknown as Record<string, unknown>,
         );
         result.rejected += 1;

@@ -23,6 +23,25 @@ queryable until `terminalAt + ttl`; an omitted terminal TTL uses at least 24 hou
 request after expiry receives JSON-RPC Invalid Params with `reasonCode=TASK_EXPIRED`; an
 unauthorized caller receives the same not-found behavior as for an unknown Task.
 
+The official Task fields are top-level `ttl` and `pollInterval`. SDAR compatibility aliases are
+only `_meta["io.sdar/taskExecution"].ttlMs` and `pollIntervalMs`; `ttlMs` and `pollIntervalMs`
+are never emitted as arbitrary top-level fields. Client TTL must be a safe integer from 1 through
+31,536,000,000 milliseconds. `pollInterval` is the persisted Runtime polling recommendation and
+does not control scheduling, max elapsed time or deadline behavior.
+
+Each advertised Tool output schema accepts the Adapter's raw success document and the
+standardized business-result envelope. Runtime validates synchronous, task-capable inline,
+asynchronous and partial Adapter payloads before publication, including 1 MiB/depth-32/10,000-node
+JSON limits. An invalid success becomes a technical contract failure with
+`reasonCode=ADAPTER_OUTPUT_SCHEMA_MISMATCH`; it is never returned as successful structured
+content.
+
+Unknown/hidden/expired Tasks, unknown Tools, malformed TTL/timing/input and unsupported
+capabilities return JSON-RPC Invalid Params with stable `data.reasonCode`. Technical failure
+before Task publication returns JSON-RPC Internal Error. A published technical failure is
+`status=failed` with a Profile error object; business failure and partial completion are
+`status=completed` and their Tool result uses `isError=true`.
+
 For a nonterminal `tasks/get`, a transient Adapter transport failure returns the persisted Task
 instead of changing it to failed. `_meta["io.sdar/taskExecution"]` then contains
 `snapshotFreshness="stale"`, `lastConfirmedAt` and `degradedReasonCode`. Identity mismatch,

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import { jsonToProtoStruct, protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { OperationDefinition, ProviderManifest } from "../../adapter-protocol/src/index.js";
+import { AdapterContractError, InvalidParamsError } from "../../domain/src/index.js";
 
 const OPERATION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
@@ -15,6 +16,7 @@ export interface ValidatedOperation extends Omit<
   manifestHash: string;
   definition: Record<string, unknown>;
   validateArguments(value: unknown): void;
+  validateOutput(value: unknown): void;
   tool: {
     name: string;
     description: string;
@@ -23,6 +25,18 @@ export interface ValidatedOperation extends Omit<
     _meta: Record<string, unknown>;
   };
 }
+
+const BUSINESS_RESULT_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    outcome: { type: "string", minLength: 1 },
+    reasonCode: { type: "string", minLength: 1 },
+    retryable: { type: "boolean" },
+    completedAt: { type: "string", format: "date-time" },
+  },
+  required: ["outcome", "reasonCode", "retryable", "completedAt"],
+  additionalProperties: true,
+};
 
 export interface ValidatedManifest {
   providerId: string;
@@ -59,6 +73,30 @@ function assertComplexity(value: unknown, depth = 0): void {
   }
 }
 
+function assertOutputLimits(value: unknown): void {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch (error) {
+    throw new AdapterContractError("ADAPTER_RESULT_NOT_JSON", { cause: error });
+  }
+  if (Buffer.byteLength(serialized) > 1_048_576) {
+    throw new AdapterContractError("ADAPTER_RESULT_TOO_LARGE");
+  }
+  let nodes = 0;
+  const visit = (item: unknown, depth: number): void => {
+    nodes += 1;
+    if (nodes > 10_000) throw new AdapterContractError("ADAPTER_RESULT_TOO_COMPLEX");
+    if (depth > 32) throw new AdapterContractError("ADAPTER_RESULT_TOO_DEEP");
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child, depth + 1);
+    } else if (typeof item === "object" && item !== null) {
+      for (const child of Object.values(item)) visit(child, depth + 1);
+    }
+  };
+  visit(value, 0);
+}
+
 export class OperationRegistry {
   readonly #ajv: Ajv2020;
 
@@ -90,8 +128,8 @@ export class OperationRegistry {
         assertComplexity(schema);
       }
       const validateInput = this.#ajv.compile(inputSchema);
-      this.#ajv.compile(outputSchema);
-      return { ...operation, inputSchema, outputSchema, validateInput };
+      const validateOutput = this.#ajv.compile(outputSchema);
+      return { ...operation, inputSchema, outputSchema, validateInput, validateOutput };
     });
 
     const manifestDefinition = {
@@ -100,44 +138,57 @@ export class OperationRegistry {
       providerType: manifest.providerType,
       providerVersion: manifest.providerVersion,
       inventoryMode: manifest.inventoryMode,
-      operations: normalized.map(({ validateInput, ...operation }) => {
+      operations: normalized.map(({ validateInput, validateOutput, ...operation }) => {
         void validateInput;
+        void validateOutput;
         return operation;
       }),
     };
     const manifestHash = createHash("sha256")
       .update(canonicalize(manifestDefinition))
       .digest("hex");
-    const operations = normalized.map(({ validateInput, ...operation }): ValidatedOperation => {
-      const definition = { ...operation } as unknown as Record<string, unknown>;
-      return {
-        ...operation,
-        manifestHash,
-        definition,
-        validateArguments(value: unknown): void {
-          if (!validateInput(value)) throw new Error("INVALID_TOOL_ARGUMENTS");
-        },
-        tool: {
-          name: operation.name,
-          description: operation.description,
-          inputSchema: operation.inputSchema,
-          outputSchema: operation.outputSchema,
-          _meta: {
-            "io.sdar/taskExecution": {
-              profileVersion: "1.0",
-              execution: operation.execution.toLowerCase(),
-              availability: operation.capabilities.availability ? "dynamic" : "not_supported",
-              supportsScheduling: operation.capabilities.scheduling,
-              supportsMaxElapsed: operation.capabilities.maxElapsed,
-              supportsObservations: operation.capabilities.observations,
-              supportsInputRequired: operation.capabilities.inputRequired,
-              supportsCancel: operation.capabilities.cancel,
-              supportsIdempotency: operation.capabilities.idempotency,
+    const operations = normalized.map(
+      ({ validateInput, validateOutput, ...operation }): ValidatedOperation => {
+        const definition = { ...operation } as unknown as Record<string, unknown>;
+        return {
+          ...operation,
+          manifestHash,
+          definition,
+          validateArguments(value: unknown): void {
+            if (!validateInput(value)) throw new InvalidParamsError("INVALID_TOOL_ARGUMENTS");
+          },
+          validateOutput(value: unknown): void {
+            assertOutputLimits(value);
+            if (!validateOutput(value)) {
+              throw new AdapterContractError("ADAPTER_OUTPUT_SCHEMA_MISMATCH");
+            }
+          },
+          tool: {
+            name: operation.name,
+            description: operation.description,
+            inputSchema: operation.inputSchema,
+            outputSchema: {
+              type: "object",
+              anyOf: [operation.outputSchema, BUSINESS_RESULT_SCHEMA],
+            },
+            _meta: {
+              "io.sdar/taskExecution": {
+                profileVersion: "1.0",
+                execution: operation.execution.toLowerCase(),
+                availability: operation.capabilities.availability ? "dynamic" : "not_supported",
+                supportsScheduling: operation.capabilities.scheduling,
+                supportsMaxElapsed: operation.capabilities.maxElapsed,
+                supportsObservations: operation.capabilities.observations,
+                supportsInputRequired: operation.capabilities.inputRequired,
+                supportsCancel: operation.capabilities.cancel,
+                supportsIdempotency: operation.capabilities.idempotency,
+                outputSchemaVersion: manifestHash,
+              },
             },
           },
-        },
-      };
-    });
+        };
+      },
+    );
     return {
       providerId: manifest.providerId,
       providerType: manifest.providerType,

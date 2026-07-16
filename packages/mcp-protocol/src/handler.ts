@@ -16,19 +16,34 @@ import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
 import type { AvailabilityCheck, TaskExecutionTiming } from "../../domain/src/index.js";
-import { TaskExpiredError } from "../../domain/src/index.js";
+import {
+  AdapterContractError,
+  CapabilityNotSupportedError,
+  InvalidParamsError,
+  isRuntimeError,
+  TaskExpiredError,
+  TaskNotFoundOrUnauthorizedError,
+} from "../../domain/src/index.js";
 import type { TaskEngine } from "../../task-engine/src/index.js";
 import { z } from "zod";
 import { createAuthorizationResolver } from "./security.js";
 import type { AuthorizationResolver } from "./security.js";
 
 const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
+const RuntimeCallToolRequestSchema = CallToolRequestSchema.extend({
+  params: CallToolRequestSchema.shape.params.extend({
+    // Accept the field long enough to map malformed TTL values to JSON-RPC
+    // Invalid Params; the locked SDK otherwise reports its Zod failure as -32603.
+    task: z.object({ ttl: z.unknown().optional() }).optional(),
+  }),
+});
 
 export interface McpProtocolOptions {
   resolveAuthorization?: AuthorizationResolver;
   maxArgumentBytes?: number;
   maxJsonDepth?: number;
   maxJsonNodes?: number;
+  onProtocolError?: (error: unknown, correlationId: string | null) => void;
 }
 
 const AvailabilityCheckSchema = z.object({
@@ -134,117 +149,107 @@ export class McpProtocolHandler {
     server.setRequestHandler(ListToolsRequestSchema, () => ({
       tools: this.manifest.operations.map((operation) => operation.tool),
     }));
-    server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
-      const operation = this.manifest.operations.find(
-        (candidate) => candidate.name === params.name,
-      );
-      if (operation === undefined) throw new Error("UNKNOWN_TOOL");
-      const argumentsValue = params.arguments ?? {};
-      assertJsonLimits(
-        argumentsValue,
-        this.options.maxArgumentBytes ?? 1_048_576,
-        this.options.maxJsonDepth ?? 32,
-        this.options.maxJsonNodes ?? 10_000,
-      );
-      operation.validateArguments(argumentsValue);
-      if (this.taskEngine !== undefined) {
-        const invocation = await this.taskEngine.callOperation(
-          operation,
-          argumentsValue,
-          authorization,
-          params.task?.ttl,
-          idempotencyKey(params._meta),
-          taskTiming(params._meta),
+    server.setRequestHandler(RuntimeCallToolRequestSchema, ({ params }) =>
+      this.#protocolResult(authorization.correlationId ?? null, async () => {
+        const operation = this.manifest.operations.find(
+          (candidate) => candidate.name === params.name,
         );
-        return invocation.kind === "result" ? invocation.result : { task: invocation.task };
-      }
-      const start = await this.gateway.startOperation(operation.name, argumentsValue);
-      if (start.result === "rejected" || start.rejected !== undefined) {
-        const rejected = start.rejected;
+        if (operation === undefined) throw new InvalidParamsError("UNKNOWN_TOOL", "Unknown tool.");
+        const argumentsValue = params.arguments ?? {};
+        const ttl = taskTtl(params.task?.ttl);
+        assertJsonLimits(
+          argumentsValue,
+          this.options.maxArgumentBytes ?? 1_048_576,
+          this.options.maxJsonDepth ?? 32,
+          this.options.maxJsonNodes ?? 10_000,
+        );
+        operation.validateArguments(argumentsValue);
+        if (this.taskEngine !== undefined) {
+          const invocation = await this.taskEngine.callOperation(
+            operation,
+            argumentsValue,
+            authorization,
+            ttl,
+            idempotencyKey(params._meta),
+            taskTiming(params._meta),
+          );
+          return invocation.kind === "result" ? invocation.result : { task: invocation.task };
+        }
+        const start = await this.gateway.startOperation(operation.name, argumentsValue);
+        if (start.result === "rejected" || start.rejected !== undefined) {
+          const rejected = start.rejected;
+          return {
+            content: [{ type: "text", text: rejected?.message ?? "Operation rejected." }],
+            isError: true,
+            structuredContent: {
+              outcome: "admission_rejected",
+              reasonCode: rejected?.reasonCode ?? "ADMISSION_REJECTED",
+              retryable: rejected?.retryable ?? false,
+              completedAt: new Date().toISOString(),
+            },
+          };
+        }
+        const snapshot = start.accepted?.initialSnapshot;
+        if (snapshot?.state !== "SUCCEEDED") {
+          throw new AdapterContractError("R2_NONTERMINAL_EXECUTION_REQUIRES_TASK_ENGINE");
+        }
+        const result = protoStructToJson(snapshot.result);
+        operation.validateOutput(result);
         return {
-          content: [{ type: "text", text: rejected?.message ?? "Operation rejected." }],
-          isError: true,
-          structuredContent: {
-            outcome: "admission_rejected",
-            reasonCode: rejected?.reasonCode ?? "ADMISSION_REJECTED",
-            retryable: rejected?.retryable ?? false,
-            completedAt: new Date().toISOString(),
-          },
+          content: [{ type: "text", text: snapshot.message || "Operation completed." }],
+          isError: false,
+          structuredContent: result,
         };
-      }
-      const snapshot = start.accepted?.initialSnapshot;
-      if (snapshot?.state !== "SUCCEEDED")
-        throw new Error("R2_NONTERMINAL_EXECUTION_REQUIRES_TASK_ENGINE");
-      const result = protoStructToJson(snapshot.result);
-      return {
-        content: [{ type: "text", text: snapshot.message || "Operation completed." }],
-        isError: false,
-        structuredContent: result,
-      };
-    });
+      }),
+    );
     const taskEngine = this.taskEngine;
     if (taskEngine !== undefined) {
       server.setRequestHandler(
         CheckAvailabilityRequestSchema,
         ({ params }) =>
-          taskEngine.checkAvailability(
-            params.checks as AvailabilityCheck[],
-            authorization,
+          this.#protocolResult(authorization.correlationId ?? null, () =>
+            taskEngine.checkAvailability(params.checks as AvailabilityCheck[], authorization),
           ) as never,
       );
-      server.setRequestHandler(GetTaskRequestSchema, async ({ params }) => {
-        try {
-          return await taskEngine.getTask(params.taskId, authorization);
-        } catch (error) {
-          throw mapTaskReadError(error);
-        }
-      });
-      server.setRequestHandler(GetTaskPayloadRequestSchema, async ({ params }) => {
-        try {
-          return await taskEngine.getTaskResult(params.taskId, authorization);
-        } catch (error) {
-          throw mapTaskReadError(error);
-        }
-      });
-      server.setRequestHandler(CancelTaskRequestSchema, async ({ params }) => {
-        try {
-          return await taskEngine.cancelTask(params.taskId, authorization);
-        } catch (error) {
-          throw mapTaskReadError(error);
-        }
-      });
-      server.setRequestHandler(UpdateTaskRequestSchema, async ({ params }) => {
-        assertJsonLimits(
-          params.inputs,
-          this.options.maxArgumentBytes ?? 1_048_576,
-          this.options.maxJsonDepth ?? 32,
-          this.options.maxJsonNodes ?? 10_000,
-        );
-        try {
+      server.setRequestHandler(GetTaskRequestSchema, ({ params }) =>
+        this.#protocolResult(authorization.correlationId ?? null, () =>
+          taskEngine.getTask(params.taskId, authorization),
+        ),
+      );
+      server.setRequestHandler(GetTaskPayloadRequestSchema, ({ params }) =>
+        this.#protocolResult(authorization.correlationId ?? null, () =>
+          taskEngine.getTaskResult(params.taskId, authorization),
+        ),
+      );
+      server.setRequestHandler(CancelTaskRequestSchema, ({ params }) =>
+        this.#protocolResult(authorization.correlationId ?? null, () =>
+          taskEngine.cancelTask(params.taskId, authorization),
+        ),
+      );
+      server.setRequestHandler(UpdateTaskRequestSchema, ({ params }) =>
+        this.#protocolResult(authorization.correlationId ?? null, async () => {
+          assertJsonLimits(
+            params.inputs,
+            this.options.maxArgumentBytes ?? 1_048_576,
+            this.options.maxJsonDepth ?? 32,
+            this.options.maxJsonNodes ?? 10_000,
+          );
           return await taskEngine.updateTask(params.taskId, params.inputs, authorization);
-        } catch (error) {
-          throw mapTaskReadError(error);
-        }
-      });
+        }),
+      );
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/pause"),
-        async ({ params }) => {
-          try {
-            return await taskEngine.controlTask(params.taskId, "PAUSE", authorization);
-          } catch (error) {
-            throw mapTaskReadError(error);
-          }
-        },
+        ({ params }) =>
+          this.#protocolResult(authorization.correlationId ?? null, () =>
+            taskEngine.controlTask(params.taskId, "PAUSE", authorization),
+          ),
       );
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/resume"),
-        async ({ params }) => {
-          try {
-            return await taskEngine.controlTask(params.taskId, "RESUME", authorization);
-          } catch (error) {
-            throw mapTaskReadError(error);
-          }
-        },
+        ({ params }) =>
+          this.#protocolResult(authorization.correlationId ?? null, () =>
+            taskEngine.controlTask(params.taskId, "RESUME", authorization),
+          ),
       );
     }
 
@@ -256,14 +261,85 @@ export class McpProtocolHandler {
     });
     await transport.handleRequest(request, response, body);
   }
+
+  async #protocolResult<T>(correlationId: string | null, action: () => Promise<T>): Promise<T> {
+    try {
+      return await action();
+    } catch (error) {
+      const mapped = mapProtocolError(error);
+      if (mapped.code === -32603) {
+        this.options.onProtocolError?.(error, correlationId);
+      }
+      throw mapped;
+    }
+  }
 }
 
-function mapTaskReadError(error: unknown): unknown {
-  if (error instanceof TaskExpiredError) {
-    return new McpError(ErrorCode.InvalidParams, "Task handle expired.", {
-      reasonCode: "TASK_EXPIRED",
+function mapProtocolError(error: unknown): McpError {
+  if (error instanceof McpError) return error;
+  if (error instanceof TaskNotFoundOrUnauthorizedError) {
+    return wireMcpError(ErrorCode.InvalidParams, error.safeMessage, {
+      reasonCode: error.reasonCode,
     });
   }
+  if (error instanceof TaskExpiredError) {
+    return wireMcpError(ErrorCode.InvalidParams, error.safeMessage, {
+      reasonCode: error.reasonCode,
+    });
+  }
+  if (error instanceof InvalidParamsError || error instanceof CapabilityNotSupportedError) {
+    return wireMcpError(ErrorCode.InvalidParams, error.safeMessage, {
+      reasonCode: error.reasonCode,
+    });
+  }
+  if (isRuntimeError(error)) {
+    return wireMcpError(ErrorCode.InternalError, error.safeMessage, {
+      reasonCode:
+        error.kind === "business_tool" ? "BUSINESS_ERROR_CHANNEL_VIOLATION" : error.reasonCode,
+    });
+  }
+
+  const reasonCode = error instanceof Error ? error.message : "INTERNAL_ERROR";
+  if (reasonCode === "TASK_NOT_FOUND") {
+    return wireMcpError(ErrorCode.InvalidParams, "Task not found.", {
+      reasonCode: "TASK_NOT_FOUND",
+    });
+  }
+  if (reasonCode.endsWith("_NOT_SUPPORTED")) {
+    return wireMcpError(ErrorCode.InvalidParams, "Capability not supported.", { reasonCode });
+  }
+  if (
+    reasonCode === "UNKNOWN_TOOL" ||
+    reasonCode === "TASK_NOT_TERMINAL" ||
+    reasonCode === "IDEMPOTENCY_KEY_CONFLICT" ||
+    reasonCode === "INPUT_ANSWER_CONFLICT" ||
+    reasonCode.startsWith("INVALID_") ||
+    reasonCode.startsWith("UNKNOWN_INPUT_") ||
+    reasonCode.startsWith("ARGUMENTS_")
+  ) {
+    return wireMcpError(ErrorCode.InvalidParams, "Invalid request parameters.", { reasonCode });
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof (error as { code?: unknown }).code === "number"
+  ) {
+    return wireMcpError(ErrorCode.InternalError, "Runtime technical failure.", {
+      reasonCode: "ADAPTER_RPC_FAILED",
+    });
+  }
+  return wireMcpError(ErrorCode.InternalError, "Runtime technical failure.", {
+    reasonCode: /^[A-Z][A-Z0-9_:]{2,127}$/.test(reasonCode) ? reasonCode : "INTERNAL_ERROR",
+  });
+}
+
+function wireMcpError(code: ErrorCode, message: string, data: Record<string, unknown>): McpError {
+  const error = new McpError(code, message, data);
+  // The low-level SDK serializes Error.message verbatim, while McpError's
+  // constructor prefixes it for local display. Restore the protocol message so
+  // the peer receives one stable JSON-RPC message rather than a nested prefix.
+  error.message = message;
   return error;
 }
 
@@ -272,14 +348,28 @@ function idempotencyKey(meta: unknown): string | undefined {
   if (profile === undefined) return undefined;
   const key = profile.idempotencyKey;
   if (key === undefined) return undefined;
-  if (typeof key !== "string") throw new Error("INVALID_IDEMPOTENCY_KEY");
+  if (typeof key !== "string") throw new InvalidParamsError("INVALID_IDEMPOTENCY_KEY");
   return key;
+}
+
+function taskTtl(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < 1 || (value as number) > 31_536_000_000) {
+    throw new InvalidParamsError("INVALID_TASK_TTL");
+  }
+  return value as number;
 }
 
 function taskTiming(meta: unknown): TaskExecutionTiming | undefined {
   const timing = profileMetadata(meta)?.timing;
   if (timing === undefined) return undefined;
-  return TaskTimingSchema.parse(timing);
+  const parsed = TaskTimingSchema.safeParse(timing);
+  if (!parsed.success) {
+    throw new InvalidParamsError("INVALID_TASK_TIMING", "Invalid Task timing parameters.", {
+      cause: parsed.error,
+    });
+  }
+  return parsed.data;
 }
 
 function profileMetadata(meta: unknown): Record<string, unknown> | undefined {
@@ -295,12 +385,14 @@ export function assertJsonLimits(
   maxDepth: number,
   maxNodes: number,
 ): void {
-  if (Buffer.byteLength(JSON.stringify(value)) > maxBytes) throw new Error("ARGUMENTS_TOO_LARGE");
+  if (Buffer.byteLength(JSON.stringify(value)) > maxBytes) {
+    throw new InvalidParamsError("ARGUMENTS_TOO_LARGE");
+  }
   let nodes = 0;
   const visit = (item: unknown, depth: number): void => {
     nodes += 1;
-    if (nodes > maxNodes) throw new Error("ARGUMENTS_TOO_COMPLEX");
-    if (depth > maxDepth) throw new Error("ARGUMENTS_TOO_DEEP");
+    if (nodes > maxNodes) throw new InvalidParamsError("ARGUMENTS_TOO_COMPLEX");
+    if (depth > maxDepth) throw new InvalidParamsError("ARGUMENTS_TOO_DEEP");
     if (Array.isArray(item)) {
       for (const child of item) visit(child, depth + 1);
     } else if (typeof item === "object" && item !== null) {

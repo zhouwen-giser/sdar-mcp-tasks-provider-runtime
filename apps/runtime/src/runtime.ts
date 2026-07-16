@@ -196,6 +196,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         maxArgumentBytes: config.ARGUMENT_MAX_BYTES,
         maxJsonDepth: config.ARGUMENT_MAX_DEPTH,
         maxJsonNodes: config.ARGUMENT_MAX_NODES,
+        onProtocolError: (error, correlationId) =>
+          logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
       const taskRepository = new TaskRepository(pool);
       const scheduler = new DurableScheduler(validated, gateway, taskRepository);

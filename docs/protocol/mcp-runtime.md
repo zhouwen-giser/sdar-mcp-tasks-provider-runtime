@@ -8,6 +8,19 @@ Initialization declares Tools and both task extensions. Profile booleans are der
 
 Synchronous StartOperation completes as an ordinary Tool result. `task_required` always publishes a durable SEP-2663 Task after Adapter acceptance. `task_capable` returns an ordinary result when its initial Snapshot is terminal and otherwise follows the same durable publication path. Rejection becomes `CallToolResult.isError=true` with `admission_rejected` and never creates a Task.
 
+Operation Registry retains both compiled validators. Raw Adapter output is checked before every
+synchronous, inline, asynchronous-success or partial publication and is subject to byte, depth
+and node limits. Schema-invalid output is converted to a stable Adapter-contract technical
+failure; Runtime never republishes it as success. Business/partial results use the standardized
+`isError=true` envelope, while successful `structuredContent` remains the Adapter output defined
+by the operation schema.
+
+The MCP boundary maps the domain error hierarchy once. Invalid requests, hidden Tasks, expiry
+and capability failures use JSON-RPC Invalid Params with stable reason data. Pre-publication
+technical failures use JSON-RPC Internal Error; post-publication technical failures are stored as
+Task `failed/error`. The locked SDK's top-level Task fields are `ttl` and `pollInterval`; Profile
+aliases exist only under `_meta["io.sdar/taskExecution"]` as `ttlMs` and `pollIntervalMs`.
+
 `tasks/get` binds taskId to the trusted authorization-context hash, execution mode, and simulation identity. Nonterminal reads perform the safe Adapter `GetExecution` RPC, apply only a greater observation revision, and atomically update task/outbox/observation data. Once a terminal state is stored, later Adapter observations cannot reverse it. Business failure and partial completion remain MCP `completed` with structured outcome data; only technical failure uses MCP `failed`.
 
 `io.sdar/taskExecution/checkAvailability` accepts 1–128 independent checks. Runtime validates operation support and known arguments, then performs one Adapter batch RPC with trusted execution context. Results must preserve request identity, use one of four Profile states, keep `validUntil` at or after `checkedAt`, and provide the required restricted-risk/effect fields and ordered valid windows. A transport failure yields explicit per-check `unknown`; it never claims `available` and never reserves a resource.

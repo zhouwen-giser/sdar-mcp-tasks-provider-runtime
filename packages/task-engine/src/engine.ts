@@ -22,10 +22,12 @@ import type {
   TimingAnchors,
 } from "../../domain/src/index.js";
 import {
+  CapabilityNotSupportedError,
   defaultTiming,
+  InvalidParamsError,
   isTerminalState,
-  mapAdapterSnapshot,
   systemClock,
+  TechnicalExecutionError,
   unknownAvailability,
   validateAvailabilityResponse,
   validateTiming,
@@ -40,6 +42,7 @@ import type {
   TaskRepository,
 } from "../../persistence-postgres/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
+import { synchronousResult, validatedSnapshotTransition } from "./result-contract.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -134,15 +137,30 @@ export class TaskEngine {
   ): Promise<ToolInvocationResult> {
     const startedAt = performance.now();
     try {
+      if (
+        ttlMs !== undefined &&
+        (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 31_536_000_000)
+      ) {
+        throw new InvalidParamsError("INVALID_TASK_TTL");
+      }
       operation.validateArguments(argumentsValue);
-      const anchors = validateTiming(timing, operation.capabilities, this.clock.now());
+      let anchors: TimingAnchors;
+      try {
+        anchors = validateTiming(timing, operation.capabilities, this.clock.now());
+      } catch (error) {
+        throw new InvalidParamsError(
+          error instanceof Error ? error.message : "INVALID_TASK_TIMING",
+          "Invalid Task timing parameters.",
+          { cause: error },
+        );
+      }
       const argumentHash = hashArguments(argumentsValue);
       if (idempotencyKey !== undefined) {
         if (!operation.capabilities.idempotency || this.idempotency === undefined) {
-          throw new Error("IDEMPOTENCY_NOT_SUPPORTED");
+          throw new CapabilityNotSupportedError("IDEMPOTENCY_NOT_SUPPORTED");
         }
         if (idempotencyKey.length < 1 || idempotencyKey.length > 256) {
-          throw new Error("INVALID_IDEMPOTENCY_KEY");
+          throw new InvalidParamsError("INVALID_IDEMPOTENCY_KEY");
         }
         const outcome = await this.idempotency.execute(
           { authorization, operationName: operation.name, idempotencyKey, argumentHash },
@@ -201,7 +219,7 @@ export class TaskEngine {
         (candidate) => candidate.name === check.operationName,
       );
       if (!operation?.capabilities.availability) {
-        throw new Error("AVAILABILITY_NOT_SUPPORTED");
+        throw new CapabilityNotSupportedError("AVAILABILITY_NOT_SUPPORTED");
       }
       if (!isUnresolvedArguments(check.arguments)) operation.validateArguments(check.arguments);
     }
@@ -255,7 +273,7 @@ export class TaskEngine {
         executionMode: authorization.executionMode,
         simulationId: authorization.simulationId,
       });
-      return { kind: "result", result: resultFromStart(response) };
+      return { kind: "result", result: resultFromStart(operation, response) };
     }
 
     const operationSnapshotId =
@@ -356,14 +374,17 @@ export class TaskEngine {
       await this.#repository.markAdmissionUncertain(taskId);
       throw error;
     }
-    const snapshot = normalizeSnapshot(accepted.initialSnapshot);
-    const transition = mapAdapterSnapshot(snapshot);
+    const transition = validatedSnapshotTransition(operation, accepted.initialSnapshot);
     const inputRequests = normalizeInputRequests(accepted.initialSnapshot);
     const respondedAt = this.clock.now();
     const actualStartedAt = snapshotHasStarted(accepted.initialSnapshot.state) ? respondedAt : null;
     const startWindowMissedAt =
       (actualStartedAt ?? respondedAt) > anchors.latestStartAt ? respondedAt : undefined;
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
+      if (transition.mcpStatus === "failed") {
+        await this.#repository.markAdmissionUncertain(taskId);
+        throw new TechnicalExecutionError(transitionReasonCode(transition));
+      }
       const result = transition.result ?? transition.error ?? {};
       await this.#repository.completeAdmissionWithoutTask(
         taskId,
@@ -429,11 +450,15 @@ export class TaskEngine {
       executionMode: intent.authorization.executionMode,
       simulationId: intent.authorization.simulationId,
     });
-    const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
+    const transition = validatedSnapshotTransition(operation, snapshotValue);
     const inputRequests = normalizeInputRequests(snapshotValue);
     const respondedAt = this.clock.now();
     const actualStartedAt = snapshotHasStarted(snapshotValue.state) ? respondedAt : null;
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
+      if (transition.mcpStatus === "failed") {
+        await this.#repository.markAdmissionUncertain(intent.taskId);
+        throw new TechnicalExecutionError(transitionReasonCode(transition));
+      }
       await this.#repository.completeAdmissionWithoutTask(intent.taskId, adapterResponse);
       return { kind: "result", result: transition.result ?? transition.error ?? {} };
     }
@@ -496,7 +521,7 @@ export class TaskEngine {
         task = await this.#repository.applySnapshot(
           task.taskId,
           Number(snapshot.revision),
-          stopTransition(task, snapshot, this.clock.now()),
+          stopTransition(task, operation, snapshot, this.clock.now()),
           normalizeInputRequests(snapshot),
         );
       } catch (error) {
@@ -614,7 +639,7 @@ export class TaskEngine {
     await this.#repository.applySnapshot(
       task.taskId,
       Number(snapshot.revision),
-      stopTransition(task, snapshot, this.clock.now()),
+      stopTransition(task, operation, snapshot, this.clock.now()),
       normalizeInputRequests(snapshot),
     );
     await this.#repository.noteRecovery(task.taskId);
@@ -642,7 +667,9 @@ export class TaskEngine {
     let ack;
     let completedAnswers: { key: string; hash: string; value: unknown }[] = [];
     if (command.commandType === "CANCEL") {
-      if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
+      if (!operation.capabilities.cancel) {
+        throw new CapabilityNotSupportedError("CANCEL_NOT_SUPPORTED");
+      }
       ack = await this.gateway.requestCancel(
         task.taskId,
         operation.name,
@@ -652,7 +679,9 @@ export class TaskEngine {
         { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
     } else if (command.commandType === "UPDATE") {
-      if (!operation.capabilities.inputRequired) throw new Error("INPUT_NOT_SUPPORTED");
+      if (!operation.capabilities.inputRequired) {
+        throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
+      }
       const answers = command.payload.answers;
       if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
         throw new Error("INVALID_RECOVERY_UPDATE_PAYLOAD");
@@ -672,7 +701,9 @@ export class TaskEngine {
         { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
     } else if (command.commandType === "PAUSE") {
-      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+      if (!operation.capabilities.pauseResume) {
+        throw new CapabilityNotSupportedError("PAUSE_RESUME_NOT_SUPPORTED");
+      }
       ack = await this.gateway.pauseExecution(identity, {
         ...executionOptions(authorization),
         externalExecutionId: task.externalExecutionId,
@@ -701,7 +732,9 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
-    if (!isTerminalState(task.internalState)) throw new Error("TASK_NOT_TERMINAL");
+    if (!isTerminalState(task.internalState)) {
+      throw new InvalidParamsError("TASK_NOT_TERMINAL");
+    }
     return task.result ?? task.error ?? { content: [], isError: task.mcpStatus !== "completed" };
   }
 
@@ -724,7 +757,9 @@ export class TaskEngine {
       correlationId: authorization.correlationId ?? null,
     });
     if (isTerminalState(task.internalState)) return detailedTask(task);
-    if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
+    if (!operation.capabilities.cancel) {
+      throw new CapabilityNotSupportedError("CANCEL_NOT_SUPPORTED");
+    }
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
     await this.#repository.beginCancel(taskId, requestHash);
     task = (await this.#repository.getById(taskId)) ?? task;
@@ -738,19 +773,23 @@ export class TaskEngine {
   ): Promise<Record<string, never>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
     const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
-    if (!operation.capabilities.inputRequired) throw new Error("INPUT_NOT_SUPPORTED");
+    if (!operation.capabilities.inputRequired) {
+      throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
+    }
     const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
     const pending: { key: string; hash: string; value: unknown }[] = [];
     for (const [key, value] of Object.entries(answers)) {
       const request = requests.find((candidate) => candidate.key === key);
-      if (request === undefined) throw new Error("UNKNOWN_INPUT_REQUEST_KEY");
+      if (request === undefined) throw new InvalidParamsError("UNKNOWN_INPUT_REQUEST_KEY");
       const hash = createHash("sha256").update(canonicalize(value)).digest("hex");
       if (request.status === "ANSWERED") {
-        if (request.answerHash !== hash) throw new Error("INPUT_ANSWER_CONFLICT");
+        if (request.answerHash !== hash) throw new InvalidParamsError("INPUT_ANSWER_CONFLICT");
         continue;
       }
-      if (!ajv.compile(request.schema)(value)) throw new Error("INVALID_INPUT_ANSWER");
+      if (!ajv.compile(request.schema)(value)) {
+        throw new InvalidParamsError("INVALID_INPUT_ANSWER");
+      }
       pending.push({ key, hash, value });
     }
     if (pending.length === 0) return {};
@@ -793,7 +832,9 @@ export class TaskEngine {
   ): Promise<Record<string, unknown>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
     const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
-    if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+    if (!operation.capabilities.pauseResume) {
+      throw new CapabilityNotSupportedError("PAUSE_RESUME_NOT_SUPPORTED");
+    }
     const requestHash = createHash("sha256").update(commandType).digest("hex");
     const command = await this.#repository.beginCommand(taskId, commandType, requestHash, {});
     if (!command.duplicate) {
@@ -824,16 +865,6 @@ export class TaskEngine {
     }
     return this.getTask(taskId, authorization);
   }
-}
-
-function normalizeSnapshot(snapshot: ExecutionSnapshot) {
-  return {
-    state: snapshot.state,
-    reasonCode: snapshot.reasonCode,
-    message: snapshot.message,
-    retryable: snapshot.retryable,
-    result: protoStructToJson(snapshot.result),
-  };
 }
 
 function validateStartResponseIdentity(
@@ -877,21 +908,13 @@ function normalizeInputRequests(snapshot: ExecutionSnapshot) {
 }
 
 function resultFromStart(
+  operation: ValidatedOperation,
   response: Awaited<ReturnType<GrpcAdapterGateway["startOperation"]>>,
 ): Record<string, unknown> {
   if (response.rejected !== undefined) return rejectionResult(response.rejected);
   const snapshot = response.accepted?.initialSnapshot;
   if (snapshot === undefined) throw new Error("ADAPTER_START_RESPONSE_MISSING_RESULT");
-  if (snapshot.state === "SUCCEEDED") {
-    return {
-      content: [{ type: "text", text: snapshot.message || "Operation completed." }],
-      isError: false,
-      structuredContent: protoStructToJson(snapshot.result),
-    };
-  }
-  const transition = mapAdapterSnapshot(normalizeSnapshot(snapshot));
-  if (!transition.terminal) throw new Error("SYNCHRONOUS_OPERATION_RETURNED_NONTERMINAL");
-  return transition.result ?? transition.error ?? {};
+  return synchronousResult(operation, snapshot);
 }
 
 function rejectionResult(
@@ -965,6 +988,8 @@ function detailedTask(
         substate: task.substate,
         observationRevision: task.observationRevision,
         executionMode: task.executionMode,
+        ttlMs: task.ttlMs,
+        pollIntervalMs: task.pollIntervalMs,
         snapshotFreshness: readStatus.snapshotFreshness,
         lastConfirmedAt: task.lastConfirmedAt?.toISOString() ?? null,
         ...(readStatus.degradedReasonCode === undefined
@@ -1062,14 +1087,28 @@ function startWindowMissedTransition(message: string, completedAt: Date) {
   };
 }
 
-function stopTransition(task: TaskRecord, snapshot: ExecutionSnapshot, completedAt: Date) {
+function stopTransition(
+  task: TaskRecord,
+  operation: ValidatedOperation,
+  snapshot: ExecutionSnapshot,
+  completedAt: Date,
+) {
   if (snapshot.state === "CANCELLED" && task.stopReason === "DEADLINE_REACHED") {
     return deadlineReached(snapshot.message, completedAt);
   }
   if (snapshot.state === "CANCELLED" && task.stopReason === "START_WINDOW_MISSED") {
     return startWindowMissedTransition(snapshot.message, completedAt);
   }
-  return mapAdapterSnapshot(normalizeSnapshot(snapshot));
+  return validatedSnapshotTransition(operation, snapshot);
+}
+
+function transitionReasonCode(transition: { error: Record<string, unknown> | null }): string {
+  const data = transition.error?.data;
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    return "TECHNICAL_EXECUTION_FAILED";
+  }
+  const reasonCode = (data as Record<string, unknown>).reasonCode;
+  return typeof reasonCode === "string" ? reasonCode : "TECHNICAL_EXECUTION_FAILED";
 }
 
 function snapshotHasStarted(state: string): boolean {
