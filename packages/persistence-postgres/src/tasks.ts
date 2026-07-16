@@ -617,6 +617,47 @@ export class TaskRepository {
     }
   }
 
+  async recordIdentityConflict(taskId: string, detail: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const task = await client.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
+        taskId,
+      ]);
+      const row = task.rows[0];
+      if (row === undefined) throw new Error("TASK_NOT_FOUND");
+      const eventKey = `${taskId}:identity-conflict:${createHash("sha256").update(detail).digest("hex")}`;
+      await client.query(
+        `INSERT INTO outbox_event(event_id, event_key, aggregate_id, event_type, payload)
+         VALUES ($1,$2,$3,'task.identity_conflict',$4::jsonb)
+         ON CONFLICT (event_key) DO NOTHING`,
+        [
+          randomUUID(),
+          eventKey,
+          taskId,
+          JSON.stringify({
+            taskId,
+            audit: true,
+            reasonCode: "ADAPTER_IDENTITY_MISMATCH",
+            detail,
+            internalState: row.internal_state,
+            status: row.mcp_status,
+            substate: row.substate,
+            statusMessage: row.status_message,
+            observationRevision: Number(row.observation_revision),
+            adapterRevision: Number(row.adapter_revision),
+          }),
+        ],
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async failRecoveryNotFound(taskId: string, message: string): Promise<TaskRecord> {
     const client = await this.pool.connect();
     try {

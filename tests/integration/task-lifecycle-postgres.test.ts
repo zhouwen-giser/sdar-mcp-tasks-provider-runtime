@@ -1571,6 +1571,107 @@ describe("durable task lifecycle", () => {
     );
     expect(committedEvents.rows[0]?.count).toBe("2");
   });
+
+  it("T-019 rejects a Start Snapshot task identity mismatch before Task publication", async () => {
+    await expect(
+      engine.callOperation(
+        requiredOperation("durable_task"),
+        { resourceId: "rc2-start-identity", scenario: "start_task_identity_mismatch" },
+        authorization,
+      ),
+    ).rejects.toThrow("ADAPTER_SNAPSHOT_IDENTITY_MISMATCH");
+    const rows = await pool.query<{ state: string; task_count: string }>(
+      `SELECT admission_intent.state,
+              (SELECT count(*) FROM provider_task WHERE provider_task.task_id=admission_intent.task_id) AS task_count
+       FROM admission_intent WHERE arguments->>'resourceId'='rc2-start-identity'`,
+    );
+    expect(rows.rows[0]).toMatchObject({ state: "UNCERTAIN", task_count: "0" });
+  });
+
+  it("T-020 rejects a Get Snapshot external identity mismatch and audits without rebinding", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-get-identity", scenario: "get_external_identity_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected identity test Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    if (before === null) throw new Error("Expected persisted identity test Task");
+    await expect(engine.getTask(taskId, authorization)).rejects.toThrow(
+      "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH",
+    );
+    expect(await repository.getById(taskId)).toEqual(before);
+    const audit = await pool.query<{ event_type: string; payload: Record<string, unknown> }>(
+      `SELECT event_type,payload FROM outbox_event
+       WHERE aggregate_id=$1 AND event_type='task.identity_conflict'`,
+      [taskId],
+    );
+    expect(audit.rows).toHaveLength(1);
+    expect(audit.rows[0]?.event_type).toBe("task.identity_conflict");
+    expect(audit.rows[0]?.payload).toMatchObject({
+      audit: true,
+      reasonCode: "ADAPTER_IDENTITY_MISMATCH",
+      observationRevision: before.observationRevision,
+      adapterRevision: before.adapterRevision,
+    });
+  });
+
+  it("T-021 rejects a command Ack sequence mismatch and leaves the command retryable", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-command-identity", scenario: "command_sequence_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected command identity Task");
+    const taskId = String(created.task.taskId);
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      `UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z'
+       WHERE task_id<>$1 AND state IN ('PENDING','RETRY_WAIT')`,
+      [taskId],
+    );
+    expect(
+      await new DurableCommandDispatcher(
+        gateway,
+        new TaskRepository(pool),
+        undefined,
+        "command-identity",
+      ).tick(),
+    ).toMatchObject({ retried: 1, acknowledged: 0 });
+    const command = await pool.query<{ state: string; last_error_message: string }>(
+      "SELECT state,last_error_message FROM task_command WHERE task_id=$1",
+      [taskId],
+    );
+    expect(command.rows[0]).toMatchObject({
+      state: "RETRY_WAIT",
+      last_error_message: "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH",
+    });
+  });
+
+  it("T-022 rejects Reconcile hash/context identity mismatch without binding it", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-reconcile-identity", scenario: "reconcile_identity_mismatch" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected reconcile identity Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+    if (before === null) throw new Error("Expected persisted Task");
+    await expect(engine.reconcileTask(before)).rejects.toThrow(
+      "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH",
+    );
+    expect(await repository.getById(taskId)).toEqual(before);
+    const audit = await pool.query<{ count: string }>(
+      `SELECT count(*) FROM outbox_event
+       WHERE aggregate_id=$1 AND event_type='task.identity_conflict'`,
+      [taskId],
+    );
+    expect(audit.rows[0]?.count).toBe("1");
+  });
 });
 
 function requiredOperation(name: string) {

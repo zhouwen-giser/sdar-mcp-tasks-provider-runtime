@@ -6341,7 +6341,10 @@ proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.toObject = function(include
     retryable: jspb.Message.getBooleanFieldWithDefault(msg, 10, false),
     alternativesList: jspb.Message.toObjectList(msg.getAlternativesList(),
     proto.io.sdar.mcp.tasks.adapter.v1.Alternative.toObject, includeInstance),
-    observedAt: (f = msg.getObservedAt()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f)
+    observedAt: (f = msg.getObservedAt()) && google_protobuf_timestamp_pb.Timestamp.toObject(includeInstance, f),
+    operationName: jspb.Message.getFieldWithDefault(msg, 13, ""),
+    argumentHash: jspb.Message.getFieldWithDefault(msg, 14, ""),
+    executionContext: (f = msg.getExecutionContext()) && proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext.toObject(includeInstance, f)
   };
 
   if (includeInstance) {
@@ -6430,6 +6433,19 @@ proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.deserializeBinaryFromReader
       var value = new google_protobuf_timestamp_pb.Timestamp;
       reader.readMessage(value,google_protobuf_timestamp_pb.Timestamp.deserializeBinaryFromReader);
       msg.setObservedAt(value);
+      break;
+    case 13:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setOperationName(value);
+      break;
+    case 14:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setArgumentHash(value);
+      break;
+    case 15:
+      var value = new proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext;
+      reader.readMessage(value,proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext.deserializeBinaryFromReader);
+      msg.setExecutionContext(value);
       break;
     default:
       reader.skipField();
@@ -6547,6 +6563,28 @@ proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.serializeBinaryToWriter = f
       12,
       f,
       google_protobuf_timestamp_pb.Timestamp.serializeBinaryToWriter
+    );
+  }
+  f = message.getOperationName();
+  if (f.length > 0) {
+    writer.writeString(
+      13,
+      f
+    );
+  }
+  f = message.getArgumentHash();
+  if (f.length > 0) {
+    writer.writeString(
+      14,
+      f
+    );
+  }
+  f = message.getExecutionContext();
+  if (f != null) {
+    writer.writeMessage(
+      15,
+      f,
+      proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext.serializeBinaryToWriter
     );
   }
 };
@@ -6862,6 +6900,79 @@ proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.clearObservedAt =
  */
 proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.hasObservedAt = function() {
   return jspb.Message.getField(this, 12) != null;
+};
+
+
+/**
+ * optional string operation_name = 13;
+ * @return {string}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.getOperationName = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 13, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.setOperationName = function(value) {
+  return jspb.Message.setProto3StringField(this, 13, value);
+};
+
+
+/**
+ * optional string argument_hash = 14;
+ * @return {string}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.getArgumentHash = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 14, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.setArgumentHash = function(value) {
+  return jspb.Message.setProto3StringField(this, 14, value);
+};
+
+
+/**
+ * optional ExecutionContext execution_context = 15;
+ * @return {?proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.getExecutionContext = function() {
+  return /** @type{?proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext} */ (
+    jspb.Message.getWrapperField(this, proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext, 15));
+};
+
+
+/**
+ * @param {?proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext|undefined} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot} returns this
+*/
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.setExecutionContext = function(value) {
+  return jspb.Message.setWrapperField(this, 15, value);
+};
+
+
+/**
+ * Clears the message field making it undefined.
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.clearExecutionContext = function() {
+  return this.setExecutionContext(undefined);
+};
+
+
+/**
+ * Returns whether this field is set.
+ * @return {boolean}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ExecutionSnapshot.prototype.hasExecutionContext = function() {
+  return jspb.Message.getField(this, 15) != null;
 };
 
 
@@ -7572,7 +7683,8 @@ proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.toObject = function(includ
     operationName: jspb.Message.getFieldWithDefault(msg, 2, ""),
     argumentHash: jspb.Message.getFieldWithDefault(msg, 3, ""),
     executionContext: (f = msg.getExecutionContext()) && proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext.toObject(includeInstance, f),
-    commandSequence: jspb.Message.getFieldWithDefault(msg, 5, 0)
+    commandSequence: jspb.Message.getFieldWithDefault(msg, 5, 0),
+    externalExecutionId: jspb.Message.getFieldWithDefault(msg, 6, "")
   };
 
   if (includeInstance) {
@@ -7629,6 +7741,10 @@ proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.deserializeBinaryFromReade
     case 5:
       var value = /** @type {number} */ (reader.readUint64());
       msg.setCommandSequence(value);
+      break;
+    case 6:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setExternalExecutionId(value);
       break;
     default:
       reader.skipField();
@@ -7692,6 +7808,13 @@ proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.serializeBinaryToWriter = 
   if (f !== 0) {
     writer.writeUint64(
       5,
+      f
+    );
+  }
+  f = message.getExternalExecutionId();
+  if (f.length > 0) {
+    writer.writeString(
+      6,
       f
     );
   }
@@ -7804,6 +7927,24 @@ proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.prototype.getCommandSequen
  */
 proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.prototype.setCommandSequence = function(value) {
   return jspb.Message.setProto3IntField(this, 5, value);
+};
+
+
+/**
+ * optional string external_execution_id = 6;
+ * @return {string}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.prototype.getExternalExecutionId = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 6, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.prototype.setExternalExecutionId = function(value) {
+  return jspb.Message.setProto3StringField(this, 6, value);
 };
 
 
@@ -9011,7 +9152,8 @@ proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.toObject = function(includeInstanc
     accepted: jspb.Message.getBooleanFieldWithDefault(msg, 1, false),
     reasonCode: jspb.Message.getFieldWithDefault(msg, 2, ""),
     message: jspb.Message.getFieldWithDefault(msg, 3, ""),
-    commandSequence: jspb.Message.getFieldWithDefault(msg, 4, 0)
+    commandSequence: jspb.Message.getFieldWithDefault(msg, 4, 0),
+    identity: (f = msg.getIdentity()) && proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.toObject(includeInstance, f)
   };
 
   if (includeInstance) {
@@ -9063,6 +9205,11 @@ proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.deserializeBinaryFromReader = func
     case 4:
       var value = /** @type {number} */ (reader.readUint64());
       msg.setCommandSequence(value);
+      break;
+    case 5:
+      var value = new proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity;
+      reader.readMessage(value,proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.deserializeBinaryFromReader);
+      msg.setIdentity(value);
       break;
     default:
       reader.skipField();
@@ -9119,6 +9266,14 @@ proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.serializeBinaryToWriter = function
     writer.writeUint64(
       4,
       f
+    );
+  }
+  f = message.getIdentity();
+  if (f != null) {
+    writer.writeMessage(
+      5,
+      f,
+      proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity.serializeBinaryToWriter
     );
   }
 };
@@ -9193,6 +9348,43 @@ proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.prototype.getCommandSequence = fun
  */
 proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.prototype.setCommandSequence = function(value) {
   return jspb.Message.setProto3IntField(this, 4, value);
+};
+
+
+/**
+ * optional SideEffectIdentity identity = 5;
+ * @return {?proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.prototype.getIdentity = function() {
+  return /** @type{?proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity} */ (
+    jspb.Message.getWrapperField(this, proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity, 5));
+};
+
+
+/**
+ * @param {?proto.io.sdar.mcp.tasks.adapter.v1.SideEffectIdentity|undefined} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.CommandAck} returns this
+*/
+proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.prototype.setIdentity = function(value) {
+  return jspb.Message.setWrapperField(this, 5, value);
+};
+
+
+/**
+ * Clears the message field making it undefined.
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.CommandAck} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.prototype.clearIdentity = function() {
+  return this.setIdentity(undefined);
+};
+
+
+/**
+ * Returns whether this field is set.
+ * @return {boolean}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.CommandAck.prototype.hasIdentity = function() {
+  return jspb.Message.getField(this, 5) != null;
 };
 
 

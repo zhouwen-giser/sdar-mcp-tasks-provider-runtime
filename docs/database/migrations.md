@@ -45,4 +45,9 @@ remaining historical Snapshot observations as Adapter-sourced. New lifecycle cha
 the next observation revision, update the current Task, append the complete observation and
 insert the idempotent outbox event in one transaction.
 
+`010_adapter_execution_identity.sql` enforces provider-scoped uniqueness for every non-null
+external execution id. Start and recovery already bind a Task and execution in one publication
+transaction; the unique partial index makes a second Task binding fail atomically even if an
+Adapter violates its identity contract.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

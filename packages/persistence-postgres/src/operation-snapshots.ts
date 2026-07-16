@@ -1,6 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import type { ValidatedManifest } from "../../operation-registry/src/index.js";
+import {
+  OperationRegistry,
+  type ValidatedManifest,
+  type ValidatedOperation,
+} from "../../operation-registry/src/index.js";
+
+export interface ResolvedTaskOperation {
+  snapshotId: string;
+  providerId: string;
+  providerVersion: string;
+  manifestHash: string;
+  operation: ValidatedOperation;
+}
 
 export class OperationSnapshotRepository {
   constructor(readonly pool: Pool) {}
@@ -39,5 +51,31 @@ export class OperationSnapshotRepository {
     } finally {
       client.release();
     }
+  }
+
+  async loadOperationSnapshot(snapshotId: string): Promise<ResolvedTaskOperation> {
+    const result = await this.pool.query<{
+      snapshot_id: string;
+      provider_id: string;
+      provider_version: string;
+      operation_name: string;
+      manifest_hash: string;
+      definition: Record<string, unknown>;
+    }>("SELECT * FROM operation_snapshot WHERE snapshot_id=$1", [snapshotId]);
+    const row = result.rows[0];
+    if (row === undefined) throw new Error("OPERATION_SNAPSHOT_NOT_FOUND");
+    const operation = new OperationRegistry().validateStoredDefinition(row.definition, {
+      providerId: row.provider_id,
+      providerVersion: row.provider_version,
+      manifestHash: row.manifest_hash,
+    });
+    if (operation.name !== row.operation_name) throw new Error("OPERATION_SNAPSHOT_NAME_MISMATCH");
+    return {
+      snapshotId: row.snapshot_id,
+      providerId: row.provider_id,
+      providerVersion: row.provider_version,
+      manifestHash: row.manifest_hash,
+      operation,
+    };
   }
 }

@@ -1,10 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
-import { protoStructToJson } from "../../adapter-protocol/src/index.js";
+import {
+  protoStructToJson,
+  validateAdapterSnapshotIdentity,
+  validateCommandAckIdentity,
+} from "../../adapter-protocol/src/index.js";
 import type {
   AvailabilityCheckInput,
+  CommandAck,
   ExecutionSnapshot,
+  StartOperationResponse,
 } from "../../adapter-protocol/src/index.js";
 import type { AuthorizationContext, TaskRecord } from "../../domain/src/index.js";
 import type {
@@ -28,9 +34,11 @@ import type {
   AdmissionIntentRecord,
   IdempotencyRepository,
   PendingCommandRecord,
+  ResolvedTaskOperation,
   StoredInvocation,
   TaskRepository,
 } from "../../persistence-postgres/src/index.js";
+import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -52,6 +60,7 @@ export interface TaskTraceEvent {
 
 export class TaskEngine {
   readonly #repository: TaskRepository;
+  readonly #operationSnapshots: OperationSnapshotRepository;
 
   constructor(
     readonly manifest: ValidatedManifest,
@@ -62,8 +71,55 @@ export class TaskEngine {
     readonly clock: Clock = systemClock,
     readonly metrics?: TaskEngineMetrics,
     readonly onTrace?: (event: TaskTraceEvent) => void,
+    operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
+      repository.pool,
+    ),
   ) {
     this.#repository = repository;
+    this.#operationSnapshots = operationSnapshots;
+  }
+
+  async loadOperationSnapshot(snapshotId: string): Promise<ValidatedOperation> {
+    return (await this.resolveTaskOperation(snapshotId)).operation;
+  }
+
+  async resolveTaskOperation(snapshotId: string): Promise<ResolvedTaskOperation> {
+    return this.#operationSnapshots.loadOperationSnapshot(snapshotId);
+  }
+
+  async #validateTaskSnapshot(
+    task: TaskRecord,
+    operationName: string,
+    snapshot: ExecutionSnapshot,
+  ): Promise<void> {
+    try {
+      validateAdapterSnapshotIdentity(snapshot, expectedTaskIdentity(task, operationName));
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH";
+      await this.#repository.recordIdentityConflict(task.taskId, detail);
+      this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "snapshot" });
+      throw error;
+    }
+  }
+
+  async #validateTaskAck(
+    task: TaskRecord,
+    operationName: string,
+    commandSequence: number,
+    ack: CommandAck,
+  ): Promise<void> {
+    try {
+      validateCommandAckIdentity(ack, {
+        ...expectedTaskIdentity(task, operationName),
+        commandSequence,
+      });
+    } catch (error) {
+      const detail =
+        error instanceof Error ? error.message : "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH";
+      await this.#repository.recordIdentityConflict(task.taskId, detail);
+      this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "command_ack" });
+      throw error;
+    }
   }
 
   async callOperation(
@@ -171,6 +227,7 @@ export class TaskEngine {
     argumentHash: string,
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
+    persistedOperationSnapshotId?: string,
   ): Promise<ToolInvocationResult> {
     this.onTrace?.({
       event: "operation.admission",
@@ -188,10 +245,19 @@ export class TaskEngine {
         argumentHash,
         timing: toAdapterTiming(timing),
       });
+      validateStartResponseIdentity(response, {
+        taskId,
+        operationName: operation.name,
+        argumentHash,
+        authorizationContextHash: authorization.hash,
+        executionMode: authorization.executionMode,
+        simulationId: authorization.simulationId,
+      });
       return { kind: "result", result: resultFromStart(response) };
     }
 
-    const operationSnapshotId = this.operationSnapshotIds.get(operation.name);
+    const operationSnapshotId =
+      persistedOperationSnapshotId ?? this.operationSnapshotIds.get(operation.name);
     if (operationSnapshotId === undefined) throw new Error("OPERATION_SNAPSHOT_NOT_FOUND");
     const intent = {
       taskId,
@@ -275,6 +341,19 @@ export class TaskEngine {
       await this.#repository.markAdmissionUncertain(taskId);
       throw new Error("ADAPTER_START_RESPONSE_MISSING_RESULT");
     }
+    try {
+      validateStartResponseIdentity(response, {
+        taskId,
+        operationName: operation.name,
+        argumentHash,
+        authorizationContextHash: authorization.hash,
+        executionMode: authorization.executionMode,
+        simulationId: authorization.simulationId,
+      });
+    } catch (error) {
+      await this.#repository.markAdmissionUncertain(taskId);
+      throw error;
+    }
     const snapshot = normalizeSnapshot(accepted.initialSnapshot);
     const transition = mapAdapterSnapshot(snapshot);
     const inputRequests = normalizeInputRequests(accepted.initialSnapshot);
@@ -339,6 +418,15 @@ export class TaskEngine {
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
   ): Promise<ToolInvocationResult> {
+    validateAdapterSnapshotIdentity(snapshotValue, {
+      taskId: intent.taskId,
+      externalExecutionId,
+      operationName: operation.name,
+      argumentHash: intent.argumentHash,
+      authorizationContextHash: intent.authorization.hash,
+      executionMode: intent.authorization.executionMode,
+      simulationId: intent.authorization.simulationId,
+    });
     const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
     const inputRequests = normalizeInputRequests(snapshotValue);
     const respondedAt = this.clock.now();
@@ -389,6 +477,7 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
     let task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
     if (
       !isTerminalState(task.internalState) &&
       task.internalState !== "SCHEDULED" &&
@@ -400,6 +489,7 @@ export class TaskEngine {
         task.externalExecutionId,
         executionOptions(authorization),
       );
+      await this.#validateTaskSnapshot(task, operation.name, snapshot);
       task = await this.#repository.applySnapshot(
         task.taskId,
         Number(snapshot.revision),
@@ -414,11 +504,12 @@ export class TaskEngine {
     );
   }
 
-  async recoverAdmission(admission: AdmissionIntentRecord): Promise<ToolInvocationResult> {
-    const operation = this.manifest.operations.find(
-      (candidate) => candidate.name === admission.operationName,
-    );
-    if (operation === undefined) throw new Error("RECOVERY_OPERATION_NOT_FOUND");
+  async recoverAdmission(
+    admission: AdmissionIntentRecord,
+    resolvedOperation?: ValidatedOperation,
+  ): Promise<ToolInvocationResult> {
+    const operation =
+      resolvedOperation ?? (await this.loadOperationSnapshot(admission.operationSnapshotId));
     return this.#executeOperation(
       operation,
       admission.arguments,
@@ -434,20 +525,29 @@ export class TaskEngine {
         latestStartAt: admission.latestStartAt,
         deadlineAt: admission.deadlineAt,
       },
+      admission.operationSnapshotId,
     );
   }
 
-  async reconcileTask(task: TaskRecord): Promise<"found" | "not_found" | "deferred"> {
+  async reconcileTask(
+    task: TaskRecord,
+    resolvedOperation?: ValidatedOperation,
+  ): Promise<"found" | "not_found" | "deferred"> {
     if (task.internalState === "STARTING" && task.externalExecutionId === null) return "deferred";
+    const operation =
+      resolvedOperation ?? (await this.loadOperationSnapshot(task.operationSnapshotId));
     const response = await this.gateway.reconcileExecution(
       task.taskId,
-      task.operationName,
+      operation.name,
       task.argumentHash,
-      executionOptions({
-        hash: task.authorizationContextHash,
-        executionMode: task.executionMode,
-        simulationId: task.simulationId,
-      }),
+      {
+        ...executionOptions({
+          hash: task.authorizationContextHash,
+          executionMode: task.executionMode,
+          simulationId: task.simulationId,
+        }),
+        externalExecutionId: task.externalExecutionId,
+      },
     );
     if (response.status === "TRANSIENT_UNAVAILABLE") return "deferred";
     if (response.status === "CONFLICT") {
@@ -465,6 +565,14 @@ export class TaskEngine {
       return "not_found";
     }
     const snapshot = response.snapshot;
+    if (response.externalExecutionId !== snapshot.externalExecutionId) {
+      await this.#repository.recordIdentityConflict(
+        task.taskId,
+        "ADAPTER_RECONCILE_IDENTITY_MISMATCH",
+      );
+      throw new Error("ADAPTER_RECONCILE_IDENTITY_MISMATCH");
+    }
+    await this.#validateTaskSnapshot(task, operation.name, snapshot);
     await this.#repository.applySnapshot(
       task.taskId,
       Number(snapshot.revision),
@@ -475,7 +583,13 @@ export class TaskEngine {
     return "found";
   }
 
-  async replayPendingCommand(task: TaskRecord, command: PendingCommandRecord): Promise<void> {
+  async replayPendingCommand(
+    task: TaskRecord,
+    command: PendingCommandRecord,
+    resolvedOperation?: ValidatedOperation,
+  ): Promise<void> {
+    const operation =
+      resolvedOperation ?? (await this.loadOperationSnapshot(task.operationSnapshotId));
     const authorization = {
       hash: task.authorizationContextHash,
       executionMode: task.executionMode,
@@ -483,22 +597,24 @@ export class TaskEngine {
     };
     const identity = {
       taskId: task.taskId,
-      operationName: task.operationName,
+      operationName: operation.name,
       argumentHash: task.argumentHash,
       commandSequence: command.commandSequence,
     };
     let ack;
     let completedAnswers: { key: string; hash: string; value: unknown }[] = [];
     if (command.commandType === "CANCEL") {
+      if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
       ack = await this.gateway.requestCancel(
         task.taskId,
-        task.operationName,
+        operation.name,
         task.argumentHash,
         task.stopReason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "USER_REQUESTED",
         command.commandSequence,
-        executionOptions(authorization),
+        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
     } else if (command.commandType === "UPDATE") {
+      if (!operation.capabilities.inputRequired) throw new Error("INPUT_NOT_SUPPORTED");
       const answers = command.payload.answers;
       if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
         throw new Error("INVALID_RECOVERY_UPDATE_PAYLOAD");
@@ -515,13 +631,22 @@ export class TaskEngine {
           value: answer.value,
           answerHash: answer.hash,
         })),
-        executionOptions(authorization),
+        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
     } else if (command.commandType === "PAUSE") {
-      ack = await this.gateway.pauseExecution(identity, executionOptions(authorization));
+      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+      ack = await this.gateway.pauseExecution(identity, {
+        ...executionOptions(authorization),
+        externalExecutionId: task.externalExecutionId,
+      });
     } else {
-      ack = await this.gateway.resumeExecution(identity, executionOptions(authorization));
+      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+      ack = await this.gateway.resumeExecution(identity, {
+        ...executionOptions(authorization),
+        externalExecutionId: task.externalExecutionId,
+      });
     }
+    await this.#validateTaskAck(task, operation.name, command.commandSequence, ack);
     await this.#repository.acknowledgeCommand(
       task.taskId,
       command.commandSequence,
@@ -550,6 +675,7 @@ export class TaskEngine {
       executionMode: authorization.executionMode,
     });
     let task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
     this.onTrace?.({
       event: "task.cancel_requested",
       providerId: task.providerId,
@@ -560,6 +686,7 @@ export class TaskEngine {
       correlationId: authorization.correlationId ?? null,
     });
     if (isTerminalState(task.internalState)) return detailedTask(task);
+    if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
     await this.#repository.beginCancel(taskId, requestHash);
     task = (await this.#repository.getById(taskId)) ?? task;
@@ -572,6 +699,8 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, never>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (!operation.capabilities.inputRequired) throw new Error("INPUT_NOT_SUPPORTED");
     const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
     const pending: { key: string; hash: string; value: unknown }[] = [];
@@ -604,8 +733,9 @@ export class TaskEngine {
           value: answer.value,
           answerHash: answer.hash,
         })),
-        executionOptions(authorization),
+        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
       );
+      await this.#validateTaskAck(task, operation.name, command.sequence, ack);
       await this.#repository.acknowledgeCommand(
         taskId,
         command.sequence,
@@ -624,23 +754,28 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
-    const operation = this.manifest.operations.find(
-      (candidate) => candidate.name === task.operationName,
-    );
-    if (!operation?.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
     const requestHash = createHash("sha256").update(commandType).digest("hex");
     const command = await this.#repository.beginCommand(taskId, commandType, requestHash, {});
     if (!command.duplicate) {
       const identity = {
         taskId,
-        operationName: task.operationName,
+        operationName: operation.name,
         argumentHash: task.argumentHash,
         commandSequence: command.sequence,
       };
       const ack =
         commandType === "PAUSE"
-          ? await this.gateway.pauseExecution(identity, executionOptions(authorization))
-          : await this.gateway.resumeExecution(identity, executionOptions(authorization));
+          ? await this.gateway.pauseExecution(identity, {
+              ...executionOptions(authorization),
+              externalExecutionId: task.externalExecutionId,
+            })
+          : await this.gateway.resumeExecution(identity, {
+              ...executionOptions(authorization),
+              externalExecutionId: task.externalExecutionId,
+            });
+      await this.#validateTaskAck(task, operation.name, command.sequence, ack);
       await this.#repository.acknowledgeCommand(
         taskId,
         command.sequence,
@@ -660,6 +795,36 @@ function normalizeSnapshot(snapshot: ExecutionSnapshot) {
     message: snapshot.message,
     retryable: snapshot.retryable,
     result: protoStructToJson(snapshot.result),
+  };
+}
+
+function validateStartResponseIdentity(
+  response: StartOperationResponse,
+  expected: Omit<ReturnType<typeof expectedTaskIdentity>, "externalExecutionId">,
+): void {
+  const accepted = response.accepted;
+  if (accepted === undefined) return;
+  if (
+    accepted.externalExecutionId.length === 0 ||
+    accepted.initialSnapshot.externalExecutionId !== accepted.externalExecutionId
+  ) {
+    throw new Error("ADAPTER_START_IDENTITY_MISMATCH");
+  }
+  validateAdapterSnapshotIdentity(accepted.initialSnapshot, {
+    ...expected,
+    externalExecutionId: accepted.externalExecutionId,
+  });
+}
+
+function expectedTaskIdentity(task: TaskRecord, operationName: string) {
+  return {
+    taskId: task.taskId,
+    externalExecutionId: task.externalExecutionId,
+    operationName,
+    argumentHash: task.argumentHash,
+    authorizationContextHash: task.authorizationContextHash,
+    executionMode: task.executionMode,
+    simulationId: task.simulationId,
   };
 }
 

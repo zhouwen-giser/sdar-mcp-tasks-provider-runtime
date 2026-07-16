@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { protoStructToJson } from "../../adapter-protocol/src/index.js";
-import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
+import {
+  protoStructToJson,
+  validateAdapterSnapshotIdentity,
+} from "../../adapter-protocol/src/index.js";
+import type { ExecutionSnapshot, GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { Clock, TaskExecutionTiming, TaskRecord } from "../../domain/src/index.js";
 import { mapAdapterSnapshot, systemClock } from "../../domain/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
+import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { TaskRepository } from "../../persistence-postgres/src/index.js";
 
 export interface SchedulerTickResult {
@@ -24,6 +28,9 @@ export class DurableScheduler {
     readonly repository: TaskRepository,
     readonly clock: Clock = systemClock,
     workerId: string = randomUUID(),
+    readonly operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
+      repository.pool,
+    ),
   ) {
     this.workerId = workerId;
   }
@@ -59,11 +66,14 @@ export class DurableScheduler {
     const owner = requiredClaimOwner(task);
     const now = this.clock.now();
     try {
+      const operation = (
+        await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
+      ).operation;
       const response = await this.gateway.reconcileExecution(
         task.taskId,
-        task.operationName,
+        operation.name,
         task.argumentHash,
-        executionOptions(task),
+        { ...executionOptions(task), externalExecutionId: task.externalExecutionId },
       );
       const completedAt = this.clock.now();
       if (response.status === "TRANSIENT_UNAVAILABLE") {
@@ -106,6 +116,7 @@ export class DurableScheduler {
       await this.acceptStart(
         task,
         owner,
+        operation.name,
         response.externalExecutionId || response.snapshot.externalExecutionId,
         response.snapshot,
         response as unknown as Record<string, unknown>,
@@ -115,6 +126,12 @@ export class DurableScheduler {
       if (startResponseLate(task, completedAt)) result.watchdogStops += 1;
       else result.started += 1;
     } catch (error) {
+      if (isIdentityError(error)) {
+        await this.repository.recordIdentityConflict(
+          task.taskId,
+          error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
+        );
+      }
       await this.repository.deferScheduleReconcile(
         task.taskId,
         owner,
@@ -133,10 +150,11 @@ export class DurableScheduler {
       result.missed += 1;
       return;
     }
-    const operation = this.manifest.operations.find(
-      (candidate) => candidate.name === task.operationName,
-    );
-    if (operation === undefined) {
+    let operation;
+    try {
+      operation = (await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId))
+        .operation;
+    } catch {
       await this.repository.releaseScheduleRetry(
         task.taskId,
         owner,
@@ -186,6 +204,7 @@ export class DurableScheduler {
       await this.acceptStart(
         task,
         owner,
+        operation.name,
         accepted.externalExecutionId,
         accepted.initialSnapshot,
         response as unknown as Record<string, unknown>,
@@ -196,6 +215,12 @@ export class DurableScheduler {
       } else result.started += 1;
     } catch (error) {
       const failedAt = this.clock.now();
+      if (isIdentityError(error)) {
+        await this.repository.recordIdentityConflict(
+          task.taskId,
+          error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
+        );
+      }
       await this.repository.markScheduleResponseUncertain(
         task.taskId,
         owner,
@@ -209,26 +234,24 @@ export class DurableScheduler {
   private async acceptStart(
     task: TaskRecord,
     owner: string,
+    operationName: string,
     externalExecutionId: string,
-    snapshot: {
-      revision: string | number;
-      externalExecutionId: string;
-      state: string;
-      reasonCode: string;
-      message: string;
-      retryable: boolean;
-      result?: unknown;
-      inputRequests?: {
-        key: string;
-        description: string;
-        inputSchema?: unknown;
-        required: boolean;
-      }[];
-      observedAt?: unknown;
-    },
+    snapshot: ExecutionSnapshot,
     adapterResponse: Record<string, unknown>,
     completedAt: Date,
   ): Promise<void> {
+    if (snapshot.externalExecutionId !== externalExecutionId) {
+      throw new Error("ADAPTER_START_IDENTITY_MISMATCH");
+    }
+    validateAdapterSnapshotIdentity(snapshot, {
+      taskId: task.taskId,
+      externalExecutionId,
+      operationName,
+      argumentHash: task.argumentHash,
+      authorizationContextHash: task.authorizationContextHash,
+      executionMode: task.executionMode,
+      simulationId: task.simulationId,
+    });
     await this.repository.acceptScheduled(
       task.taskId,
       owner,
@@ -311,6 +334,10 @@ function adapterTiming(timing: TaskExecutionTiming): Record<string, unknown> {
     start,
     ...(timing.maxElapsedMs === null ? {} : { maxElapsedMs: String(timing.maxElapsedMs) }),
   };
+}
+
+function isIdentityError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("IDENTITY_MISMATCH");
 }
 
 function timestamp(value: Date): { seconds: string; nanos: number } {

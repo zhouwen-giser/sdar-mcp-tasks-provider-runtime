@@ -17,7 +17,9 @@ export interface MockAdapterOptions {
 
 interface MockExecution {
   externalExecutionId: string;
+  operationName: string;
   argumentHash: string;
+  executionContext: Record<string, unknown>;
   snapshot: Record<string, unknown>;
   terminalSnapshot: Record<string, unknown>;
   waitingForInput?: boolean;
@@ -214,10 +216,24 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         execution.snapshot = execution.terminalSnapshot;
       }
       executions.set(taskId, execution);
-      callback(null, execution.snapshot);
+      callback(
+        null,
+        execution.scenario === "get_external_identity_mismatch"
+          ? { ...execution.snapshot, externalExecutionId: `wrong-${execution.externalExecutionId}` }
+          : execution.snapshot,
+      );
     },
     reconcileExecution: (
-      call: grpc.ServerUnaryCall<{ taskId?: string; argumentHash?: string }, unknown>,
+      call: grpc.ServerUnaryCall<
+        {
+          taskId?: string;
+          operationName?: string;
+          argumentHash?: string;
+          externalExecutionId?: string;
+          executionContext?: Record<string, unknown>;
+        },
+        unknown
+      >,
       callback: grpc.sendUnaryData<unknown>,
     ) => {
       const execution = executions.get(call.request.taskId ?? "");
@@ -230,7 +246,13 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         });
         return;
       }
-      if (execution.argumentHash !== (call.request.argumentHash ?? "")) {
+      if (
+        execution.argumentHash !== (call.request.argumentHash ?? "") ||
+        execution.operationName !== (call.request.operationName ?? "") ||
+        !sameExecutionContext(execution.executionContext, call.request.executionContext) ||
+        ((call.request.externalExecutionId ?? "") !== "" &&
+          call.request.externalExecutionId !== execution.externalExecutionId)
+      ) {
         callback(null, {
           status: "CONFLICT",
           reasonCode: "ARGUMENT_HASH_CONFLICT",
@@ -241,7 +263,17 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       }
       callback(null, {
         status: "FOUND",
-        snapshot: execution.snapshot,
+        snapshot:
+          execution.scenario === "reconcile_identity_mismatch"
+            ? {
+                ...execution.snapshot,
+                argumentHash: "f".repeat(64),
+                executionContext: {
+                  ...execution.executionContext,
+                  authorizationContextHash: "e".repeat(64),
+                },
+              }
+            : execution.snapshot,
         externalExecutionId: execution.externalExecutionId,
         reasonCode: "EXECUTION_FOUND",
         message: "Execution recovered.",
@@ -263,6 +295,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           reasonCode: "EXECUTION_NOT_FOUND",
           message: "Execution does not exist.",
           commandSequence: call.request.identity?.commandSequence ?? "0",
+          identity: call.request.identity,
         });
         return;
       }
@@ -280,6 +313,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           reasonCode: "CANCEL_NOT_PERMITTED",
           message: "Reference execution rejected user cancellation.",
           commandSequence: call.request.identity?.commandSequence ?? "1",
+          identity: call.request.identity,
         });
         return;
       }
@@ -290,6 +324,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           reasonCode: "TRANSIENT_UNAVAILABLE",
           message: "Reference execution requests a retry.",
           commandSequence: call.request.identity?.commandSequence ?? "1",
+          identity: call.request.identity,
         });
         return;
       }
@@ -319,7 +354,11 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         accepted: true,
         reasonCode: "STOP_ACCEPTED",
         message: "Safe stop accepted.",
-        commandSequence: call.request.identity?.commandSequence ?? "1",
+        commandSequence:
+          execution.scenario === "command_sequence_mismatch"
+            ? Number(call.request.identity?.commandSequence ?? 1) + 1
+            : (call.request.identity?.commandSequence ?? "1"),
+        identity: call.request.identity,
       };
       execution.commandAcks[commandKey] = ack;
       executions.set(taskId, execution);
@@ -396,6 +435,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         reasonCode: accepted ? "INPUT_ACCEPTED" : "INPUT_REJECTED",
         message: accepted ? "Input accepted." : "Input was not expected.",
         commandSequence: call.request.identity?.commandSequence ?? "0",
+        identity: call.request.identity,
       };
       if (execution !== undefined) {
         execution.commandAcks[commandKey] = ack;
@@ -413,6 +453,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           arguments?: unknown;
           argumentHash?: string;
           invocationAttempt?: string | number;
+          executionContext?: Record<string, unknown>;
         },
         unknown
       >,
@@ -487,6 +528,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         const terminalSnapshot = {
           taskId,
           externalExecutionId,
+          operationName: call.request.operationName ?? "",
+          argumentHash: call.request.argumentHash ?? "",
+          executionContext: call.request.executionContext ?? {},
           state: "SUCCEEDED",
           revision: "1",
           reasonCode: "SUCCESS",
@@ -496,7 +540,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         };
         executions.set(taskId, {
           externalExecutionId,
+          operationName: call.request.operationName ?? "",
           argumentHash: call.request.argumentHash ?? "",
+          executionContext: call.request.executionContext ?? {},
           snapshot: terminalSnapshot,
           terminalSnapshot,
           commandAcks: {},
@@ -515,6 +561,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         const initialSnapshot = {
           taskId,
           externalExecutionId,
+          operationName: call.request.operationName ?? "",
+          argumentHash: call.request.argumentHash ?? "",
+          executionContext: call.request.executionContext ?? {},
           state: "RUNNING",
           revision: "1",
           reasonCode: "STARTED",
@@ -552,7 +601,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         };
         executions.set(taskId, {
           externalExecutionId,
+          operationName: call.request.operationName ?? "",
           argumentHash: call.request.argumentHash ?? "",
+          executionContext: call.request.executionContext ?? {},
           snapshot: initialSnapshot,
           terminalSnapshot,
           commandAcks: {},
@@ -571,7 +622,16 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           return;
         }
         callback(null, {
-          accepted: { externalExecutionId, initialSnapshot },
+          accepted: {
+            externalExecutionId:
+              result.scenario === "start_external_identity_mismatch"
+                ? `wrong-${externalExecutionId}`
+                : externalExecutionId,
+            initialSnapshot:
+              result.scenario === "start_task_identity_mismatch"
+                ? { ...initialSnapshot, taskId: `wrong-${taskId}` }
+                : initialSnapshot,
+          },
           result: "accepted",
         });
         return;
@@ -580,6 +640,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       const terminalSnapshot = {
         taskId,
         externalExecutionId,
+        operationName: call.request.operationName ?? "",
+        argumentHash: call.request.argumentHash ?? "",
+        executionContext: call.request.executionContext ?? {},
         state: "SUCCEEDED",
         revision: "1",
         reasonCode: "SUCCESS",
@@ -589,7 +652,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       };
       executions.set(taskId, {
         externalExecutionId,
+        operationName: call.request.operationName ?? "",
         argumentHash: call.request.argumentHash ?? "",
+        executionContext: call.request.executionContext ?? {},
         snapshot: terminalSnapshot,
         terminalSnapshot,
         commandAcks: {},
@@ -629,6 +694,7 @@ function createPauseResumeHandler(
         reasonCode: "EXECUTION_NOT_FOUND",
         message: "Execution does not exist.",
         commandSequence: call.request.identity?.commandSequence ?? "0",
+        identity: call.request.identity,
       });
       return;
     }
@@ -659,11 +725,24 @@ function createPauseResumeHandler(
       reasonCode: command === "pause" ? "PAUSE_ACCEPTED" : "RESUME_ACCEPTED",
       message: `${command} accepted.`,
       commandSequence: call.request.identity?.commandSequence ?? "1",
+      identity: call.request.identity,
     };
     execution.commandAcks[commandKey] = ack;
     executions.set(taskId, execution);
     callback(null, ack);
   };
+}
+
+function sameExecutionContext(
+  left: Record<string, unknown>,
+  right: Record<string, unknown> | undefined,
+): boolean {
+  if (right === undefined) return false;
+  return (
+    left.authorizationContextHash === right.authorizationContextHash &&
+    left.executionMode === right.executionMode &&
+    (left.simulationId ?? "") === (right.simulationId ?? "")
+  );
 }
 
 export function bindMockAdapter(server: grpc.Server, address: string): Promise<number> {

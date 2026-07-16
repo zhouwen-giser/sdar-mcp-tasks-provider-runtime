@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { protoStructToJson } from "../../adapter-protocol/src/index.js";
+import {
+  protoStructToJson,
+  validateAdapterSnapshotIdentity,
+  validateCommandAckIdentity,
+} from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { Clock } from "../../domain/src/index.js";
 import { isTerminalState, mapAdapterSnapshot, systemClock } from "../../domain/src/index.js";
+import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { PendingCommandRecord, TaskRepository } from "../../persistence-postgres/src/index.js";
 
 export interface CommandDispatcherTickResult {
@@ -23,6 +28,9 @@ export class DurableCommandDispatcher {
     readonly clock: Clock = systemClock,
     workerId: string = randomUUID(),
     readonly maxSafeStopAttempts = 5,
+    readonly operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
+      repository.pool,
+    ),
   ) {
     this.workerId = workerId;
   }
@@ -49,9 +57,13 @@ export class DurableCommandDispatcher {
         continue;
       }
       try {
+        const operation = (
+          await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
+        ).operation;
+        if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
         const ack = await this.gateway.requestCancel(
           task.taskId,
-          task.operationName,
+          operation.name,
           task.argumentHash,
           command.stopReason === "DEADLINE_REACHED"
             ? "DEADLINE_REACHED"
@@ -63,13 +75,19 @@ export class DurableCommandDispatcher {
             authorizationContextHash: task.authorizationContextHash,
             executionMode: task.executionMode,
             simulationId: task.simulationId,
+            externalExecutionId: task.externalExecutionId,
           },
         );
-        if (Number(ack.commandSequence) !== command.commandSequence) {
-          await this.retry(command, "COMMAND_SEQUENCE_MISMATCH", "Adapter Ack sequence mismatch.");
-          result.retried += 1;
-          continue;
-        }
+        validateCommandAckIdentity(ack, {
+          taskId: task.taskId,
+          externalExecutionId: task.externalExecutionId,
+          operationName: operation.name,
+          argumentHash: task.argumentHash,
+          authorizationContextHash: task.authorizationContextHash,
+          executionMode: task.executionMode,
+          simulationId: task.simulationId,
+          commandSequence: command.commandSequence,
+        });
         if (ack.accepted) {
           await this.repository.acknowledgeClaimedCommand(
             command,
@@ -93,12 +111,13 @@ export class DurableCommandDispatcher {
         }
         const reconciled = await this.gateway.reconcileExecution(
           task.taskId,
-          task.operationName,
+          operation.name,
           task.argumentHash,
           {
             authorizationContextHash: task.authorizationContextHash,
             executionMode: task.executionMode,
             simulationId: task.simulationId,
+            externalExecutionId: task.externalExecutionId,
           },
         );
         if (reconciled.status !== "FOUND" || reconciled.snapshot === undefined) {
@@ -111,6 +130,18 @@ export class DurableCommandDispatcher {
           continue;
         }
         const snapshot = reconciled.snapshot;
+        if (reconciled.externalExecutionId !== snapshot.externalExecutionId) {
+          throw new Error("ADAPTER_RECONCILE_IDENTITY_MISMATCH");
+        }
+        validateAdapterSnapshotIdentity(snapshot, {
+          taskId: task.taskId,
+          externalExecutionId: task.externalExecutionId,
+          operationName: operation.name,
+          argumentHash: task.argumentHash,
+          authorizationContextHash: task.authorizationContextHash,
+          executionMode: task.executionMode,
+          simulationId: task.simulationId,
+        });
         await this.repository.rejectUserCancel(
           command,
           Number(snapshot.revision),
@@ -125,6 +156,12 @@ export class DurableCommandDispatcher {
         );
         result.rejected += 1;
       } catch (error) {
+        if (isIdentityError(error)) {
+          await this.repository.recordIdentityConflict(
+            task.taskId,
+            error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
+          );
+        }
         if (
           command.stopReason !== "USER_REQUESTED" &&
           command.attemptCount >= this.maxSafeStopAttempts
@@ -164,4 +201,8 @@ export class DurableCommandDispatcher {
 
 function isRetryableAck(reasonCode: string): boolean {
   return /TRANSIENT|RETRY|UNAVAILABLE|TIMEOUT/.test(reasonCode.toUpperCase());
+}
+
+function isIdentityError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("IDENTITY_MISMATCH");
 }

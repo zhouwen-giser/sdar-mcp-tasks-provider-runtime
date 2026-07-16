@@ -260,6 +260,9 @@ message ExecutionSnapshot {
   bool retryable = 10;
   repeated Alternative alternatives = 11;
   google.protobuf.Timestamp observed_at = 12;
+  string operation_name = 13;
+  string argument_hash = 14;
+  ExecutionContext execution_context = 15;
 }
 
 message ExecutionAccepted {
@@ -293,6 +296,7 @@ message SideEffectIdentity {
   string argument_hash = 3;
   ExecutionContext execution_context = 4;
   uint64 command_sequence = 5;
+  string external_execution_id = 6;
 }
 
 message RequestCancelRequest {
@@ -330,6 +334,7 @@ message CommandAck {
   string reason_code = 2;
   string message = 3;
   uint64 command_sequence = 4;
+  SideEffectIdentity identity = 5;
 }
 
 message ReconcileExecutionRequest {
