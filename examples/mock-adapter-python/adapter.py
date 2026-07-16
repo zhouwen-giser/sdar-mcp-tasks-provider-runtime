@@ -449,6 +449,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             "command_sequence": request.identity.command_sequence,
             "identity": {
                 "task_id": request.identity.task_id,
+                "external_execution_id": request.identity.external_execution_id,
                 "operation_name": request.identity.operation_name,
                 "argument_hash": request.identity.argument_hash,
                 "execution_context": {
