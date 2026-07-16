@@ -1,2 +1,11 @@
-# sdar-mcp-tasks-provider-runtime
-一个独立部署、语言无关的 SDAR MCP Tasks Provider Runtime。Runtime 与业务资源 Adapter 共同构成完整 Provider：Runtime 负责 MCP、SEP-2663 与 SDAR Profile 的标准语义；Adapter 负责有限数量、单一资源类型的业务事实与真实控制。
+# SDAR MCP Tasks Runtime Codex Goal Task Package V1.0
+
+本目录用于让 Codex 以 Goal Mode 自动完成 Runtime V1.0。
+
+入口文件：
+
+1. `QUICK_START_CODEX.md`
+2. `CODEX_GOAL_PROMPT.md`
+3. `SDAR_MCP_Tasks_Runtime_Codex_Goal_Task_Package_V1.0.md`
+
+权威设计位于 `references/`。报告模板位于 `templates/`。
