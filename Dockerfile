@@ -7,6 +7,7 @@ WORKDIR /workspace
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml .npmrc ./
 COPY apps/runtime/package.json apps/runtime/package.json
 COPY packages/adapter-protocol/package.json packages/adapter-protocol/package.json
+COPY packages/conformance-testkit/package.json packages/conformance-testkit/package.json
 COPY packages/domain/package.json packages/domain/package.json
 COPY packages/mcp-protocol/package.json packages/mcp-protocol/package.json
 COPY packages/observability/package.json packages/observability/package.json

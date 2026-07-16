@@ -88,6 +88,15 @@ try {
   }
   const failed = reports.filter((report) => report.status !== "passed");
   if (failed.length > 0) {
+    for (const report of failed) {
+      for (const group of report.groups) {
+        for (const test of group.tests.filter((value) => value.status === "failed")) {
+          process.stderr.write(
+            `::error file=reports/conformance/${report.adapterLanguage}.json::${report.adapterLanguage} ${group.id} ${test.name}: ${test.error ?? "failed"}\n`,
+          );
+        }
+      }
+    }
     throw new Error(
       `Conformance failed: ${failed.map((report) => report.adapterLanguage).join(", ")}`,
     );
