@@ -2,7 +2,8 @@
 
 - Start SHA: `66a55f6`
 - Upstream main at pre-commit fetch: `7e501d07786a7695d205b0bc92b8fdbd667e7f96`
-- Phase/end SHA: pending
+- Phase commit: `bb5e94120fec1662b70e849bfad736e392e5865c`
+- Recovery fixture fix/end SHA: `e5736f7509fce22757745b1c0c4c47a9163468d3`
 
 R7 adds startup and periodic durable recovery. Admission timing/TTL anchors survive response loss, PostgreSQL advisory locks serialize each Task, STARTING and bound nonterminal states use Reconcile, and pending controls replay the original command sequence. Transient failures retain confirmed state; a confirmed missing bound execution becomes explicit technical failure.
 
@@ -12,4 +13,4 @@ Inbound auth supports explicit development, trusted headers, and signed HS256 JW
 
 Prometheus metrics cover Task state, calls/latency, cancel, recovery, Adapter RPC, Outbox, idempotency, and limiting. Structured correlation events contain the required identity fields without full arguments; logger redaction covers authorization and arguments.
 
-Exit decision: pending authoritative PostgreSQL recovery/security and Compose CI.
+Exit decision: PASS. GitHub Actions run `29498655990` passed recovery/security, real PostgreSQL, and Compose gates. R8 may proceed.

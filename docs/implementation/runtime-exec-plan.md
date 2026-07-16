@@ -37,7 +37,7 @@ implementation.
 | R4    | Availability, full idempotency, admission recovery/concurrency                     | one external execution per duplicate/concurrent call | completed (`8c23d2d`, fix `df5898e`, CI green) |
 | R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | completed (`28d35d9`, CI green)                |
 | R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | completed (`3b896ca`, fix `e619a1d`, CI green) |
-| R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | implementation complete; exit CI pending       |
+| R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | completed (`bb5e941`, fix `e5736f7`, CI green) |
 | R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | pending                                        |
 | R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | pending                                        |
 
@@ -147,14 +147,14 @@ success and first-writer user/deadline outcomes. GitHub Actions run
   mTLS client configuration, rate/size/depth limits, and redaction.
 - Expose readiness dependencies, metrics, trace correlation, and fault evidence.
 
-Implementation: complete. Startup and periodic RecoveryManager scans use
+Implementation: complete and CI verified. Startup and periodic RecoveryManager scans use
 per-task PostgreSQL advisory locks, replay pending command sequences, recover
 response-lost admission, and make confirmed NOT_FOUND explicit. Runtime ready
 waits for migrations, validated Manifest/Adapter connectivity and the initial
 scan. Development/trusted-header/JWT authentication, full context isolation,
 mTLS credentials, body/rate/JSON limits, redacted correlation logs and
-Prometheus metrics are wired. Remote PostgreSQL recovery and Compose gates are
-pending because the local Docker socket is unavailable.
+Prometheus metrics are wired. GitHub Actions run `29498655990` passed recovery,
+security, real PostgreSQL and Compose gates.
 
 ### R8 — cross-language conformance
 

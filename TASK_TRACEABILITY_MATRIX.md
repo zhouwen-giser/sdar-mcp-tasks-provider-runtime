@@ -13,12 +13,12 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 | RQ-ADMISSION | Runtime 6、8、10 | R3-R4 | task engine/PostgreSQL repositories | PG/gRPC crash-window/recovery | IN PROGRESS (R3 CORE) |
 | RQ-AVAIL | Profile 8-11 | R4 | domain/task engine/MCP/gRPC | four-state/window/unknown E2E | VERIFIED (R4 CI) |
 | RQ-TIME | Profile 12-15 | R5 | scheduler/domain/PostgreSQL claims | fake-clock/restart/multi-worker | VERIFIED (R5 CI) |
-| RQ-CANCEL | Profile 23、36 | R6-R7 | task control/Adapter gateway | safe-stop/race/replay | IN PROGRESS (R7 IMPLEMENTED) |
+| RQ-CANCEL | Profile 23、36 | R6-R7 | task control/Adapter gateway | safe-stop/race/replay | VERIFIED (R7 CI) |
 | RQ-INPUT | Profile 22 | R6 | task engine/PostgreSQL repositories | update/idempotency | VERIFIED (R6 CI) |
 | RQ-IDEMP | Profile 29 | R3-R5 | advisory-lock persistence/domain | duplicate/concurrent/reconcile | VERIFIED (R5 CI) |
 | RQ-OBS | Profile 17-18、32 | R6 | observation/outbox repositories | revision/delivery | VERIFIED (R6 CI) |
-| RQ-RECOVERY | Profile 30 | R3-R7 | recovery manager | restart/fault | IN PROGRESS (R7 IMPLEMENTED) |
-| RQ-PERSIST | Runtime 8 | R2-R7 | `migrations`, PostgreSQL package | migration/integration | IN PROGRESS (R7 IMPLEMENTED) |
-| RQ-SEC | Profile 20、34-35 | R2、R7 | security and protocol boundaries | auth/mode/fuzz | IN PROGRESS (R7 IMPLEMENTED) |
+| RQ-RECOVERY | Profile 30 | R3-R7 | recovery manager | restart/fault | VERIFIED (R7 CI) |
+| RQ-PERSIST | Runtime 8 | R2-R7 | `migrations`, PostgreSQL package | migration/integration | VERIFIED (R7 CI) |
+| RQ-SEC | Profile 20、34-35 | R2、R7 | security and protocol boundaries | auth/mode/fuzz | VERIFIED (R7 CI) |
 | RQ-OBSERVABILITY | Runtime 12 | R1、R7-R9 | `packages/observability` | metrics/log redaction | IN PROGRESS (R7 IMPLEMENTED) |
 | RQ-CONFORMANCE | Profile 37-39 | R8-R9 | `packages/conformance-testkit` | P0-P4/cross-language | PLANNED |
