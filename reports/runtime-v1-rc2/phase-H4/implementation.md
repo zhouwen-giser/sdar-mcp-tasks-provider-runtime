@@ -68,8 +68,18 @@ See `test-results.md` for the exact local and CI evidence. No test is skipped.
 
 ## 7. Commit and CI
 
-The implementation commit and workflow run ids are intentionally recorded by the closure report
-commit after the remote checks finish; no unverified run is represented as green here.
+- Implementation commit: `c58feb782edea857fd9857640a3618fa44df88b8`
+- First push runtime `29517410128` and PR runtime `29517412904` failed in Python P3
+  conformance because the Python Ack mapping omitted the newly required external execution id.
+  All preceding verify steps and both Compose jobs had passed; Buf was skipped after verify failed.
+- Repair commit: `5873a7960bae47f0dfc2aa0c7ef41a2b013f2dd0`
+- Repair push runtime: `29517588173`, SUCCESS (`pnpm verify`, Buf, Compose)
+- Repair PR runtime: `29517591379`, SUCCESS (`pnpm verify`, Buf, Compose)
+- Repair PR quality: `29517591502`, SUCCESS
+- Repair PR Compose: `29517591413`, SUCCESS
+
+The failed conformance result remains part of the evidence: it demonstrated that a missing echoed
+identity field is rejected rather than silently tolerated.
 
 ## 8. Exit status
 
@@ -77,4 +87,5 @@ commit after the remote checks finish; no unverified run is represented as green
 - [x] Identity mismatches are rejected before authoritative Task mutation.
 - [x] Reconcile cannot bind a different execution.
 - [x] T-017..T-022 pass locally without skip.
-- [ ] Implementation and report-containing Heads pass branch and PR checks.
+- [x] Implementation/repair Head passes branch and PR checks.
+- [ ] Report-containing closure Head passes branch and PR checks.
