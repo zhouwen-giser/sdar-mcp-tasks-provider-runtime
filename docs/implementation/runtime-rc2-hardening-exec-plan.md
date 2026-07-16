@@ -55,7 +55,7 @@ Every H phase follows this loop:
 | H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | complete |
 | H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | complete |
 | H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | complete |
-| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending  |
+| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | complete |
 | H9    | docs, full release gate, PR #1, final report and immutable tag                | T-050, all checks green, report-containing tag commit         | pending  |
 
 ## Planned schema evolution
@@ -165,3 +165,8 @@ The tag is never moved.
   007-012 backfills, idempotence and Recovery -> Dispatcher -> Scheduler continuation. T-048 and
   T-049 run 17 identical cases per Adapter and schema-guard three scopes: Adapter protocol
   passed, Runtime Profile partial and resource-specific safety not claimed.
+- 2026-07-17 H8 closure: implementation `e1041a9` passed push runtime `29542809447`, PR runtime
+  `29542810998`, PR Compose `29542811050` and PR quality `29542811006`. Local regression counts
+  are unit 27, contract 4, rc.2 guards 6, integration 59, recovery 8, security 6 and E2E 4; both
+  Adapters passed all 17 expanded cases. H8 closes without claiming real-resource safety or a
+  complete standalone Runtime Profile.
