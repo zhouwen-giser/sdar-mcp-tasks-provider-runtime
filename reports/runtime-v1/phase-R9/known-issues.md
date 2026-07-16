@@ -7,5 +7,4 @@
   Adapter, ingress and secret resources. Placeholder values cannot be deployed
   unchanged.
 - Local Docker/Python/PostgreSQL release verification is unavailable; Actions
-  `29501239305` passed the complete remote gate. Ready PR and non-overwriting RC
-  tag are the remaining publication actions.
+  `29501239305` passed the complete remote gate with no skipped suite.

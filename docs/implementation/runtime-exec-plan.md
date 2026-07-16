@@ -28,18 +28,18 @@ implementation.
 
 ## Progress
 
-| Phase | Scope                                                                              | Exit evidence                                        | Status                                          |
-| ----- | ---------------------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------- |
-| R0    | Repository assessment, baseline, architecture decisions, traceability              | Baseline recorded; every requirement mapped          | completed                                       |
-| R1    | Workspace, Runtime health/config, Proto, TS/Python Adapter foundations, Compose    | gRPC DescribeProvider and healthy Compose            | completed                                       |
-| R2    | Manifest registry, snapshots, dynamic tools, MCP Streamable HTTP, synchronous call | MCP client lists/calls sync tool; snapshot stable    | completed (`11ed06c`, CI green)                 |
-| R3    | Migrations, task repository/state engine, admission, `tasks/get`                   | async lifecycle and restart query                    | completed (`98cc5a0`, fix `db21497`, CI green)  |
-| R4    | Availability, full idempotency, admission recovery/concurrency                     | one external execution per duplicate/concurrent call | completed (`8c23d2d`, fix `df5898e`, CI green)  |
-| R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | completed (`28d35d9`, CI green)                 |
-| R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | completed (`3b896ca`, fix `e619a1d`, CI green)  |
-| R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | completed (`bb5e941`, fix `e5736f7`, CI green)  |
-| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | completed (`9d603a6`, fixes through `380487c`)  |
-| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | implementation/CI complete; publication pending |
+| Phase | Scope                                                                              | Exit evidence                                        | Status                                         |
+| ----- | ---------------------------------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------- |
+| R0    | Repository assessment, baseline, architecture decisions, traceability              | Baseline recorded; every requirement mapped          | completed                                      |
+| R1    | Workspace, Runtime health/config, Proto, TS/Python Adapter foundations, Compose    | gRPC DescribeProvider and healthy Compose            | completed                                      |
+| R2    | Manifest registry, snapshots, dynamic tools, MCP Streamable HTTP, synchronous call | MCP client lists/calls sync tool; snapshot stable    | completed (`11ed06c`, CI green)                |
+| R3    | Migrations, task repository/state engine, admission, `tasks/get`                   | async lifecycle and restart query                    | completed (`98cc5a0`, fix `db21497`, CI green) |
+| R4    | Availability, full idempotency, admission recovery/concurrency                     | one external execution per duplicate/concurrent call | completed (`8c23d2d`, fix `df5898e`, CI green) |
+| R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | completed (`28d35d9`, CI green)                |
+| R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | completed (`3b896ca`, fix `e619a1d`, CI green) |
+| R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | completed (`bb5e941`, fix `e5736f7`, CI green) |
+| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | completed (`9d603a6`, fixes through `380487c`) |
+| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | completed                                      |
 
 ## Phase execution details
 
@@ -221,5 +221,6 @@ contains the authoritative phase SHA table.
 
 ## Current next action
 
-Complete R9 deployment, release documentation, E2E, audit/SBOM and capacity
-gates; run the complete release verification before the Ready PR and RC tag.
+Runtime V1.0 RC implementation is complete. Preserve the Ready PR checks and the
+non-overwriting `v1.0.0-rc.1` release ref; changes after the RC require a new
+version and complete release gate.

@@ -11,3 +11,6 @@
 - Phase commit: `f2d38a7`
 - Push: PASS to `origin/feature/mcp-tasks-provider-runtime-v1`
 - Exit CI: PASS, Actions `29501239305`
+- Evidence push/PR CI: PASS, Actions `29501699655` and `29501729454`
+- Pull request: #1, Ready (`draft=false`, `mergeable=true`)
+- Release tag: `v1.0.0-rc.1`, created without overwrite after final-head CI
