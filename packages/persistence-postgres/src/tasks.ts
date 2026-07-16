@@ -70,12 +70,60 @@ export interface ObservationRecord {
   type: string;
   occurredAt: Date;
   reasonCode: string | null;
+  message: string | null;
+  substate: string | null;
+  progress: Record<string, unknown> | null;
+  source: "runtime" | "adapter";
+  adapterRevision: number | null;
   payload: Record<string, unknown>;
 }
 
 export interface DeadlineStopRecord {
   task: TaskRecord;
   commandSequence: number;
+}
+
+interface TransitionObservation {
+  type: string;
+  occurredAt: Date;
+  reasonCode?: string | null;
+  message: string;
+  substate: string | null;
+  progress?: Record<string, unknown> | null;
+  source: "runtime" | "adapter";
+  adapterRevision?: number | null;
+  payload?: Record<string, unknown>;
+}
+
+interface TaskTransitionUpdate {
+  internalState?: TaskRecord["internalState"];
+  mcpStatus?: TaskRecord["mcpStatus"];
+  substate?: string | null;
+  statusMessage?: string | null;
+  result?: Record<string, unknown> | null;
+  error?: Record<string, unknown> | null;
+  adapterRevision?: number;
+  externalExecutionId?: string | null;
+  actualStartedAt?: Date | null;
+  cancelRequested?: boolean;
+  stopReason?: string | null;
+  startStopRequestedAt?: Date | null;
+  scheduleClaimOwner?: string | null;
+  scheduleClaimUntil?: Date | null;
+  nextStartAttemptAt?: Date | null;
+  invocationAttempt?: number;
+  recoveryAttempts?: number;
+  lastReconciledAt?: Date | null;
+}
+
+interface TaskTransitionRequest {
+  taskId: string;
+  expectedVersion?: number;
+  update: TaskTransitionUpdate;
+  observation: TransitionObservation;
+  outboxType: string;
+  eventKey: string;
+  outboxPayload?: Record<string, unknown>;
 }
 
 interface TaskRow {
@@ -96,6 +144,7 @@ interface TaskRow {
   result: Record<string, unknown> | null;
   error: Record<string, unknown> | null;
   adapter_revision: string;
+  observation_revision: string;
   ttl_ms: string | null;
   poll_interval_ms: number;
   created_at: Date;
@@ -238,10 +287,10 @@ export class TaskRepository {
            argument_hash, external_execution_id, internal_state, mcp_status,
            substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, actual_started_at,
-           invocation_attempt)
+           invocation_attempt, observation_revision)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
                  $16::jsonb,$17,$18,$19,$20::jsonb,$21,$22,$23,
-                 $24,$25)`,
+                 $24,$25,1)`,
         [
           input.taskId,
           input.providerId,
@@ -270,15 +319,20 @@ export class TaskRepository {
           1,
         ],
       );
-      if (input.startWindowMissedAt === undefined) {
-        const revision = Math.max(1, input.adapterRevision);
-        await insertObservation(client, input.taskId, revision, input.transition);
-        await insertOutbox(client, input.taskId, "task.created", {
-          status: input.transition.mcpStatus,
-        });
-      } else {
+      await insertObservation(client, input.taskId, 1, input.transition, {
+        source: "adapter",
+        adapterRevision: input.adapterRevision,
+      });
+      if (input.startWindowMissedAt !== undefined) {
         await persistStartWindowStop(client, input.taskId, input.startWindowMissedAt);
       }
+      await insertOutbox(
+        client,
+        input.taskId,
+        "task.created",
+        { status: input.transition.mcpStatus },
+        `${input.taskId}:created`,
+      );
       await upsertInputRequests(client, input.taskId, input.inputRequests ?? []);
       await client.query(
         "UPDATE admission_intent SET state='PUBLISHED', updated_at=clock_timestamp() WHERE task_id=$1",
@@ -307,9 +361,9 @@ export class TaskRepository {
            argument_hash, external_execution_id, internal_state, mcp_status,
            substate, status_message, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, invocation_attempt,
-           next_start_attempt_at)
+           next_start_attempt_at, observation_revision)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,NULL,'SCHEDULED','working',
-                 'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15,0,$13)`,
+                 'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15,0,$13,1)`,
         [
           input.taskId,
           input.providerId,
@@ -329,14 +383,22 @@ export class TaskRepository {
         ],
       );
       await client.query(
-        `INSERT INTO task_observation(task_id, revision, type, occurred_at, payload)
-         VALUES ($1,0,'task.scheduled',$2,'{}'::jsonb)`,
+        `INSERT INTO task_observation
+          (task_id, revision, type, occurred_at, message, substate, source, payload)
+         VALUES ($1,1,'task.scheduled',$2,'Waiting for scheduled start.','scheduled',
+                 'runtime','{}'::jsonb)`,
         [input.taskId, input.acceptedAt],
       );
-      await insertOutbox(client, input.taskId, "task.created", {
-        status: "working",
-        substate: "scheduled",
-      });
+      await insertOutbox(
+        client,
+        input.taskId,
+        "task.created",
+        {
+          status: "working",
+          substate: "scheduled",
+        },
+        `${input.taskId}:created`,
+      );
       await client.query(
         "UPDATE admission_intent SET state='PUBLISHED', updated_at=clock_timestamp() WHERE task_id=$1",
         [input.taskId],
@@ -519,56 +581,87 @@ export class TaskRepository {
   }
 
   async noteRecovery(taskId: string): Promise<void> {
-    await this.pool.query(
-      `UPDATE provider_task SET recovery_attempts=recovery_attempts+1,
-       last_reconciled_at=clock_timestamp() WHERE task_id=$1`,
-      [taskId],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
+      );
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("TASK_NOT_FOUND");
+      const attempt = row.recovery_attempts + 1;
+      const now = new Date();
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: { recoveryAttempts: attempt, lastReconciledAt: now },
+        observation: {
+          type: "task.recovery",
+          occurredAt: now,
+          reasonCode: "RECONCILED",
+          message: "Task reconciled with the Adapter.",
+          substate: row.substate,
+          source: "runtime",
+          payload: { recoveryAttempt: attempt },
+        },
+        outboxType: "task.recovery",
+        eventKey: `${taskId}:recovery:${String(attempt)}`,
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async failRecoveryNotFound(taskId: string, message: string): Promise<TaskRecord> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const updated = await client.query<TaskRow>(
-        `UPDATE provider_task SET internal_state='TERMINAL_FAILED', mcp_status='failed',
-           substate=NULL, status_message=$2, result=NULL,
-           error=$3::jsonb, adapter_revision=adapter_revision+1,
-           recovery_attempts=recovery_attempts+1, last_reconciled_at=clock_timestamp(),
-           version=version+1, updated_at=clock_timestamp()
-         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%' RETURNING *`,
-        [
-          taskId,
-          message,
-          JSON.stringify({ code: -32603, message, data: { reasonCode: "EXECUTION_NOT_FOUND" } }),
-        ],
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
       );
-      const row = updated.rows[0];
-      if (row === undefined) {
-        const existing = await client.query<TaskRow>(
-          "SELECT * FROM provider_task WHERE task_id=$1",
-          [taskId],
-        );
-        const existingRow = existing.rows[0];
-        if (existingRow === undefined) throw new Error("TASK_NOT_FOUND");
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("TASK_NOT_FOUND");
+      if (isTerminalState(row.internal_state)) {
         await client.query("COMMIT");
-        return fromRow(existingRow);
+        return fromRow(row);
       }
-      await insertObservation(client, taskId, Number(row.adapter_revision), {
-        internalState: "TERMINAL_FAILED",
-        mcpStatus: "failed",
-        substate: null,
-        statusMessage: message,
-        result: null,
-        error: row.error,
-        terminal: true,
-        observationType: "task.progress",
-      });
-      await insertOutbox(client, taskId, "task.recovery_failed", {
-        reasonCode: "EXECUTION_NOT_FOUND",
+      const error = { code: -32603, message, data: { reasonCode: "EXECUTION_NOT_FOUND" } };
+      const attempt = row.recovery_attempts + 1;
+      const now = new Date();
+      const applied = await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: "TERMINAL_FAILED",
+          mcpStatus: "failed",
+          substate: null,
+          statusMessage: message,
+          result: null,
+          error,
+          recoveryAttempts: attempt,
+          lastReconciledAt: now,
+        },
+        observation: {
+          type: "task.failed",
+          occurredAt: now,
+          reasonCode: "EXECUTION_NOT_FOUND",
+          message,
+          substate: null,
+          source: "runtime",
+          payload: { recoveryAttempt: attempt },
+        },
+        outboxType: "task.failed",
+        eventKey: `${taskId}:recovery-failed:${String(attempt)}`,
+        outboxPayload: { reasonCode: "EXECUTION_NOT_FOUND" },
       });
       await client.query("COMMIT");
-      return fromRow(row);
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -578,24 +671,55 @@ export class TaskRepository {
   }
 
   async claimDueScheduled(now: Date, ownerId: string, limit = 32): Promise<TaskRecord[]> {
-    const result = await this.pool.query<TaskRow>(
-      `WITH due AS (
-         SELECT task_id FROM provider_task
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const due = await client.query<TaskRow>(
+        `SELECT * FROM provider_task
          WHERE external_execution_id IS NULL AND internal_state='SCHEDULED'
            AND not_before <= $1 AND COALESCE(next_start_attempt_at,not_before) <= $1
            AND latest_start_at > $1
          ORDER BY COALESCE(next_start_attempt_at,not_before), task_id
-         FOR UPDATE SKIP LOCKED LIMIT $3
-       )
-       UPDATE provider_task task SET internal_state='STARTING',
-         status_message='Claimed for scheduled start.', schedule_claim_owner=$2,
-         schedule_claim_until=$1 + interval '30 seconds', version=version+1,
-         invocation_attempt=invocation_attempt+1, next_start_attempt_at=NULL,
-         updated_at=clock_timestamp()
-       FROM due WHERE task.task_id=due.task_id RETURNING task.*`,
-      [now, ownerId, limit],
-    );
-    return result.rows.map(fromRow);
+         FOR UPDATE SKIP LOCKED LIMIT $2`,
+        [now, limit],
+      );
+      const claimed: TaskRecord[] = [];
+      for (const row of due.rows) {
+        const attempt = row.invocation_attempt + 1;
+        const applied = await transitionTask(client, {
+          taskId: row.task_id,
+          expectedVersion: Number(row.version),
+          update: {
+            internalState: "STARTING",
+            statusMessage: "Claimed for scheduled start.",
+            scheduleClaimOwner: ownerId,
+            scheduleClaimUntil: new Date(now.getTime() + 30_000),
+            invocationAttempt: attempt,
+            nextStartAttemptAt: null,
+          },
+          observation: {
+            type: "task.start_attempt",
+            occurredAt: now,
+            reasonCode: "START_ATTEMPT_CLAIMED",
+            message: "Claimed for scheduled start.",
+            substate: row.substate,
+            source: "runtime",
+            payload: { invocationAttempt: attempt },
+          },
+          outboxType: "task.start_attempt",
+          eventKey: `${row.task_id}:start-attempt:${String(attempt)}`,
+          outboxPayload: { invocationAttempt: attempt },
+        });
+        claimed.push(fromRow(applied.row));
+      }
+      await client.query("COMMIT");
+      return claimed;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async completeDueStartWindowMisses(now: Date, limit = 32): Promise<number> {
@@ -610,19 +734,31 @@ export class TaskRepository {
         [now, limit],
       );
       for (const row of due.rows) {
-        await client.query(
-          `UPDATE provider_task SET internal_state='TERMINAL_COMPLETED', mcp_status='completed',
-           substate=NULL, status_message='Start window was missed before execution began.',
-           result=$2::jsonb, schedule_claim_owner=NULL, schedule_claim_until=NULL,
-           next_start_attempt_at=NULL, version=version+1, updated_at=$3
-           WHERE task_id=$1`,
-          [row.task_id, JSON.stringify(startWindowMissedResult(now)), now],
-        );
-        const revision = await nextObservationRevision(client, row.task_id);
-        await insertObservation(client, row.task_id, revision, startWindowMissedTransition(now));
-        await insertOutbox(client, row.task_id, "task.start_window_missed", {
-          reasonCode: "START_WINDOW_MISSED",
-          safeStopRequired: false,
+        const transition = startWindowMissedTransition(now);
+        await transitionTask(client, {
+          taskId: row.task_id,
+          update: {
+            internalState: transition.internalState,
+            mcpStatus: transition.mcpStatus,
+            substate: transition.substate,
+            statusMessage: transition.statusMessage,
+            result: transition.result,
+            error: null,
+            scheduleClaimOwner: null,
+            scheduleClaimUntil: null,
+            nextStartAttemptAt: null,
+          },
+          observation: {
+            type: "task.completed",
+            occurredAt: now,
+            reasonCode: "START_WINDOW_MISSED",
+            message: transition.statusMessage,
+            substate: null,
+            source: "runtime",
+          },
+          outboxType: "task.completed",
+          eventKey: `${row.task_id}:start-window-missed`,
+          outboxPayload: { reasonCode: "START_WINDOW_MISSED", safeStopRequired: false },
         });
       }
       await client.query("COMMIT");
@@ -636,22 +772,49 @@ export class TaskRepository {
   }
 
   async claimExpiredScheduledStarts(now: Date, ownerId: string, limit = 32): Promise<TaskRecord[]> {
-    const result = await this.pool.query<TaskRow>(
-      `WITH due AS (
-         SELECT task_id FROM provider_task
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const due = await client.query<TaskRow>(
+        `SELECT * FROM provider_task
          WHERE external_execution_id IS NULL AND internal_state='STARTING'
            AND schedule_claim_until <= $1
-         ORDER BY schedule_claim_until, task_id
-         FOR UPDATE SKIP LOCKED LIMIT $3
-       )
-       UPDATE provider_task task SET schedule_claim_owner=$2,
-         schedule_claim_until=$1 + interval '30 seconds', version=version+1,
-         status_message='Reconciling an uncertain scheduled start.',
-         updated_at=clock_timestamp()
-       FROM due WHERE task.task_id=due.task_id RETURNING task.*`,
-      [now, ownerId, limit],
-    );
-    return result.rows.map(fromRow);
+         ORDER BY schedule_claim_until, task_id FOR UPDATE SKIP LOCKED LIMIT $2`,
+        [now, limit],
+      );
+      const claimed: TaskRecord[] = [];
+      for (const row of due.rows) {
+        const previousLease = row.schedule_claim_until?.toISOString() ?? "none";
+        const applied = await transitionTask(client, {
+          taskId: row.task_id,
+          expectedVersion: Number(row.version),
+          update: {
+            scheduleClaimOwner: ownerId,
+            scheduleClaimUntil: new Date(now.getTime() + 30_000),
+            statusMessage: "Reconciling an uncertain scheduled start.",
+          },
+          observation: {
+            type: "task.recovery",
+            occurredAt: now,
+            reasonCode: "START_RECONCILE_CLAIMED",
+            message: "Reconciling an uncertain scheduled start.",
+            substate: row.substate,
+            source: "runtime",
+            payload: { invocationAttempt: row.invocation_attempt },
+          },
+          outboxType: "task.recovery",
+          eventKey: `${row.task_id}:start-reconcile:${String(row.invocation_attempt)}:${previousLease}`,
+        });
+        claimed.push(fromRow(applied.row));
+      }
+      await client.query("COMMIT");
+      return claimed;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async acceptScheduled(
@@ -673,35 +836,43 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const updated = await client.query<TaskRow>(
-        `UPDATE provider_task SET external_execution_id=$2, internal_state=$3,
-           mcp_status=$4, substate=$5, status_message=$6, result=$7::jsonb,
-           error=$8::jsonb, adapter_revision=$9,
-           actual_started_at=COALESCE(actual_started_at,$10),
-           schedule_claim_owner=NULL, schedule_claim_until=NULL, version=version+1,
-           updated_at=clock_timestamp()
-         WHERE task_id=$1 AND internal_state='STARTING' AND schedule_claim_owner=$11
-         RETURNING *`,
-        [
-          taskId,
-          externalExecutionId,
-          transition.internalState,
-          transition.mcpStatus,
-          transition.substate,
-          transition.statusMessage,
-          jsonOrNull(transition.result),
-          jsonOrNull(transition.error),
-          adapterRevision,
-          actualStartedAt ?? null,
-          claimOwner,
-        ],
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1 AND internal_state='STARTING'
+         AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
       );
-      const row = updated.rows[0];
+      const row = locked.rows[0];
       if (row === undefined) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
-      if (startWindowMissedAt === undefined) {
-        await insertObservation(client, taskId, Math.max(1, adapterRevision), transition);
-        await insertOutbox(client, taskId, "task.started", { status: transition.mcpStatus });
-      } else {
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          externalExecutionId,
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: transition.substate,
+          statusMessage: transition.statusMessage,
+          result: transition.result,
+          error: transition.error,
+          adapterRevision,
+          actualStartedAt: row.actual_started_at ?? actualStartedAt ?? null,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: null,
+        },
+        observation: {
+          type: stableObservationType(transition),
+          occurredAt: new Date(),
+          reasonCode: reasonCodeFromTransition(transition),
+          message: transition.statusMessage,
+          substate: transition.substate,
+          source: "adapter",
+          adapterRevision,
+        },
+        outboxType: stableObservationType(transition),
+        eventKey: `${taskId}:adapter:${String(adapterRevision)}`,
+        outboxPayload: { invocationAttempt: row.invocation_attempt },
+      });
+      if (startWindowMissedAt !== undefined) {
         await persistStartWindowStop(client, taskId, startWindowMissedAt);
       }
       await upsertInputRequests(client, taskId, inputRequests);
@@ -728,15 +899,50 @@ export class TaskRepository {
     nextAttemptAt: Date,
     message: string,
   ): Promise<void> {
-    const result = await this.pool.query(
-      `UPDATE provider_task SET internal_state='SCHEDULED', substate='scheduled',
-       status_message=$2, schedule_claim_owner=NULL, schedule_claim_until=NULL,
-       next_start_attempt_at=$4,
-       version=version+1, updated_at=clock_timestamp()
-       WHERE task_id=$1 AND internal_state='STARTING' AND schedule_claim_owner=$3`,
-      [taskId, message, claimOwner, nextAttemptAt],
-    );
-    if (result.rowCount !== 1) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1 AND internal_state='STARTING'
+         AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
+      );
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: "SCHEDULED",
+          substate: "scheduled",
+          statusMessage: message,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: null,
+          nextStartAttemptAt: nextAttemptAt,
+        },
+        observation: {
+          type: "task.start_retry",
+          occurredAt: new Date(),
+          reasonCode: "START_RETRY_SCHEDULED",
+          message,
+          substate: "scheduled",
+          source: "runtime",
+          payload: {
+            invocationAttempt: row.invocation_attempt,
+            nextStartAttemptAt: nextAttemptAt.toISOString(),
+          },
+        },
+        outboxType: "task.start_retry",
+        eventKey: `${taskId}:start-retry:${String(row.invocation_attempt)}`,
+        outboxPayload: { nextStartAttemptAt: nextAttemptAt.toISOString() },
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async markScheduleResponseUncertain(
@@ -745,13 +951,46 @@ export class TaskRepository {
     reconcileAt: Date,
     message: string,
   ): Promise<void> {
-    const result = await this.pool.query(
-      `UPDATE provider_task SET status_message=$2, schedule_claim_owner=NULL,
-       schedule_claim_until=$4, version=version+1, updated_at=clock_timestamp()
-       WHERE task_id=$1 AND internal_state='STARTING' AND schedule_claim_owner=$3`,
-      [taskId, message, claimOwner, reconcileAt],
-    );
-    if (result.rowCount !== 1) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1 AND internal_state='STARTING'
+         AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
+      );
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          statusMessage: message,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: reconcileAt,
+        },
+        observation: {
+          type: "task.start_uncertain",
+          occurredAt: new Date(),
+          reasonCode: "START_RESPONSE_UNCERTAIN",
+          message,
+          substate: row.substate,
+          source: "runtime",
+          payload: {
+            invocationAttempt: row.invocation_attempt,
+            reconcileAt: reconcileAt.toISOString(),
+          },
+        },
+        outboxType: "task.start_uncertain",
+        eventKey: `${taskId}:start-uncertain:${String(row.invocation_attempt)}:${reconcileAt.toISOString()}`,
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async deferScheduleReconcile(
@@ -771,25 +1010,42 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const result = await client.query<TaskRow>(
-        `UPDATE provider_task SET internal_state='TERMINAL_COMPLETED', mcp_status='completed',
-         substate=NULL, status_message='Start window was missed before execution began.',
-         result=$2::jsonb, schedule_claim_owner=NULL, schedule_claim_until=NULL,
-         next_start_attempt_at=NULL, version=version+1, updated_at=$3
-         WHERE task_id=$1 AND external_execution_id IS NULL
-           AND internal_state='STARTING' AND schedule_claim_owner=$4 RETURNING *`,
-        [taskId, JSON.stringify(startWindowMissedResult(completedAt)), completedAt, claimOwner],
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1 AND external_execution_id IS NULL
+         AND internal_state='STARTING' AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
       );
-      const row = result.rows[0];
+      const row = locked.rows[0];
       if (row === undefined) throw new Error("SCHEDULED_TASK_NOT_COMPLETED");
-      const revision = await nextObservationRevision(client, taskId);
-      await insertObservation(client, taskId, revision, startWindowMissedTransition(completedAt));
-      await insertOutbox(client, taskId, "task.start_window_missed", {
-        reasonCode: "START_WINDOW_MISSED",
-        safeStopRequired: false,
+      const transition = startWindowMissedTransition(completedAt);
+      const applied = await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: null,
+          statusMessage: transition.statusMessage,
+          result: transition.result,
+          error: null,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: null,
+          nextStartAttemptAt: null,
+        },
+        observation: {
+          type: "task.completed",
+          occurredAt: completedAt,
+          reasonCode: "START_WINDOW_MISSED",
+          message: transition.statusMessage,
+          substate: null,
+          source: "runtime",
+        },
+        outboxType: "task.completed",
+        eventKey: `${taskId}:start-window-missed`,
+        outboxPayload: { reasonCode: "START_WINDOW_MISSED", safeStopRequired: false },
       });
       await client.query("COMMIT");
-      return fromRow(row);
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -819,21 +1075,41 @@ export class TaskRepository {
         terminal: true,
         observationType: "task.admission_rejected",
       };
-      const result = await client.query<TaskRow>(
-        `UPDATE provider_task SET internal_state='TERMINAL_COMPLETED', mcp_status='completed',
-         substate=NULL, status_message=$3, result=$2::jsonb,
-         schedule_claim_owner=NULL, schedule_claim_until=NULL, next_start_attempt_at=NULL,
-         version=version+1, updated_at=$4
-         WHERE task_id=$1 AND internal_state='STARTING' AND schedule_claim_owner=$5 RETURNING *`,
-        [taskId, JSON.stringify(transition.result), message, completedAt, claimOwner],
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1 AND internal_state='STARTING'
+         AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
       );
-      const row = result.rows[0];
+      const row = locked.rows[0];
       if (row === undefined) throw new Error("SCHEDULED_REJECTION_NOT_COMPLETED");
-      const revision = await nextObservationRevision(client, taskId);
-      await insertObservation(client, taskId, revision, transition);
-      await insertOutbox(client, taskId, "task.admission_rejected", { reasonCode, retryable });
+      const applied = await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: null,
+          statusMessage: message,
+          result: transition.result,
+          error: null,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: null,
+          nextStartAttemptAt: null,
+        },
+        observation: {
+          type: "task.completed",
+          occurredAt: completedAt,
+          reasonCode,
+          message,
+          substate: null,
+          source: "runtime",
+        },
+        outboxType: "task.completed",
+        eventKey: `${taskId}:admission-rejected:${String(row.invocation_attempt)}`,
+        outboxPayload: { reasonCode, retryable, outcome: "admission_rejected" },
+      });
       await client.query("COMMIT");
-      return fromRow(row);
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -929,18 +1205,16 @@ export class TaskRepository {
           [row.task_id],
         );
         const activeSequence = active.rows[0]?.command_sequence;
-        const updated = await client.query<TaskRow>(
-          `UPDATE provider_task SET
-             next_command_sequence=next_command_sequence + CASE WHEN $2::bigint IS NULL THEN 1 ELSE 0 END,
-             internal_state='STOPPING', mcp_status='working', substate='stopping',
-             status_message='Deadline reached; safe stop requested.', cancel_requested=true,
-             stop_reason='DEADLINE_REACHED', version=version+1, updated_at=clock_timestamp()
-           WHERE task_id=$1 RETURNING *`,
-          [row.task_id, activeSequence ?? null],
-        );
-        const taskRow = updated.rows[0];
-        if (taskRow === undefined) throw new Error("DEADLINE_CLAIM_LOST");
-        const commandSequence = Number(activeSequence ?? taskRow.next_command_sequence);
+        let commandSequence = Number(activeSequence);
+        if (activeSequence === undefined) {
+          const sequence = await client.query<{ next_command_sequence: string }>(
+            `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
+             WHERE task_id=$1 RETURNING next_command_sequence`,
+            [row.task_id],
+          );
+          commandSequence = Number(sequence.rows[0]?.next_command_sequence);
+        }
+        if (!Number.isSafeInteger(commandSequence)) throw new Error("DEADLINE_CLAIM_LOST");
         if (activeSequence === undefined) {
           await client.query(
             `INSERT INTO task_command
@@ -949,7 +1223,7 @@ export class TaskRepository {
                previous_substate, previous_status_message, next_attempt_at)
              VALUES ($1,$2,'CANCEL',$3,'PENDING',$4::jsonb,'DEADLINE_REACHED',100,$5,$6,$7,$8,$9)`,
             [
-              taskRow.task_id,
+              row.task_id,
               commandSequence,
               commandHash("DEADLINE_REACHED"),
               JSON.stringify({ reason: "DEADLINE_REACHED" }),
@@ -965,13 +1239,34 @@ export class TaskRepository {
             `UPDATE task_command SET stop_reason='DEADLINE_REACHED', priority=100,
                payload=$3::jsonb, updated_at=clock_timestamp()
              WHERE task_id=$1 AND command_sequence=$2`,
-            [taskRow.task_id, commandSequence, JSON.stringify({ reason: "DEADLINE_REACHED" })],
+            [row.task_id, commandSequence, JSON.stringify({ reason: "DEADLINE_REACHED" })],
           );
         }
-        await insertOutbox(client, taskRow.task_id, "task.cancel_requested", {
-          reason: "DEADLINE_REACHED",
+        const applied = await transitionTask(client, {
+          taskId: row.task_id,
+          expectedVersion: Number(row.version),
+          update: {
+            internalState: "STOPPING",
+            mcpStatus: "working",
+            substate: "stopping",
+            statusMessage: "Deadline reached; safe stop requested.",
+            cancelRequested: true,
+            stopReason: "DEADLINE_REACHED",
+          },
+          observation: {
+            type: "task.deadline_stop_requested",
+            occurredAt: now,
+            reasonCode: "DEADLINE_REACHED",
+            message: "Deadline reached; safe stop requested.",
+            substate: "stopping",
+            source: "runtime",
+            payload: { commandSequence },
+          },
+          outboxType: "task.deadline_stop_requested",
+          eventKey: `${row.task_id}:command:${String(commandSequence)}:deadline-stop`,
+          outboxPayload: { reasonCode: "DEADLINE_REACHED", commandSequence },
         });
-        claimed.push({ task: fromRow(taskRow), commandSequence });
+        claimed.push({ task: fromRow(applied.row), commandSequence });
       }
       await client.query("COMMIT");
       return claimed;
@@ -1012,9 +1307,15 @@ export class TaskRepository {
       type: string;
       occurred_at: Date;
       reason_code: string | null;
+      message: string | null;
+      substate: string | null;
+      progress: Record<string, unknown> | null;
+      source: "runtime" | "adapter";
+      adapter_revision: string | null;
       payload: Record<string, unknown>;
     }>(
-      `SELECT revision, type, occurred_at, reason_code, payload
+      `SELECT revision, type, occurred_at, reason_code, message, substate, progress,
+              source, adapter_revision, payload
        FROM task_observation WHERE task_id=$1 ORDER BY revision`,
       [taskId],
     );
@@ -1023,6 +1324,11 @@ export class TaskRepository {
       type: row.type,
       occurredAt: row.occurred_at,
       reasonCode: row.reason_code,
+      message: row.message,
+      substate: row.substate,
+      progress: row.progress,
+      source: row.source,
+      adapterRevision: row.adapter_revision === null ? null : Number(row.adapter_revision),
       payload: row.payload,
     }));
   }
@@ -1051,13 +1357,10 @@ export class TaskRepository {
         await client.query("COMMIT");
         return { sequence: Number(existing.rows[0].command_sequence), duplicate: true };
       }
+      if (isTerminalState(previous.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
       const updated = await client.query<{ next_command_sequence: string }>(
-        `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
-           cancel_requested=true, stop_reason='USER_REQUESTED', internal_state='STOPPING',
-           mcp_status='working', substate='stopping', status_message='Cancellation requested.',
-           version=version+1, updated_at=clock_timestamp()
-         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
-         RETURNING next_command_sequence, internal_state, mcp_status, substate, status_message`,
+        `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
+         WHERE task_id=$1 RETURNING next_command_sequence`,
         [taskId],
       );
       const sequence = updated.rows[0]?.next_command_sequence;
@@ -1079,7 +1382,29 @@ export class TaskRepository {
           previous.status_message,
         ],
       );
-      await insertOutbox(client, taskId, "task.cancel_requested", {});
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(previous.version),
+        update: {
+          cancelRequested: true,
+          stopReason: "USER_REQUESTED",
+          internalState: "STOPPING",
+          mcpStatus: "working",
+          substate: "stopping",
+          statusMessage: "Cancellation requested.",
+        },
+        observation: {
+          type: "task.cancel_requested",
+          occurredAt: new Date(),
+          reasonCode: "USER_REQUESTED",
+          message: "Cancellation requested.",
+          substate: "stopping",
+          source: "runtime",
+        },
+        outboxType: "task.cancel_requested",
+        eventKey: `${taskId}:command:${sequence}:requested`,
+        outboxPayload: { commandSequence: Number(sequence), reasonCode: "USER_REQUESTED" },
+      });
       await client.query("COMMIT");
       return { sequence: Number(sequence), duplicate: false };
     } catch (error) {
@@ -1099,6 +1424,13 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
+      );
+      const task = locked.rows[0];
+      if (task === undefined) throw new Error("TASK_NOT_FOUND");
+      if (isTerminalState(task.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
       const existing = await client.query<{ command_sequence: string }>(
         `SELECT command_sequence FROM task_command
          WHERE task_id=$1 AND command_type=$2 AND request_hash=$3`,
@@ -1109,10 +1441,8 @@ export class TaskRepository {
         return { sequence: Number(existing.rows[0].command_sequence), duplicate: true };
       }
       const updated = await client.query<{ next_command_sequence: string }>(
-        `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
-           version=version+1, updated_at=clock_timestamp()
-         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
-         RETURNING next_command_sequence`,
+        `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
+         WHERE task_id=$1 RETURNING next_command_sequence`,
         [taskId],
       );
       const sequence = updated.rows[0]?.next_command_sequence;
@@ -1123,6 +1453,23 @@ export class TaskRepository {
          VALUES ($1,$2,$3,$4,'PENDING',$5::jsonb)`,
         [taskId, sequence, commandType, requestHash, JSON.stringify(payload)],
       );
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(task.version),
+        update: {},
+        observation: {
+          type: "task.command_requested",
+          occurredAt: new Date(),
+          reasonCode: commandType,
+          message: `${commandType.toLowerCase()} command requested.`,
+          substate: task.substate,
+          source: "runtime",
+          payload: { commandType, commandSequence: Number(sequence) },
+        },
+        outboxType: "task.command_requested",
+        eventKey: `${taskId}:command:${sequence}:requested`,
+        outboxPayload: { commandType, commandSequence: Number(sequence) },
+      });
       await client.query("COMMIT");
       return { sequence: Number(sequence), duplicate: false };
     } catch (error) {
@@ -1185,32 +1532,33 @@ export class TaskRepository {
         await client.query("COMMIT");
         return fromRow(row);
       }
-      const updated = await client.query<TaskRow>(
-        `UPDATE provider_task SET internal_state=$2, mcp_status=$3, substate=$4,
-           status_message=$5, result=$6::jsonb, error=$7::jsonb,
-           adapter_revision=GREATEST(adapter_revision,$8), cancel_requested=false,
-           stop_reason=NULL, version=version+1, updated_at=clock_timestamp()
-         WHERE task_id=$1 RETURNING *`,
-        [
-          command.taskId,
-          transition.internalState,
-          transition.mcpStatus,
-          transition.substate,
-          transition.statusMessage,
-          jsonOrNull(transition.result),
-          jsonOrNull(transition.error),
+      const applied = await transitionTask(client, {
+        taskId: command.taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: transition.substate,
+          statusMessage: transition.statusMessage,
+          result: transition.result,
+          error: transition.error,
+          ...(adapterRevision > Number(row.adapter_revision) ? { adapterRevision } : {}),
+          cancelRequested: false,
+          stopReason: null,
+        },
+        observation: {
+          type: "task.cancel_rejected",
+          occurredAt: new Date(),
+          reasonCode: typeof ack.reasonCode === "string" ? ack.reasonCode : "CANCEL_REJECTED",
+          message: transition.statusMessage,
+          substate: transition.substate,
+          source: "runtime",
           adapterRevision,
-        ],
-      );
-      const updatedRow = updated.rows[0];
-      if (updatedRow === undefined) throw new Error("TASK_UPDATE_NOT_RETURNED");
-      const revision = await nextObservationRevision(client, command.taskId);
-      await insertObservation(client, command.taskId, revision, {
-        ...transition,
-        observationType: "task.cancel_rejected",
-      });
-      await insertOutbox(client, command.taskId, "task.cancel_rejected", {
-        commandSequence: command.commandSequence,
+          payload: { commandSequence: command.commandSequence },
+        },
+        outboxType: "task.cancel_rejected",
+        eventKey: `${command.taskId}:command:${String(command.commandSequence)}:rejected`,
+        outboxPayload: { commandSequence: command.commandSequence },
       });
       await client.query(
         `UPDATE task_command SET state='REJECTED', adapter_ack=$4::jsonb,
@@ -1227,7 +1575,7 @@ export class TaskRepository {
         ],
       );
       await client.query("COMMIT");
-      return fromRow(updatedRow);
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -1243,29 +1591,13 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const updated = await client.query<TaskRow>(
-        `UPDATE provider_task SET internal_state='TERMINAL_FAILED', mcp_status='failed',
-           substate=NULL, status_message=$2, result=NULL, error=$3::jsonb,
-           version=version+1, updated_at=clock_timestamp()
-         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%' RETURNING *`,
-        [
-          command.taskId,
-          message,
-          JSON.stringify({
-            code: -32603,
-            message,
-            data: { reasonCode: "SAFE_STOP_UNCONFIRMED" },
-          }),
-        ],
+      const locked = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
       );
-      const row = updated.rows[0];
-      if (row === undefined) {
-        const existing = await client.query<TaskRow>(
-          "SELECT * FROM provider_task WHERE task_id=$1",
-          [command.taskId],
-        );
-        const existingRow = existing.rows[0];
-        if (existingRow === undefined) throw new Error("TASK_NOT_FOUND");
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("TASK_NOT_FOUND");
+      if (isTerminalState(row.internal_state)) {
         await client.query(
           `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
              last_error_code='TASK_TERMINAL', last_error_message=$4,
@@ -1274,23 +1606,40 @@ export class TaskRepository {
           [command.taskId, command.commandSequence, command.claimOwner, message],
         );
         await client.query("COMMIT");
-        return fromRow(existingRow);
+        return fromRow(row);
       }
-      const revision = await nextObservationRevision(client, command.taskId);
-      await insertObservation(client, command.taskId, revision, {
-        internalState: "TERMINAL_FAILED",
-        mcpStatus: "failed",
-        substate: null,
-        statusMessage: message,
-        result: null,
-        error: row.error,
-        terminal: true,
-        observationType: "task.failed",
-      });
-      await insertOutbox(client, command.taskId, "task.safe_stop_unconfirmed", {
-        reasonCode: "SAFE_STOP_UNCONFIRMED",
-        stopReason: command.stopReason,
-        severity: "critical",
+      const error = {
+        code: -32603,
+        message,
+        data: { reasonCode: "SAFE_STOP_UNCONFIRMED" },
+      };
+      const applied = await transitionTask(client, {
+        taskId: command.taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: "TERMINAL_FAILED",
+          mcpStatus: "failed",
+          substate: null,
+          statusMessage: message,
+          result: null,
+          error,
+        },
+        observation: {
+          type: "task.failed",
+          occurredAt: new Date(),
+          reasonCode: "SAFE_STOP_UNCONFIRMED",
+          message,
+          substate: null,
+          source: "runtime",
+          payload: { stopReason: command.stopReason, severity: "critical" },
+        },
+        outboxType: "task.failed",
+        eventKey: `${command.taskId}:command:${String(command.commandSequence)}:safe-stop-failed`,
+        outboxPayload: {
+          reasonCode: "SAFE_STOP_UNCONFIRMED",
+          stopReason: command.stopReason,
+          severity: "critical",
+        },
       });
       await client.query(
         `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
@@ -1300,7 +1649,7 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner, message],
       );
       await client.query("COMMIT");
-      return fromRow(row);
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -1325,8 +1674,32 @@ export class TaskRepository {
         );
         if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
       }
-      await insertOutbox(client, taskId, "task.input_answered", {
-        keys: answers.map((answer) => answer.key),
+      const task = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
+      );
+      const row = task.rows[0];
+      if (row === undefined) throw new Error("TASK_NOT_FOUND");
+      const keys = answers.map((answer) => answer.key).sort();
+      await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {},
+        observation: {
+          type: "task.input_answered",
+          occurredAt: new Date(),
+          reasonCode: "INPUT_ANSWERED",
+          message: "Task input was answered.",
+          substate: row.substate,
+          source: "runtime",
+          payload: { keys },
+        },
+        outboxType: "task.input_answered",
+        eventKey: `${taskId}:input-answered:${answers
+          .map((answer) => answer.hash)
+          .sort()
+          .join(":")}`,
+        outboxPayload: { keys },
       });
       await client.query("COMMIT");
     } catch (error) {
@@ -1362,30 +1735,34 @@ export class TaskRepository {
         await client.query("COMMIT");
         return existing;
       }
-      const updated = await client.query<TaskRow>(
-        `UPDATE provider_task SET internal_state=$2, mcp_status=$3, substate=$4,
-           status_message=$5, result=$6::jsonb, error=$7::jsonb, adapter_revision=$8,
-           actual_started_at=CASE WHEN $10 THEN COALESCE(actual_started_at,clock_timestamp())
-                                  ELSE actual_started_at END,
-           updated_at=clock_timestamp(), version=version+1
-         WHERE task_id=$1 AND version=$9 RETURNING *`,
-        [
-          taskId,
-          transition.internalState,
-          transition.mcpStatus,
-          transition.substate,
-          transition.statusMessage,
-          jsonOrNull(transition.result),
-          jsonOrNull(transition.error),
+      const applied = await transitionTask(client, {
+        taskId,
+        expectedVersion: existing.version,
+        update: {
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: transition.substate,
+          statusMessage: transition.statusMessage,
+          result: transition.result,
+          error: transition.error,
           adapterRevision,
-          existing.version,
-          transitionHasStarted(transition),
-        ],
-      );
-      if (updated.rowCount !== 1) throw new Error("TASK_VERSION_CONFLICT");
-      await insertObservation(client, taskId, adapterRevision, transition);
+          ...(transitionHasStarted(transition) && existing.actualStartedAt === null
+            ? { actualStartedAt: new Date() }
+            : {}),
+        },
+        observation: {
+          type: stableObservationType(transition),
+          occurredAt: new Date(),
+          reasonCode: reasonCodeFromTransition(transition),
+          message: transition.statusMessage,
+          substate: transition.substate,
+          source: "adapter",
+          adapterRevision,
+        },
+        outboxType: stableObservationType(transition),
+        eventKey: `${taskId}:adapter:${String(adapterRevision)}`,
+      });
       await upsertInputRequests(client, taskId, inputRequests);
-      await insertOutbox(client, taskId, "task.updated", { status: transition.mcpStatus });
       if (transition.terminal) {
         await client.query(
           `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
@@ -1395,9 +1772,7 @@ export class TaskRepository {
         );
       }
       await client.query("COMMIT");
-      const updatedRow = updated.rows[0];
-      if (updatedRow === undefined) throw new Error("TASK_UPDATE_NOT_RETURNED");
-      return fromRow(updatedRow);
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -1405,6 +1780,121 @@ export class TaskRepository {
       client.release();
     }
   }
+}
+
+async function transitionTask(
+  client: PoolClient,
+  request: TaskTransitionRequest,
+): Promise<{ row: TaskRow; applied: boolean }> {
+  const locked = await client.query<TaskRow>(
+    "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+    [request.taskId],
+  );
+  const existing = locked.rows[0];
+  if (existing === undefined) throw new Error("TASK_NOT_FOUND");
+  const duplicate = await client.query("SELECT event_id FROM outbox_event WHERE event_key=$1", [
+    request.eventKey,
+  ]);
+  if ((duplicate.rowCount ?? 0) > 0) return { row: existing, applied: false };
+  if (isTerminalState(existing.internal_state)) return { row: existing, applied: false };
+  if (
+    request.expectedVersion !== undefined &&
+    Number(existing.version) !== request.expectedVersion
+  ) {
+    throw new Error("TASK_VERSION_CONFLICT");
+  }
+  if (
+    request.update.adapterRevision !== undefined &&
+    request.update.adapterRevision <= Number(existing.adapter_revision)
+  ) {
+    return { row: existing, applied: false };
+  }
+
+  const values: unknown[] = [request.taskId, request.observation.occurredAt];
+  const assignments = [
+    "observation_revision=observation_revision+1",
+    "version=version+1",
+    "updated_at=$2",
+  ];
+  const add = (column: string, value: unknown, json = false): void => {
+    values.push(json && value !== null ? JSON.stringify(value) : value);
+    assignments.push(`${column}=$${String(values.length)}${json ? "::jsonb" : ""}`);
+  };
+  const update = request.update;
+  if (update.internalState !== undefined) add("internal_state", update.internalState);
+  if (update.mcpStatus !== undefined) add("mcp_status", update.mcpStatus);
+  if (update.substate !== undefined) add("substate", update.substate);
+  if (update.statusMessage !== undefined) add("status_message", update.statusMessage);
+  if (update.result !== undefined) add("result", update.result, true);
+  if (update.error !== undefined) add("error", update.error, true);
+  if (update.adapterRevision !== undefined) add("adapter_revision", update.adapterRevision);
+  if (update.externalExecutionId !== undefined) {
+    add("external_execution_id", update.externalExecutionId);
+  }
+  if (update.actualStartedAt !== undefined) add("actual_started_at", update.actualStartedAt);
+  if (update.cancelRequested !== undefined) add("cancel_requested", update.cancelRequested);
+  if (update.stopReason !== undefined) add("stop_reason", update.stopReason);
+  if (update.startStopRequestedAt !== undefined) {
+    add("start_stop_requested_at", update.startStopRequestedAt);
+  }
+  if (update.scheduleClaimOwner !== undefined)
+    add("schedule_claim_owner", update.scheduleClaimOwner);
+  if (update.scheduleClaimUntil !== undefined)
+    add("schedule_claim_until", update.scheduleClaimUntil);
+  if (update.nextStartAttemptAt !== undefined) {
+    add("next_start_attempt_at", update.nextStartAttemptAt);
+  }
+  if (update.invocationAttempt !== undefined) add("invocation_attempt", update.invocationAttempt);
+  if (update.recoveryAttempts !== undefined) add("recovery_attempts", update.recoveryAttempts);
+  if (update.lastReconciledAt !== undefined) add("last_reconciled_at", update.lastReconciledAt);
+
+  const updated = await client.query<TaskRow>(
+    `UPDATE provider_task SET ${assignments.join(", ")} WHERE task_id=$1 RETURNING *`,
+    values,
+  );
+  const row = updated.rows[0];
+  if (row === undefined) throw new Error("TASK_TRANSITION_NOT_RETURNED");
+  const revision = Number(row.observation_revision);
+  await client.query(
+    `INSERT INTO task_observation
+      (task_id, revision, type, reason_code, occurred_at, message, substate,
+       progress, source, adapter_revision, payload)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11::jsonb)`,
+    [
+      request.taskId,
+      revision,
+      request.observation.type,
+      request.observation.reasonCode ?? null,
+      request.observation.occurredAt,
+      request.observation.message,
+      request.observation.substate,
+      jsonOrNull(request.observation.progress ?? null),
+      request.observation.source,
+      request.observation.adapterRevision ?? null,
+      JSON.stringify(request.observation.payload ?? {}),
+    ],
+  );
+  await client.query(
+    `INSERT INTO outbox_event(event_id, event_key, aggregate_id, event_type, payload)
+     VALUES ($1,$2,$3,$4,$5::jsonb)`,
+    [
+      randomUUID(),
+      request.eventKey,
+      request.taskId,
+      request.outboxType,
+      JSON.stringify({
+        taskId: request.taskId,
+        internalState: row.internal_state,
+        status: row.mcp_status,
+        substate: row.substate,
+        statusMessage: row.status_message,
+        observationRevision: revision,
+        adapterRevision: Number(row.adapter_revision),
+        ...(request.outboxPayload ?? {}),
+      }),
+    ],
+  );
+  return { row, applied: true };
 }
 
 async function persistStartWindowStop(
@@ -1432,13 +1922,9 @@ async function persistStartWindowStop(
   let commandSequence: number;
   if (existing === undefined) {
     const updated = await client.query<{ next_command_sequence: string }>(
-      `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
-       internal_state='STOPPING', mcp_status='working', substate='stopping',
-       status_message='Start window missed; safe stop requested.', cancel_requested=true,
-       stop_reason='START_WINDOW_MISSED', start_stop_requested_at=$2,
-       schedule_claim_owner=NULL, schedule_claim_until=NULL, next_start_attempt_at=NULL,
-       version=version+1, updated_at=$2 WHERE task_id=$1 RETURNING next_command_sequence`,
-      [taskId, requestedAt],
+      `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
+       WHERE task_id=$1 RETURNING next_command_sequence`,
+      [taskId],
     );
     commandSequence = Number(updated.rows[0]?.next_command_sequence);
     if (!Number.isSafeInteger(commandSequence))
@@ -1470,28 +1956,37 @@ async function persistStartWindowStop(
          payload=$3::jsonb, updated_at=$4 WHERE task_id=$1 AND command_sequence=$2`,
         [taskId, commandSequence, JSON.stringify({ reason: "START_WINDOW_MISSED" }), requestedAt],
       );
-      await client.query(
-        `UPDATE provider_task SET stop_reason='START_WINDOW_MISSED',
-         start_stop_requested_at=$2, status_message='Start window missed; safe stop requested.',
-         version=version+1, updated_at=$2 WHERE task_id=$1`,
-        [taskId, requestedAt],
-      );
     }
   }
-  const revision = await nextObservationRevision(client, taskId);
-  await insertObservation(client, taskId, revision, {
-    internalState: "STOPPING",
-    mcpStatus: "working",
-    substate: "stopping",
-    statusMessage: "Start window missed; safe stop requested.",
-    result: null,
-    error: null,
-    terminal: false,
-    observationType: "task.start_window_violation",
-  });
-  await insertOutbox(client, taskId, "task.start_window_stop_requested", {
-    reasonCode: "START_WINDOW_MISSED",
-    commandSequence,
+  const effectiveReason =
+    existing?.stop_reason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "START_WINDOW_MISSED";
+  await transitionTask(client, {
+    taskId,
+    expectedVersion: Number(previous.version),
+    update: {
+      internalState: "STOPPING",
+      mcpStatus: "working",
+      substate: "stopping",
+      statusMessage: "Start window missed; safe stop requested.",
+      cancelRequested: true,
+      stopReason: effectiveReason,
+      ...(effectiveReason === "START_WINDOW_MISSED" ? { startStopRequestedAt: requestedAt } : {}),
+      scheduleClaimOwner: null,
+      scheduleClaimUntil: null,
+      nextStartAttemptAt: null,
+    },
+    observation: {
+      type: "task.start_window_violation",
+      occurredAt: requestedAt,
+      reasonCode: "START_WINDOW_MISSED",
+      message: "Start window missed; safe stop requested.",
+      substate: "stopping",
+      source: "runtime",
+      payload: { commandSequence },
+    },
+    outboxType: "task.start_window_stop_requested",
+    eventKey: `${taskId}:command:${String(commandSequence)}:start-window-stop`,
+    outboxPayload: { reasonCode: "START_WINDOW_MISSED", commandSequence },
   });
 }
 
@@ -1550,26 +2045,33 @@ async function insertObservation(
   taskId: string,
   revision: number,
   transition: SnapshotTransition,
+  options: {
+    source?: "runtime" | "adapter";
+    adapterRevision?: number | null;
+    reasonCode?: string | null;
+    progress?: Record<string, unknown> | null;
+    payload?: Record<string, unknown>;
+  } = {},
 ): Promise<void> {
   await client.query(
-    `INSERT INTO task_observation(task_id, revision, type, occurred_at, payload)
-     VALUES ($1,$2,$3,clock_timestamp(),$4::jsonb) ON CONFLICT DO NOTHING`,
+    `INSERT INTO task_observation
+      (task_id, revision, type, reason_code, occurred_at, message, substate,
+       progress, source, adapter_revision, payload)
+     VALUES ($1,$2,$3,$4,clock_timestamp(),$5,$6,$7::jsonb,$8,$9,$10::jsonb)
+     ON CONFLICT DO NOTHING`,
     [
       taskId,
       revision,
-      transition.observationType,
-      JSON.stringify({ substate: transition.substate }),
+      stableObservationType(transition),
+      options.reasonCode ?? reasonCodeFromTransition(transition),
+      transition.statusMessage,
+      transition.substate,
+      jsonOrNull(options.progress ?? null),
+      options.source ?? "runtime",
+      options.adapterRevision ?? null,
+      JSON.stringify(options.payload ?? {}),
     ],
   );
-}
-
-async function nextObservationRevision(client: PoolClient, taskId: string): Promise<number> {
-  const result = await client.query<{ revision: string }>(
-    `SELECT COALESCE(max(revision),0)+1 AS revision
-     FROM task_observation WHERE task_id=$1`,
-    [taskId],
-  );
-  return Number(result.rows[0]?.revision ?? 1);
 }
 
 async function upsertInputRequests(
@@ -1607,11 +2109,53 @@ async function insertOutbox(
   taskId: string,
   type: string,
   payload: Record<string, unknown>,
+  eventKey = `${taskId}:${type}:${randomUUID()}`,
 ): Promise<void> {
+  const snapshot = await client.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
+    taskId,
+  ]);
+  const task = snapshot.rows[0];
+  const completePayload =
+    task === undefined
+      ? payload
+      : {
+          taskId,
+          internalState: task.internal_state,
+          status: task.mcp_status,
+          substate: task.substate,
+          statusMessage: task.status_message,
+          observationRevision: Number(task.observation_revision),
+          adapterRevision: Number(task.adapter_revision),
+          ...payload,
+        };
   await client.query(
-    "INSERT INTO outbox_event(event_id, aggregate_id, event_type, payload) VALUES ($1,$2,$3,$4::jsonb)",
-    [randomUUID(), taskId, type, JSON.stringify(payload)],
+    `INSERT INTO outbox_event(event_id, event_key, aggregate_id, event_type, payload)
+     VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING`,
+    [randomUUID(), eventKey, taskId, type, JSON.stringify(completePayload)],
   );
+}
+
+function stableObservationType(transition: SnapshotTransition): string {
+  if (transition.internalState === "TERMINAL_COMPLETED") return "task.completed";
+  if (transition.internalState === "TERMINAL_FAILED") return "task.failed";
+  if (transition.internalState === "TERMINAL_CANCELLED") return "task.cancelled";
+  return transition.observationType;
+}
+
+function reasonCodeFromTransition(transition: SnapshotTransition): string | null {
+  const body = transition.result ?? transition.error;
+  if (body === null) return null;
+  const structured = body.structuredContent;
+  if (typeof structured === "object" && structured !== null && "reasonCode" in structured) {
+    const reason = (structured as { reasonCode?: unknown }).reasonCode;
+    return typeof reason === "string" ? reason : null;
+  }
+  const data = body.data;
+  if (typeof data === "object" && data !== null && "reasonCode" in data) {
+    const reason = (data as { reasonCode?: unknown }).reasonCode;
+    return typeof reason === "string" ? reason : null;
+  }
+  return null;
 }
 
 function jsonOrNull(value: Record<string, unknown> | null): string | null {
@@ -1637,6 +2181,7 @@ function fromRow(row: TaskRow): TaskRecord {
     result: row.result,
     error: row.error,
     adapterRevision: Number(row.adapter_revision),
+    observationRevision: Number(row.observation_revision),
     ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
     pollIntervalMs: row.poll_interval_ms,
     createdAt: row.created_at,

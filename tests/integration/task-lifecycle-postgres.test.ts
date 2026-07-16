@@ -931,10 +931,16 @@ describe("durable task lifecycle", () => {
       result: { structuredContent: { outcome: "admission_rejected", retryable: false } },
     });
     expect(await repository.listObservations(taskId)).toEqual(
-      expect.arrayContaining([expect.objectContaining({ type: "task.admission_rejected" })]),
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "task.completed",
+          reasonCode: "START_NOT_PERMITTED",
+          source: "runtime",
+        }),
+      ]),
     );
     const event = await pool.query<{ count: string }>(
-      "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1 AND event_type='task.admission_rejected'",
+      "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1 AND event_type='task.completed'",
       [taskId],
     );
     expect(event.rows[0]?.count).toBe("1");
@@ -1389,6 +1395,181 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(commands.rows[0]?.count).toBe("1");
+  });
+
+  it("T-014/T-015 separates Runtime observation revision and publishes complete idempotent events", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-observation-revision" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected observable task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+
+    expect(await repository.getById(taskId)).toMatchObject({
+      observationRevision: 1,
+      adapterRevision: 1,
+    });
+    await engine.cancelTask(taskId, authorization);
+    expect(await repository.getById(taskId)).toMatchObject({
+      observationRevision: 2,
+      adapterRevision: 1,
+      internalState: "STOPPING",
+    });
+    await pool.query(
+      `UPDATE task_command SET next_attempt_at='2099-01-01T00:00:00Z'
+       WHERE task_id<>$1 AND state IN ('PENDING','RETRY_WAIT')`,
+      [taskId],
+    );
+    expect(
+      await new DurableCommandDispatcher(
+        gateway,
+        repository,
+        undefined,
+        "observation-revision",
+      ).tick(),
+    ).toMatchObject({ acknowledged: 1 });
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
+
+    expect(await repository.getById(taskId)).toMatchObject({
+      observationRevision: 3,
+      adapterRevision: 2,
+      internalState: "TERMINAL_CANCELLED",
+    });
+    await repository.applySnapshot(taskId, 99, {
+      internalState: "RUNNING",
+      mcpStatus: "working",
+      substate: "running",
+      statusMessage: "late snapshot",
+      result: null,
+      error: null,
+      terminal: false,
+      observationType: "task.progress",
+    });
+    const observations = await repository.listObservations(taskId);
+    expect(observations).toEqual([
+      expect.objectContaining({
+        revision: 1,
+        source: "adapter",
+        adapterRevision: 1,
+      }),
+      expect.objectContaining({
+        revision: 2,
+        type: "task.cancel_requested",
+        reasonCode: "USER_REQUESTED",
+        message: "Cancellation requested.",
+        substate: "stopping",
+        source: "runtime",
+        adapterRevision: null,
+      }),
+      expect.objectContaining({
+        revision: 3,
+        type: "task.cancelled",
+        source: "adapter",
+        adapterRevision: 2,
+      }),
+    ]);
+    expect(observations[0]?.message).toBeTruthy();
+    expect(observations[2]?.message).toBeTruthy();
+
+    const events = await pool.query<{
+      event_key: string;
+      event_type: string;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT event_key, event_type, payload FROM outbox_event
+       WHERE aggregate_id=$1 ORDER BY created_at, event_key`,
+      [taskId],
+    );
+    expect(events.rows).toHaveLength(3);
+    expect(new Set(events.rows.map((row) => row.event_key)).size).toBe(3);
+    expect(events.rows.map((row) => row.event_type)).toEqual([
+      "task.created",
+      "task.cancel_requested",
+      "task.cancelled",
+    ]);
+    for (const [index, event] of events.rows.entries()) {
+      expect(event.payload).toMatchObject({
+        taskId,
+        observationRevision: index + 1,
+        adapterRevision: index === 2 ? 2 : 1,
+      });
+      expect(typeof event.payload.status).toBe("string");
+    }
+  });
+
+  it("T-016 rolls back task, observation, and outbox together on event write failure", async () => {
+    const clock = new FakeClock(new Date("2026-07-17T00:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-atomic-transition" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 1_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled task");
+    const taskId = String(created.task.taskId);
+    clock.advance(1_001);
+
+    await pool.query(`CREATE OR REPLACE FUNCTION rc2_reject_terminal_outbox()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.aggregate_id='${taskId}' AND NEW.event_type='task.completed' THEN
+          RAISE EXCEPTION 'RC2_OUTBOX_FAILURE';
+        END IF;
+        RETURN NEW;
+      END $$`);
+    await pool.query(`CREATE TRIGGER rc2_reject_terminal_outbox
+      BEFORE INSERT ON outbox_event FOR EACH ROW EXECUTE FUNCTION rc2_reject_terminal_outbox()`);
+    try {
+      await expect(repository.completeDueStartWindowMisses(clock.now())).rejects.toThrow(
+        "RC2_OUTBOX_FAILURE",
+      );
+      expect(await repository.getById(taskId)).toMatchObject({
+        internalState: "SCHEDULED",
+        observationRevision: 1,
+      });
+      expect(await repository.listObservations(taskId)).toHaveLength(1);
+      const rolledBackEvents = await pool.query<{ count: string }>(
+        "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1",
+        [taskId],
+      );
+      expect(rolledBackEvents.rows[0]?.count).toBe("1");
+    } finally {
+      await pool.query("DROP TRIGGER IF EXISTS rc2_reject_terminal_outbox ON outbox_event");
+      await pool.query("DROP FUNCTION IF EXISTS rc2_reject_terminal_outbox() ");
+    }
+
+    expect(await repository.completeDueStartWindowMisses(clock.now())).toBe(1);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_COMPLETED",
+      observationRevision: 2,
+      adapterRevision: 0,
+    });
+    expect(await repository.listObservations(taskId)).toHaveLength(2);
+    const committedEvents = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1",
+      [taskId],
+    );
+    expect(committedEvents.rows[0]?.count).toBe("2");
   });
 });
 

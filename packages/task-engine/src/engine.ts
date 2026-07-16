@@ -724,6 +724,11 @@ function detailedTask(
     type: string;
     occurredAt: Date;
     reasonCode: string | null;
+    message: string | null;
+    substate: string | null;
+    progress: Record<string, unknown> | null;
+    source: "runtime" | "adapter";
+    adapterRevision: number | null;
     payload: Record<string, unknown>;
   }[] = [],
 ): Record<string, unknown> {
@@ -751,7 +756,7 @@ function detailedTask(
       "io.sdar/taskExecution": {
         profileVersion: "1.0",
         substate: task.substate,
-        observationRevision: task.adapterRevision,
+        observationRevision: task.observationRevision,
         executionMode: task.executionMode,
         timing: {
           acceptedAt: task.acceptedAt.toISOString(),
@@ -768,6 +773,13 @@ function detailedTask(
           type: observation.type,
           occurredAt: observation.occurredAt.toISOString(),
           ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
+          ...(observation.message === null ? {} : { message: observation.message }),
+          ...(observation.substate === null ? {} : { substate: observation.substate }),
+          ...(observation.progress === null ? {} : { progress: observation.progress }),
+          source: observation.source,
+          ...(observation.adapterRevision === null
+            ? {}
+            : { adapterRevision: observation.adapterRevision }),
           ...observation.payload,
         })),
       },

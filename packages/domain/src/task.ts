@@ -38,6 +38,7 @@ export interface TaskRecord {
   result: Record<string, unknown> | null;
   error: Record<string, unknown> | null;
   adapterRevision: number;
+  observationRevision: number;
   ttlMs: number | null;
   pollIntervalMs: number;
   createdAt: Date;

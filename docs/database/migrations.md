@@ -36,4 +36,13 @@ expired `STARTING` claims. Existing rc.1 rows retain their confirmed `actual_sta
 scheduled rows start at attempt zero and receive attempt one only when a worker atomically
 claims an actual Adapter call.
 
+`009_observation_revision_and_outbox_keys.sql` separates the Runtime-owned monotonic
+`observation_revision` from the Adapter Snapshot revision. It expands observations with
+message, substate, progress, source and optional Adapter revision, and gives every outbox row a
+globally unique stable event key. The rc.1 backfill preserves the highest recorded observation
+revision, identifies the Runtime-created scheduled/window/control observations, and treats the
+remaining historical Snapshot observations as Adapter-sourced. New lifecycle changes allocate
+the next observation revision, update the current Task, append the complete observation and
+insert the idempotent outbox event in one transaction.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.
