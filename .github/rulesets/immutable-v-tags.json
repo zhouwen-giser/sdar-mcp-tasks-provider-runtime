@@ -8,8 +8,5 @@
       "exclude": []
     }
   },
-  "rules": [
-    { "type": "update" },
-    { "type": "deletion" }
-  ]
+  "rules": [{ "type": "update" }, { "type": "deletion" }]
 }
