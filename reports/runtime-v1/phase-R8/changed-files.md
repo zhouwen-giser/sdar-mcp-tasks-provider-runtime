@@ -6,5 +6,6 @@
 - `scripts/run-conformance.mjs`: TypeScript/Python lifecycle orchestration, Python binding generation, report output.
 - CI/root scripts: mandatory dual-language conformance and uploaded JSON artifacts.
 - Conformance/plan/traceability documentation and Phase reports.
+- `reports/conformance/*.json`: authoritative CI results for both languages.
 
 Proto and migration changes: none.

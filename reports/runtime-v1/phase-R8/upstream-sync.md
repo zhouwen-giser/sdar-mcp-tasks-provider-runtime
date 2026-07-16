@@ -6,6 +6,7 @@
 - Default branch changes: none
 - Parallel conflicts: none
 - Force push/history rewrite: none
-- Phase commit: pending
-- Push: pending
-- Exit CI: pending
+- Phase commit: `9d603a6`
+- Acceptance fixes: `18a28dd`, `380487c`
+- Push: PASS to `origin/feature/mcp-tasks-provider-runtime-v1`
+- Exit CI: PASS, Actions `29499994468`

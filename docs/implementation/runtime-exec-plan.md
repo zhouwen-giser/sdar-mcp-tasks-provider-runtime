@@ -3,7 +3,7 @@
 Status: active  
 Target: `v1.0.0-rc.1`  
 Branch: `feature/mcp-tasks-provider-runtime-v1`  
-Last updated: 2026-07-16 (R0)
+Last updated: 2026-07-16 (R8)
 
 ## Objective and non-negotiable gates
 
@@ -38,8 +38,8 @@ implementation.
 | R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | completed (`28d35d9`, CI green)                |
 | R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | completed (`3b896ca`, fix `e619a1d`, CI green) |
 | R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | completed (`bb5e941`, fix `e5736f7`, CI green) |
-| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | implementation complete; exit CI pending       |
-| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | pending                                        |
+| R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | completed (`9d603a6`, fixes through `380487c`) |
+| R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | in progress                                    |
 
 ## Phase execution details
 
@@ -167,8 +167,9 @@ Implementation: complete. Both reference Adapters expose the same three
 operations and persist execution/Snapshot/command binding in atomic state files.
 The Testkit restarts each process on the same state, requires Reconcile FOUND,
 then runs identical P0-P4 MCP/gRPC/PostgreSQL scenarios and emits JSON reports
-validated by a versioned schema. Remote dual-language CI is pending because the
-local host has neither Docker access nor Python pip.
+validated by a versioned schema. GitHub Actions run `29499994468` passed both
+quality and Compose jobs; its artifact is committed under
+`reports/conformance/` with all TypeScript and Python P0-P4 groups passing.
 
 ### R9 — release candidate
 
@@ -210,8 +211,12 @@ contains the authoritative phase SHA table.
   `allowBuilds` map; broad install-script execution remains disabled.
 - 2026-07-16: local Docker socket access is unavailable to the current user.
   R1 uses the committed GitHub Actions Compose smoke as its Docker health gate.
+- 2026-07-16: GitHub Actions artifacts are the authoritative environment for
+  Docker, PostgreSQL and Python gates unavailable on the local host; the exact
+  R8 JSON artifacts were downloaded through the authenticated GitHub connector
+  and committed with formatting-only normalization.
 
 ## Current next action
 
-Run the complete R1 gate, commit and push the foundation, verify the remote
-Compose job, record the R1 SHA/result, and then begin R2.
+Complete R9 deployment, release documentation, E2E, audit/SBOM and capacity
+gates; run the complete release verification before the Ready PR and RC tag.

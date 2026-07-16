@@ -8,9 +8,9 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 |---|---|---|---|---|---|
 | RQ-MCP | Profile 5-8、33 | R2-R6 | `packages/mcp-protocol`, `apps/runtime` | contract/e2e | VERIFIED (R6 CI) |
 | RQ-REG | Runtime 4 | R2 | `packages/operation-registry` | unit/integration/security | VERIFIED (R2 CI) |
-| RQ-ADAPTER | Adapter 4-15 | R1-R8 | `proto`, `packages/adapter-protocol`, examples | proto/contract/cross-language | IN PROGRESS (R8 IMPLEMENTED) |
+| RQ-ADAPTER | Adapter 4-15 | R1-R8 | `proto`, `packages/adapter-protocol`, examples | proto/contract/cross-language | VERIFIED (R8 CI) |
 | RQ-STATE | Profile 5、17、24；Runtime 5 | R3-R6 | `packages/domain`, `packages/task-engine` | state matrix/terminal CAS | VERIFIED (R6 CI) |
-| RQ-ADMISSION | Runtime 6、8、10 | R3-R4 | task engine/PostgreSQL repositories | PG/gRPC crash-window/recovery | IN PROGRESS (R3 CORE) |
+| RQ-ADMISSION | Runtime 6、8、10 | R3-R7 | task engine/PostgreSQL repositories | PG/gRPC crash-window/recovery | VERIFIED (R7 CI) |
 | RQ-AVAIL | Profile 8-11 | R4 | domain/task engine/MCP/gRPC | four-state/window/unknown E2E | VERIFIED (R4 CI) |
 | RQ-TIME | Profile 12-15 | R5 | scheduler/domain/PostgreSQL claims | fake-clock/restart/multi-worker | VERIFIED (R5 CI) |
 | RQ-CANCEL | Profile 23、36 | R6-R7 | task control/Adapter gateway | safe-stop/race/replay | VERIFIED (R7 CI) |
@@ -21,4 +21,4 @@ Phase R0 已完成真实仓库核验。持续维护的详细矩阵位于
 | RQ-PERSIST | Runtime 8 | R2-R7 | `migrations`, PostgreSQL package | migration/integration | VERIFIED (R7 CI) |
 | RQ-SEC | Profile 20、34-35 | R2、R7 | security and protocol boundaries | auth/mode/fuzz | VERIFIED (R7 CI) |
 | RQ-OBSERVABILITY | Runtime 12 | R1、R7-R9 | `packages/observability` | metrics/log redaction | IN PROGRESS (R7 IMPLEMENTED) |
-| RQ-CONFORMANCE | Profile 37-39 | R8-R9 | `packages/conformance-testkit` | P0-P4/cross-language | IN PROGRESS (R8 IMPLEMENTED) |
+| RQ-CONFORMANCE | Profile 37-39 | R8-R9 | `packages/conformance-testkit` | P0-P4/cross-language | VERIFIED (R8 CI; RELEASE EVIDENCE PENDING) |
