@@ -263,7 +263,10 @@ export class TaskEngine {
       throw error;
     }
     if (response.result === "rejected" || response.rejected !== undefined) {
-      const rejected = rejectionResult(response.rejected);
+      const rejected =
+        this.clock.now() > anchors.latestStartAt
+          ? startWindowMissed(this.clock.now(), "Start response arrived after the start window.")
+          : rejectionResult(response.rejected);
       await this.#repository.recordRejection(taskId, rejected);
       return { kind: "result", result: rejected };
     }
@@ -275,6 +278,10 @@ export class TaskEngine {
     const snapshot = normalizeSnapshot(accepted.initialSnapshot);
     const transition = mapAdapterSnapshot(snapshot);
     const inputRequests = normalizeInputRequests(accepted.initialSnapshot);
+    const respondedAt = this.clock.now();
+    const actualStartedAt = snapshotHasStarted(accepted.initialSnapshot.state) ? respondedAt : null;
+    const startWindowMissedAt =
+      (actualStartedAt ?? respondedAt) > anchors.latestStartAt ? respondedAt : undefined;
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
       const result = transition.result ?? transition.error ?? {};
       await this.#repository.completeAdmissionWithoutTask(
@@ -298,6 +305,8 @@ export class TaskEngine {
         deadlineAt: anchors.deadlineAt,
         timing,
         inputRequests,
+        actualStartedAt,
+        ...(startWindowMissedAt === undefined ? {} : { startWindowMissedAt }),
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
@@ -332,6 +341,8 @@ export class TaskEngine {
   ): Promise<ToolInvocationResult> {
     const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
     const inputRequests = normalizeInputRequests(snapshotValue);
+    const respondedAt = this.clock.now();
+    const actualStartedAt = snapshotHasStarted(snapshotValue.state) ? respondedAt : null;
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
       await this.#repository.completeAdmissionWithoutTask(intent.taskId, adapterResponse);
       return { kind: "result", result: transition.result ?? transition.error ?? {} };
@@ -349,6 +360,10 @@ export class TaskEngine {
       deadlineAt: anchors.deadlineAt,
       timing,
       inputRequests,
+      actualStartedAt,
+      ...((actualStartedAt ?? respondedAt) > anchors.latestStartAt
+        ? { startWindowMissedAt: respondedAt }
+        : {}),
     });
     return { kind: "task", task: detailedTask(task, inputRequests) };
   }
@@ -388,9 +403,7 @@ export class TaskEngine {
       task = await this.#repository.applySnapshot(
         task.taskId,
         Number(snapshot.revision),
-        task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
-          ? deadlineReached(snapshot.message, this.clock.now())
-          : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
+        stopTransition(task, snapshot, this.clock.now()),
         normalizeInputRequests(snapshot),
       );
     }
@@ -425,6 +438,7 @@ export class TaskEngine {
   }
 
   async reconcileTask(task: TaskRecord): Promise<"found" | "not_found" | "deferred"> {
+    if (task.internalState === "STARTING" && task.externalExecutionId === null) return "deferred";
     const response = await this.gateway.reconcileExecution(
       task.taskId,
       task.operationName,
@@ -444,13 +458,6 @@ export class TaskEngine {
       return "not_found";
     }
     if (response.status === "NOT_FOUND" || response.snapshot === undefined) {
-      if (task.internalState === "STARTING" && task.externalExecutionId === null) {
-        await this.#repository.releaseScheduleClaim(
-          task.taskId,
-          "Scheduled start was not found during recovery; claim released for retry.",
-        );
-        return "not_found";
-      }
       await this.#repository.failRecoveryNotFound(
         task.taskId,
         "Adapter execution was not found during recovery.",
@@ -458,25 +465,12 @@ export class TaskEngine {
       return "not_found";
     }
     const snapshot = response.snapshot;
-    if (task.internalState === "STARTING" && task.externalExecutionId === null) {
-      await this.#repository.acceptScheduled(
-        task.taskId,
-        response.externalExecutionId || snapshot.externalExecutionId,
-        Number(snapshot.revision),
-        mapAdapterSnapshot(normalizeSnapshot(snapshot)),
-        response as unknown as Record<string, unknown>,
-        normalizeInputRequests(snapshot),
-      );
-    } else {
-      await this.#repository.applySnapshot(
-        task.taskId,
-        Number(snapshot.revision),
-        task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
-          ? deadlineReached(snapshot.message, this.clock.now())
-          : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
-        normalizeInputRequests(snapshot),
-      );
-    }
+    await this.#repository.applySnapshot(
+      task.taskId,
+      Number(snapshot.revision),
+      stopTransition(task, snapshot, this.clock.now()),
+      normalizeInputRequests(snapshot),
+    );
     await this.#repository.noteRecovery(task.taskId);
     return "found";
   }
@@ -763,6 +757,10 @@ function detailedTask(
           acceptedAt: task.acceptedAt.toISOString(),
           notBefore: task.notBefore?.toISOString(),
           latestStartAt: task.latestStartAt?.toISOString(),
+          actualStartedAt: task.actualStartedAt?.toISOString() ?? null,
+          startStopRequestedAt: task.startStopRequestedAt?.toISOString() ?? null,
+          invocationAttempt: task.invocationAttempt,
+          nextStartAttemptAt: task.nextStartAttemptAt?.toISOString() ?? null,
           deadlineAt: task.deadlineAt?.toISOString() ?? null,
         },
         observations: observations.map((observation) => ({
@@ -797,6 +795,54 @@ function deadlineReached(message: string, completedAt: Date) {
     terminal: true,
     observationType: "task.progress",
   };
+}
+
+function startWindowMissed(completedAt: Date, message: string): Record<string, unknown> {
+  return {
+    content: [{ type: "text", text: message }],
+    isError: true,
+    structuredContent: {
+      outcome: "start_window_missed",
+      reasonCode: "START_WINDOW_MISSED",
+      retryable: true,
+      completedAt: completedAt.toISOString(),
+    },
+  };
+}
+
+function startWindowMissedTransition(message: string, completedAt: Date) {
+  return {
+    internalState: "TERMINAL_COMPLETED" as const,
+    mcpStatus: "completed" as const,
+    substate: null,
+    statusMessage: message || "Start window was missed after safe stop.",
+    result: startWindowMissed(completedAt, message || "Start window was missed after safe stop."),
+    error: null,
+    terminal: true,
+    observationType: "task.start_window_missed",
+  };
+}
+
+function stopTransition(task: TaskRecord, snapshot: ExecutionSnapshot, completedAt: Date) {
+  if (snapshot.state === "CANCELLED" && task.stopReason === "DEADLINE_REACHED") {
+    return deadlineReached(snapshot.message, completedAt);
+  }
+  if (snapshot.state === "CANCELLED" && task.stopReason === "START_WINDOW_MISSED") {
+    return startWindowMissedTransition(snapshot.message, completedAt);
+  }
+  return mapAdapterSnapshot(normalizeSnapshot(snapshot));
+}
+
+function snapshotHasStarted(state: string): boolean {
+  return [
+    "RUNNING",
+    "PAUSED",
+    "RESUMING",
+    "SUCCEEDED",
+    "BUSINESS_FAILED",
+    "PARTIALLY_COMPLETED",
+    "TECHNICAL_FAILED",
+  ].includes(state);
 }
 
 function storedInvocation(invocation: ToolInvocationResult): StoredInvocation {

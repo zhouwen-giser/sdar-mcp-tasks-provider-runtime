@@ -412,6 +412,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           operationName?: string;
           arguments?: unknown;
           argumentHash?: string;
+          invocationAttempt?: string | number;
         },
         unknown
       >,
@@ -453,6 +454,32 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         return;
       }
       const result = protoStructToJson(call.request.arguments);
+      const invocationAttempt = Number(call.request.invocationAttempt ?? 1);
+      if (
+        (result.scenario === "scheduled_retry_once" && invocationAttempt === 1) ||
+        result.scenario === "scheduled_retry_always"
+      ) {
+        callback(null, {
+          rejected: {
+            reasonCode: "START_CAPACITY_RETRY",
+            message: "Reference Adapter requests a bounded scheduled retry.",
+            retryable: true,
+          },
+          result: "rejected",
+        });
+        return;
+      }
+      if (result.scenario === "scheduled_permanent_reject") {
+        callback(null, {
+          rejected: {
+            reasonCode: "START_NOT_PERMITTED",
+            message: "Reference Adapter permanently rejected scheduled admission.",
+            retryable: false,
+          },
+          result: "rejected",
+        });
+        return;
+      }
       const now = new Date();
       options.onStartSideEffect?.(taskId);
       if (call.request.operationName === "flex_task" && result.scenario === "terminal") {
@@ -495,6 +522,11 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           retryable: false,
           observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
         };
+        if (result.scenario === "queued_start") {
+          initialSnapshot.state = "QUEUED";
+          initialSnapshot.reasonCode = "QUEUED";
+          initialSnapshot.message = "Reference task is queued before execution begins.";
+        }
         if (result.scenario === "input_required" || result.scenario === "multi_round_input") {
           initialSnapshot.state = "WAITING_INPUT";
           initialSnapshot.reasonCode = "APPROVAL_REQUIRED";
@@ -528,6 +560,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
             result.scenario === "input_required" || result.scenario === "multi_round_input",
           ...(result.scenario === "multi_round_input" ? { inputRound: 1 } : {}),
           ...(typeof result.scenario === "string" ? { scenario: result.scenario } : {}),
+          ...(result.scenario === "queued_start" ? { holdSnapshot: true } : {}),
         });
         if (result.scenario === "response_loss") {
           callback(

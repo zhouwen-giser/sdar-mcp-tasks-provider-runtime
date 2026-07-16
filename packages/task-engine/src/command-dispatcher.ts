@@ -53,7 +53,11 @@ export class DurableCommandDispatcher {
           task.taskId,
           task.operationName,
           task.argumentHash,
-          command.stopReason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "USER_REQUESTED",
+          command.stopReason === "DEADLINE_REACHED"
+            ? "DEADLINE_REACHED"
+            : command.stopReason === "START_WINDOW_MISSED"
+              ? "START_WINDOW_MISSED"
+              : "USER_REQUESTED",
           command.commandSequence,
           {
             authorizationContextHash: task.authorizationContextHash,

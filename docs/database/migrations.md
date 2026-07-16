@@ -29,4 +29,11 @@ due work claimable by multiple Runtime instances. The migration removes the rc.1
 request-hash uniqueness rule so a permanently rejected user cancellation can be followed by a
 new stable command sequence, while retaining duplicate coalescing for active commands.
 
+`008_start_window_and_schedule_retry.sql` persists the remaining start contract: the time a
+safe-stop compensation was requested, the unique invocation attempt, and the next bounded
+start-attempt time. It adds partial indexes for immediate watchdog scans, scheduled retries and
+expired `STARTING` claims. Existing rc.1 rows retain their confirmed `actual_started_at` value;
+scheduled rows start at attempt zero and receive attempt one only when a worker atomically
+claims an actual Adapter call.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

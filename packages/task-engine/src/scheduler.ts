@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
-import type { Clock, TaskExecutionTiming } from "../../domain/src/index.js";
+import type { Clock, TaskExecutionTiming, TaskRecord } from "../../domain/src/index.js";
 import { mapAdapterSnapshot, systemClock } from "../../domain/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
 import type { TaskRepository } from "../../persistence-postgres/src/index.js";
@@ -11,6 +11,8 @@ export interface SchedulerTickResult {
   missed: number;
   deferred: number;
   deadlineStops: number;
+  watchdogStops: number;
+  reconciled: number;
 }
 
 export class DurableScheduler {
@@ -28,79 +30,269 @@ export class DurableScheduler {
 
   async tick(): Promise<SchedulerTickResult> {
     const now = this.clock.now();
-    const result: SchedulerTickResult = { started: 0, missed: 0, deferred: 0, deadlineStops: 0 };
-    const due = await this.repository.claimDueScheduled(now, this.workerId);
-    for (const task of due) {
-      if (task.latestStartAt !== null && now > task.latestStartAt) {
-        await this.repository.completeStartWindowMissed(task.taskId, now);
-        result.missed += 1;
-        continue;
-      }
-      const operation = this.manifest.operations.find(
-        (candidate) => candidate.name === task.operationName,
-      );
-      if (operation === undefined) {
-        await this.repository.releaseScheduleClaim(task.taskId, "Operation snapshot unavailable.");
-        result.deferred += 1;
-        continue;
-      }
-      try {
-        const response = await this.gateway.startOperation(task.operationName, task.arguments, {
-          taskId: task.taskId,
-          argumentHash: task.argumentHash,
-          authorizationContextHash: task.authorizationContextHash,
-          executionMode: task.executionMode,
-          simulationId: task.simulationId,
-          invocationAttempt: 1,
-          timing: adapterTiming(task.timing as unknown as TaskExecutionTiming),
-        });
-        if (response.rejected !== undefined || response.result === "rejected") {
-          await this.repository.completeScheduledRejection(
-            task.taskId,
-            now,
-            response.rejected?.reasonCode ?? "ADMISSION_REJECTED",
-            response.rejected?.message ?? "Scheduled execution was rejected.",
-            response.rejected?.retryable ?? false,
-          );
-          result.missed += 1;
-          continue;
-        }
-        const accepted = response.accepted;
-        if (accepted === undefined) throw new Error("ADAPTER_START_RESPONSE_MISSING_RESULT");
-        const snapshot = accepted.initialSnapshot;
-        await this.repository.acceptScheduled(
-          task.taskId,
-          accepted.externalExecutionId,
-          Number(snapshot.revision),
-          mapAdapterSnapshot({
-            state: snapshot.state,
-            reasonCode: snapshot.reasonCode,
-            message: snapshot.message,
-            retryable: snapshot.retryable,
-            result: protoStructToJson(snapshot.result),
-          }),
-          response as unknown as Record<string, unknown>,
-          (snapshot.inputRequests ?? []).map((input) => ({
-            key: input.key,
-            description: input.description,
-            schema: protoStructToJson(input.inputSchema),
-            required: input.required,
-          })),
-        );
-        result.started += 1;
-      } catch (error) {
-        await this.repository.releaseScheduleClaim(
-          task.taskId,
-          error instanceof Error ? error.message : "Scheduled start deferred.",
-        );
-        result.deferred += 1;
-      }
-    }
+    const overdueImmediate = await this.repository.claimOverdueImmediateStarts(now);
+    const missedBeforeClaim = await this.repository.completeDueStartWindowMisses(now);
+    const result: SchedulerTickResult = {
+      started: 0,
+      missed: missedBeforeClaim,
+      deferred: 0,
+      deadlineStops: 0,
+      watchdogStops: overdueImmediate.length,
+      reconciled: 0,
+    };
 
-    const expired = await this.repository.claimExpiredDeadlines(now);
+    const uncertain = await this.repository.claimExpiredScheduledStarts(now, this.workerId);
+    for (const task of uncertain) await this.reconcileUncertainStart(task, result);
+
+    const due = await this.repository.claimDueScheduled(now, this.workerId);
+    for (const task of due) await this.startClaimedTask(task, result);
+
+    const expired = await this.repository.claimExpiredDeadlines(this.clock.now());
     result.deadlineStops += expired.length;
     return result;
   }
+
+  private async reconcileUncertainStart(
+    task: TaskRecord,
+    result: SchedulerTickResult,
+  ): Promise<void> {
+    const owner = requiredClaimOwner(task);
+    const now = this.clock.now();
+    try {
+      const response = await this.gateway.reconcileExecution(
+        task.taskId,
+        task.operationName,
+        task.argumentHash,
+        executionOptions(task),
+      );
+      const completedAt = this.clock.now();
+      if (response.status === "TRANSIENT_UNAVAILABLE") {
+        await this.repository.deferScheduleReconcile(
+          task.taskId,
+          owner,
+          retryAt(task, completedAt),
+          response.message || "Scheduled start reconciliation is temporarily unavailable.",
+        );
+        result.deferred += 1;
+        return;
+      }
+      if (response.status === "CONFLICT") {
+        await this.repository.completeScheduledRejection(
+          task.taskId,
+          owner,
+          completedAt,
+          response.reasonCode || "ADAPTER_RECONCILE_CONFLICT",
+          response.message || "Adapter reported a conflicting scheduled start identity.",
+          false,
+        );
+        result.missed += 1;
+        return;
+      }
+      if (response.status === "NOT_FOUND" || response.snapshot === undefined) {
+        if (startWindowClosed(task, completedAt)) {
+          await this.repository.completeStartWindowMissed(task.taskId, completedAt, owner);
+          result.missed += 1;
+        } else {
+          await this.repository.releaseScheduleRetry(
+            task.taskId,
+            owner,
+            retryAt(task, completedAt),
+            "Prior start attempt was definitively absent; retry scheduled.",
+          );
+          result.deferred += 1;
+        }
+        return;
+      }
+      await this.acceptStart(
+        task,
+        owner,
+        response.externalExecutionId || response.snapshot.externalExecutionId,
+        response.snapshot,
+        response as unknown as Record<string, unknown>,
+        completedAt,
+      );
+      result.reconciled += 1;
+      if (startResponseLate(task, completedAt)) result.watchdogStops += 1;
+      else result.started += 1;
+    } catch (error) {
+      await this.repository.deferScheduleReconcile(
+        task.taskId,
+        owner,
+        retryAt(task, now),
+        error instanceof Error ? error.message : "Scheduled start reconciliation deferred.",
+      );
+      result.deferred += 1;
+    }
+  }
+
+  private async startClaimedTask(task: TaskRecord, result: SchedulerTickResult): Promise<void> {
+    const owner = requiredClaimOwner(task);
+    const now = this.clock.now();
+    if (startWindowClosed(task, now)) {
+      await this.repository.completeStartWindowMissed(task.taskId, now, owner);
+      result.missed += 1;
+      return;
+    }
+    const operation = this.manifest.operations.find(
+      (candidate) => candidate.name === task.operationName,
+    );
+    if (operation === undefined) {
+      await this.repository.releaseScheduleRetry(
+        task.taskId,
+        owner,
+        retryAt(task, now),
+        "Operation snapshot resolution is temporarily unavailable.",
+      );
+      result.deferred += 1;
+      return;
+    }
+    try {
+      const response = await this.gateway.startOperation(task.operationName, task.arguments, {
+        taskId: task.taskId,
+        argumentHash: task.argumentHash,
+        ...executionOptions(task),
+        invocationAttempt: task.invocationAttempt,
+        timing: adapterTiming(task.timing as unknown as TaskExecutionTiming),
+      });
+      const completedAt = this.clock.now();
+      if (response.rejected !== undefined || response.result === "rejected") {
+        const rejected = response.rejected;
+        if (rejected?.retryable === true && !startWindowClosed(task, completedAt)) {
+          await this.repository.releaseScheduleRetry(
+            task.taskId,
+            owner,
+            retryAt(task, completedAt),
+            rejected.message || "Retryable scheduled start rejection.",
+          );
+          result.deferred += 1;
+        } else if (rejected?.retryable === true) {
+          await this.repository.completeStartWindowMissed(task.taskId, completedAt, owner);
+          result.missed += 1;
+        } else {
+          await this.repository.completeScheduledRejection(
+            task.taskId,
+            owner,
+            completedAt,
+            rejected?.reasonCode ?? "ADMISSION_REJECTED",
+            rejected?.message ?? "Scheduled execution was rejected.",
+            false,
+          );
+          result.missed += 1;
+        }
+        return;
+      }
+      const accepted = response.accepted;
+      if (accepted === undefined) throw new Error("ADAPTER_START_RESPONSE_MISSING_RESULT");
+      await this.acceptStart(
+        task,
+        owner,
+        accepted.externalExecutionId,
+        accepted.initialSnapshot,
+        response as unknown as Record<string, unknown>,
+        completedAt,
+      );
+      if (startResponseLate(task, completedAt)) {
+        result.watchdogStops += 1;
+      } else result.started += 1;
+    } catch (error) {
+      const failedAt = this.clock.now();
+      await this.repository.markScheduleResponseUncertain(
+        task.taskId,
+        owner,
+        retryAt(task, failedAt),
+        error instanceof Error ? error.message : "Scheduled start response is uncertain.",
+      );
+      result.deferred += 1;
+    }
+  }
+
+  private async acceptStart(
+    task: TaskRecord,
+    owner: string,
+    externalExecutionId: string,
+    snapshot: {
+      revision: string | number;
+      externalExecutionId: string;
+      state: string;
+      reasonCode: string;
+      message: string;
+      retryable: boolean;
+      result?: unknown;
+      inputRequests?: {
+        key: string;
+        description: string;
+        inputSchema?: unknown;
+        required: boolean;
+      }[];
+      observedAt?: unknown;
+    },
+    adapterResponse: Record<string, unknown>,
+    completedAt: Date,
+  ): Promise<void> {
+    await this.repository.acceptScheduled(
+      task.taskId,
+      owner,
+      externalExecutionId,
+      Number(snapshot.revision),
+      mapAdapterSnapshot({
+        state: snapshot.state,
+        reasonCode: snapshot.reasonCode,
+        message: snapshot.message,
+        retryable: snapshot.retryable,
+        result: protoStructToJson(snapshot.result),
+      }),
+      adapterResponse,
+      (snapshot.inputRequests ?? []).map((input) => ({
+        key: input.key,
+        description: input.description,
+        schema: protoStructToJson(input.inputSchema),
+        required: input.required,
+      })),
+      startResponseLate(task, completedAt) ? completedAt : undefined,
+      snapshotHasStarted(snapshot.state) ? completedAt : null,
+    );
+  }
+}
+
+function startWindowClosed(task: TaskRecord, now: Date): boolean {
+  return task.latestStartAt !== null && now >= task.latestStartAt;
+}
+
+function startResponseLate(task: TaskRecord, responseAt: Date): boolean {
+  return task.latestStartAt !== null && responseAt > task.latestStartAt;
+}
+
+function snapshotHasStarted(state: string): boolean {
+  return [
+    "RUNNING",
+    "PAUSED",
+    "RESUMING",
+    "SUCCEEDED",
+    "BUSINESS_FAILED",
+    "PARTIALLY_COMPLETED",
+    "TECHNICAL_FAILED",
+  ].includes(state);
+}
+
+function requiredClaimOwner(task: TaskRecord): string {
+  if (task.scheduleClaimOwner === null) throw new Error("SCHEDULED_TASK_CLAIM_OWNER_MISSING");
+  return task.scheduleClaimOwner;
+}
+
+function retryAt(task: TaskRecord, now: Date): Date {
+  const exponential = Math.min(5_000, 250 * 2 ** Math.min(task.invocationAttempt - 1, 5));
+  const jitter = Number.parseInt(task.taskId.slice(-2), 16) % 101;
+  const candidate = new Date(now.getTime() + exponential + jitter);
+  if (task.latestStartAt !== null && candidate > task.latestStartAt) return task.latestStartAt;
+  return candidate;
+}
+
+function executionOptions(task: TaskRecord) {
+  return {
+    authorizationContextHash: task.authorizationContextHash,
+    executionMode: task.executionMode,
+    simulationId: task.simulationId,
+  };
 }
 
 function adapterTiming(timing: TaskExecutionTiming): Record<string, unknown> {

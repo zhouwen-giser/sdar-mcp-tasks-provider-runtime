@@ -22,17 +22,15 @@ describe("rc.1 hardening red baseline", () => {
 
   it("T-007: scans immediate tasks that exceed latestStartAt", () => {
     expect(scheduler).toContain("claimOverdueImmediateStarts");
-    expect(scheduler).toContain("START_WINDOW_MISSED");
+    expect(tasks).toContain("START_WINDOW_MISSED");
+    expect(tasks).toContain("actual_started_at IS NULL");
   });
 
   it("T-010: retries a scheduled retryable rejection inside the start window", () => {
-    const rejectionBranch = methodBody(
-      tasks,
-      "completeScheduledRejection",
-      "claimExpiredDeadlines",
-    );
-    expect(rejectionBranch).toContain("RETRY_WAIT");
-    expect(rejectionBranch).toContain("next_start_attempt_at");
+    expect(scheduler).toContain("releaseScheduleRetry");
+    expect(scheduler).toContain("invocationAttempt: task.invocationAttempt");
+    expect(tasks).toContain("next_start_attempt_at");
+    expect(tasks).toContain("invocation_attempt=invocation_attempt+1");
   });
 
   it("T-014: atomically appends an observation and outbox for a window miss", () => {

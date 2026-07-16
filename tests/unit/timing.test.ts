@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { validateTiming } from "../../packages/domain/src/index.js";
+import { defaultTiming, validateTiming } from "../../packages/domain/src/index.js";
 
 const acceptedAt = new Date("2026-07-16T00:00:00Z");
 const capabilities = { scheduling: true, maxElapsed: true };
 
 describe("task timing contracts", () => {
+  it("uses a bounded compatibility window when optional timing metadata is absent", () => {
+    expect(defaultTiming).toEqual({
+      start: { mode: "immediate", startToleranceMs: 30_000 },
+      maxElapsedMs: null,
+    });
+  });
+
   it("anchors immediate and scheduled deadlines correctly", () => {
     const immediate = validateTiming(
       { start: { mode: "immediate", startToleranceMs: 500 }, maxElapsedMs: 2_000 },

@@ -499,7 +499,7 @@ describe("durable task lifecycle", () => {
     }
   });
 
-  it("starts scheduled work no earlier than notBefore and only once across workers", async () => {
+  it("T-013 starts scheduled work no earlier than notBefore and only once across workers", async () => {
     const clock = new FakeClock(new Date("2026-07-16T12:00:00Z"));
     const scheduledEngine = new TaskEngine(
       engine.manifest,
@@ -555,6 +555,70 @@ describe("durable task lifecycle", () => {
     expect(task.status).toBe("completed");
   });
 
+  it("T-013 reconciles a response-lost scheduled start without a duplicate side effect", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T12:30:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-response-loss", scenario: "response_loss" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 5_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    const first = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "response-loss-1",
+    );
+    expect(await first.tick()).toMatchObject({ deferred: 1, started: 0 });
+    expect(sideEffectCount - before).toBe(1);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STARTING",
+      invocationAttempt: 1,
+      externalExecutionId: null,
+    });
+    clock.advance(1_000);
+    const outcomes = await Promise.all([
+      first.tick(),
+      new DurableScheduler(
+        engine.manifest,
+        gateway,
+        new TaskRepository(pool),
+        clock,
+        "response-loss-2",
+      ).tick(),
+    ]);
+    expect(outcomes.reduce((sum, tick) => sum + tick.reconciled, 0)).toBe(1);
+    expect(sideEffectCount - before).toBe(1);
+    const recovered = await repository.getById(taskId);
+    expect(recovered).toMatchObject({
+      internalState: "RUNNING",
+      invocationAttempt: 1,
+    });
+    expect(typeof recovered?.externalExecutionId).toBe("string");
+  });
+
   it("completes a missed start window without invoking the Adapter", async () => {
     const clock = new FakeClock(new Date("2026-07-16T13:00:00Z"));
     const scheduledEngine = new TaskEngine(
@@ -597,6 +661,283 @@ describe("durable task lifecycle", () => {
       status: "completed",
       result: { isError: true, structuredContent: { outcome: "start_window_missed" } },
     });
+  });
+
+  it("T-007 safely stops an immediate queued task before publishing start_window_missed", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T18:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const timedEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await timedEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-immediate-queued", scenario: "queued_start" },
+      authorization,
+      undefined,
+      undefined,
+      { start: { mode: "immediate", startToleranceMs: 1_000 }, maxElapsedMs: null },
+    );
+    if (created.kind !== "task") throw new Error("Expected queued Task");
+    const taskId = String(created.task.taskId);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "QUEUED",
+      actualStartedAt: null,
+    });
+    clock.advance(1_001);
+    expect(
+      await new DurableScheduler(
+        engine.manifest,
+        gateway,
+        repository,
+        clock,
+        "immediate-watchdog",
+      ).tick(),
+    ).toMatchObject({ watchdogStops: 1 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STOPPING",
+      stopReason: "START_WINDOW_MISSED",
+    });
+    await new DurableCommandDispatcher(gateway, repository, clock, "immediate-stop").tick();
+    expect(await timedEngine.getTask(taskId, authorization)).toMatchObject({
+      status: "completed",
+      result: { isError: true, structuredContent: { outcome: "start_window_missed" } },
+    });
+  });
+
+  it("T-008 compensates an immediate StartOperation response that arrives after the window", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T19:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const lateGateway = {
+      startOperation: async (...args: Parameters<GrpcAdapterGateway["startOperation"]>) => {
+        const response = await gateway.startOperation(...args);
+        clock.advance(1_001);
+        return response;
+      },
+    } as unknown as GrpcAdapterGateway;
+    const lateEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      lateGateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await lateEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-immediate-late-response" },
+      authorization,
+      undefined,
+      undefined,
+      { start: { mode: "immediate", startToleranceMs: 1_000 }, maxElapsedMs: null },
+    );
+    if (created.kind !== "task") throw new Error("Expected compensated Task");
+    const taskId = String(created.task.taskId);
+    expect(created.task).toMatchObject({ status: "working" });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "STOPPING",
+      stopReason: "START_WINDOW_MISSED",
+    });
+    await new DurableCommandDispatcher(gateway, repository, clock, "late-response-stop").tick();
+    const reader = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    expect(await reader.getTask(taskId, authorization)).toMatchObject({
+      status: "completed",
+      result: { structuredContent: { outcome: "start_window_missed" } },
+    });
+  });
+
+  it("T-009 records actualStartedAt and does not stop an on-time immediate execution", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T20:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const timedEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await timedEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-immediate-on-time" },
+      authorization,
+      undefined,
+      undefined,
+      { start: { mode: "immediate", startToleranceMs: 1_000 }, maxElapsedMs: null },
+    );
+    if (created.kind !== "task") throw new Error("Expected running Task");
+    const taskId = String(created.task.taskId);
+    expect((await repository.getById(taskId))?.actualStartedAt?.toISOString()).toBe(
+      clock.now().toISOString(),
+    );
+    clock.advance(2_000);
+    expect(
+      await new DurableScheduler(
+        engine.manifest,
+        gateway,
+        repository,
+        clock,
+        "on-time-watchdog",
+      ).tick(),
+    ).toMatchObject({ watchdogStops: 0 });
+    expect(await repository.getById(taskId)).toMatchObject({ internalState: "RUNNING" });
+  });
+
+  it("T-010 retries a retryable scheduled rejection inside the window and starts once", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T21:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-retry-success", scenario: "scheduled_retry_once" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 3_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    const scheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "scheduled-retry-success",
+    );
+    expect(await scheduler.tick()).toMatchObject({ deferred: 1, started: 0 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "SCHEDULED",
+      invocationAttempt: 1,
+    });
+    clock.advance(1_000);
+    expect(await scheduler.tick()).toMatchObject({ started: 1 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      invocationAttempt: 2,
+      internalState: "RUNNING",
+    });
+    expect(sideEffectCount - before).toBe(1);
+  });
+
+  it("T-011 ends repeated retryable scheduled rejection at the window without a late start", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T22:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-window-end", scenario: "scheduled_retry_always" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 500,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    const scheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "scheduled-window-end",
+    );
+    expect(await scheduler.tick()).toMatchObject({ deferred: 1 });
+    clock.advance(501);
+    expect(await scheduler.tick()).toMatchObject({ missed: 1, started: 0 });
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_COMPLETED",
+      invocationAttempt: 1,
+      result: { structuredContent: { outcome: "start_window_missed" } },
+    });
+    expect(sideEffectCount).toBe(before);
+  });
+
+  it("T-012 publishes a nonretryable scheduled rejection with observation and outbox", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T23:00:00Z"));
+    const repository = new TaskRepository(pool);
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      repository,
+      undefined,
+      clock,
+    );
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "rc2-scheduled-permanent", scenario: "scheduled_permanent_reject" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: clock.now().toISOString(),
+          startToleranceMs: 1_000,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled Task");
+    const taskId = String(created.task.taskId);
+    await new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "scheduled-permanent",
+    ).tick();
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_COMPLETED",
+      result: { structuredContent: { outcome: "admission_rejected", retryable: false } },
+    });
+    expect(await repository.listObservations(taskId)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "task.admission_rejected" })]),
+    );
+    const event = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM outbox_event WHERE aggregate_id=$1 AND event_type='task.admission_rejected'",
+      [taskId],
+    );
+    expect(event.rows[0]?.count).toBe("1");
   });
 
   it("requests safe stop at maxElapsed and publishes deadline only after Adapter proof", async () => {

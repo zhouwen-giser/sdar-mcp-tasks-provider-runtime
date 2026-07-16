@@ -164,7 +164,7 @@ export class GrpcAdapterGateway {
     taskId: string,
     operationName: string,
     argumentHash: string,
-    reason: "USER_REQUESTED" | "DEADLINE_REACHED",
+    reason: "USER_REQUESTED" | "DEADLINE_REACHED" | "START_WINDOW_MISSED",
     commandSequence: number,
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {

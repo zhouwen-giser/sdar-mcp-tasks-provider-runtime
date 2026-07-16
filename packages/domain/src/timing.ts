@@ -19,7 +19,7 @@ export interface TimingAnchors {
 }
 
 export const defaultTiming: TaskExecutionTiming = {
-  start: { mode: "immediate", startToleranceMs: 0 },
+  start: { mode: "immediate", startToleranceMs: 30_000 },
   maxElapsedMs: null,
 };
 

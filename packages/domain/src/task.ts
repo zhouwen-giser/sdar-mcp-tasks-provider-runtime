@@ -46,6 +46,12 @@ export interface TaskRecord {
   acceptedAt: Date;
   notBefore: Date | null;
   latestStartAt: Date | null;
+  actualStartedAt: Date | null;
+  startStopRequestedAt: Date | null;
+  invocationAttempt: number;
+  nextStartAttemptAt: Date | null;
+  scheduleClaimOwner: string | null;
+  scheduleClaimUntil: Date | null;
   deadlineAt: Date | null;
   cancelRequested: boolean;
   stopReason: string | null;
