@@ -701,6 +701,13 @@ function resultFromStart(
   if (response.rejected !== undefined) return rejectionResult(response.rejected);
   const snapshot = response.accepted?.initialSnapshot;
   if (snapshot === undefined) throw new Error("ADAPTER_START_RESPONSE_MISSING_RESULT");
+  if (snapshot.state === "SUCCEEDED") {
+    return {
+      content: [{ type: "text", text: snapshot.message || "Operation completed." }],
+      isError: false,
+      structuredContent: protoStructToJson(snapshot.result),
+    };
+  }
   const transition = mapAdapterSnapshot(normalizeSnapshot(snapshot));
   if (!transition.terminal) throw new Error("SYNCHRONOUS_OPERATION_RETURNED_NONTERMINAL");
   return transition.result ?? transition.error ?? {};
