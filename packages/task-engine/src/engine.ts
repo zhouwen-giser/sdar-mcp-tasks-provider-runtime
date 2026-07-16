@@ -6,12 +6,21 @@ import type {
   ExecutionSnapshot,
 } from "../../adapter-protocol/src/index.js";
 import type { AuthorizationContext, TaskRecord } from "../../domain/src/index.js";
-import type { AvailabilityCheck, AvailabilityResponseValue } from "../../domain/src/index.js";
+import type {
+  AvailabilityCheck,
+  AvailabilityResponseValue,
+  Clock,
+  TaskExecutionTiming,
+  TimingAnchors,
+} from "../../domain/src/index.js";
 import {
+  defaultTiming,
   isTerminalState,
   mapAdapterSnapshot,
+  systemClock,
   unknownAvailability,
   validateAvailabilityResponse,
+  validateTiming,
 } from "../../domain/src/index.js";
 import type { ValidatedManifest, ValidatedOperation } from "../../operation-registry/src/index.js";
 import type {
@@ -33,6 +42,7 @@ export class TaskEngine {
     readonly gateway: GrpcAdapterGateway,
     repository: TaskRepository,
     readonly idempotency?: IdempotencyRepository,
+    readonly clock: Clock = systemClock,
   ) {
     this.#repository = repository;
   }
@@ -43,8 +53,10 @@ export class TaskEngine {
     authorization: AuthorizationContext,
     ttlMs?: number,
     idempotencyKey?: string,
+    timing: TaskExecutionTiming = defaultTiming,
   ): Promise<ToolInvocationResult> {
     operation.validateArguments(argumentsValue);
+    const anchors = validateTiming(timing, operation.capabilities, this.clock.now());
     const argumentHash = hashArguments(argumentsValue);
     if (idempotencyKey !== undefined) {
       if (!operation.capabilities.idempotency || this.idempotency === undefined) {
@@ -65,6 +77,8 @@ export class TaskEngine {
               stableTaskId,
               recovering,
               argumentHash,
+              timing,
+              anchors,
             ),
           ),
       );
@@ -78,6 +92,8 @@ export class TaskEngine {
       randomUUID(),
       false,
       argumentHash,
+      timing,
+      anchors,
     );
   }
 
@@ -122,12 +138,15 @@ export class TaskEngine {
     taskId: string,
     recovering: boolean,
     argumentHash: string,
+    timing: TaskExecutionTiming,
+    anchors: TimingAnchors,
   ): Promise<ToolInvocationResult> {
     if (operation.execution === "SYNCHRONOUS") {
       const response = await this.gateway.startOperation(operation.name, argumentsValue, {
         ...executionOptions(authorization),
         taskId,
         argumentHash,
+        timing: toAdapterTiming(timing),
       });
       return { kind: "result", result: resultFromStart(response) };
     }
@@ -162,11 +181,26 @@ export class TaskEngine {
           reconciliation.snapshot,
           ttlMs,
           reconciliation as unknown as Record<string, unknown>,
+          timing,
+          anchors,
         );
       }
       if (reconciliation.status !== "NOT_FOUND") {
         throw new Error("ADAPTER_RECONCILE_UNAVAILABLE");
       }
+    }
+
+    if (timing.start.mode === "scheduled") {
+      const task = await this.#repository.publishScheduled({
+        ...intent,
+        acceptedAt: anchors.acceptedAt,
+        notBefore: anchors.notBefore,
+        latestStartAt: anchors.latestStartAt,
+        deadlineAt: anchors.deadlineAt,
+        ttlMs: ttlMs ?? 259_200_000,
+        timing,
+      });
+      return { kind: "task", task: detailedTask(task) };
     }
 
     let response;
@@ -176,6 +210,7 @@ export class TaskEngine {
         argumentHash,
         ...executionOptions(authorization),
         invocationAttempt: 1,
+        timing: toAdapterTiming(timing),
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
@@ -210,6 +245,11 @@ export class TaskEngine {
         adapterRevision: Number(accepted.initialSnapshot.revision),
         ttlMs: ttlMs ?? 259_200_000,
         adapterResponse: response as unknown as Record<string, unknown>,
+        acceptedAt: anchors.acceptedAt,
+        notBefore: anchors.notBefore,
+        latestStartAt: anchors.latestStartAt,
+        deadlineAt: anchors.deadlineAt,
+        timing,
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
@@ -233,6 +273,8 @@ export class TaskEngine {
     snapshotValue: ExecutionSnapshot,
     ttlMs: number | undefined,
     adapterResponse: Record<string, unknown>,
+    timing: TaskExecutionTiming,
+    anchors: TimingAnchors,
   ): Promise<ToolInvocationResult> {
     const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
@@ -246,6 +288,11 @@ export class TaskEngine {
       adapterRevision: Number(snapshotValue.revision),
       ttlMs: ttlMs ?? 259_200_000,
       adapterResponse,
+      acceptedAt: anchors.acceptedAt,
+      notBefore: anchors.notBefore,
+      latestStartAt: anchors.latestStartAt,
+      deadlineAt: anchors.deadlineAt,
+      timing,
     });
     return { kind: "task", task: detailedTask(task) };
   }
@@ -264,12 +311,19 @@ export class TaskEngine {
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
     let task = await this.#repository.getAuthorized(taskId, authorization);
-    if (!isTerminalState(task.internalState)) {
+    if (
+      !isTerminalState(task.internalState) &&
+      task.internalState !== "SCHEDULED" &&
+      task.internalState !== "STARTING"
+    ) {
+      if (task.externalExecutionId === null) return detailedTask(task);
       const snapshot = await this.gateway.getExecution(task.taskId, task.externalExecutionId);
       task = await this.#repository.applySnapshot(
         task.taskId,
         Number(snapshot.revision),
-        mapAdapterSnapshot(normalizeSnapshot(snapshot)),
+        task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
+          ? deadlineReached(snapshot.message, this.clock.now())
+          : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
       );
     }
     return detailedTask(task);
@@ -333,8 +387,36 @@ function detailedTask(task: TaskRecord): Record<string, unknown> {
         substate: task.substate,
         observationRevision: task.adapterRevision,
         executionMode: task.executionMode,
+        timing: {
+          acceptedAt: task.acceptedAt.toISOString(),
+          notBefore: task.notBefore?.toISOString(),
+          latestStartAt: task.latestStartAt?.toISOString(),
+          deadlineAt: task.deadlineAt?.toISOString() ?? null,
+        },
       },
     },
+  };
+}
+
+function deadlineReached(message: string, completedAt: Date) {
+  return {
+    internalState: "TERMINAL_COMPLETED" as const,
+    mcpStatus: "completed" as const,
+    substate: null,
+    statusMessage: message || "Maximum elapsed time reached after safe stop.",
+    result: {
+      content: [{ type: "text", text: message || "Maximum elapsed time reached." }],
+      isError: true,
+      structuredContent: {
+        outcome: "deadline_reached",
+        reasonCode: "MAX_ELAPSED_TIME_REACHED",
+        retryable: true,
+        completedAt: completedAt.toISOString(),
+      },
+    },
+    error: null,
+    terminal: true,
+    observationType: "task.progress",
   };
 }
 

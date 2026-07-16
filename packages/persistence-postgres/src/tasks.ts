@@ -23,6 +23,20 @@ export interface PublishTaskInput extends AdmissionIntentInput {
   adapterRevision: number;
   ttlMs: number | null;
   adapterResponse: Record<string, unknown>;
+  acceptedAt: Date;
+  notBefore: Date;
+  latestStartAt: Date;
+  deadlineAt: Date | null;
+  timing: unknown;
+}
+
+export interface PublishScheduledInput extends AdmissionIntentInput {
+  acceptedAt: Date;
+  notBefore: Date;
+  latestStartAt: Date;
+  deadlineAt: Date | null;
+  ttlMs: number | null;
+  timing: unknown;
 }
 
 export interface AdmissionIntentRecord extends AdmissionIntentInput {
@@ -39,7 +53,7 @@ interface TaskRow {
   simulation_id: string | null;
   arguments: Record<string, unknown>;
   argument_hash: string;
-  external_execution_id: string;
+  external_execution_id: string | null;
   internal_state: TaskRecord["internalState"];
   mcp_status: TaskRecord["mcpStatus"];
   substate: string | null;
@@ -52,6 +66,13 @@ interface TaskRow {
   created_at: Date;
   updated_at: Date;
   version: string;
+  accepted_at: Date;
+  not_before: Date | null;
+  latest_start_at: Date | null;
+  deadline_at: Date | null;
+  cancel_requested: boolean;
+  stop_reason: string | null;
+  timing: Record<string, unknown>;
 }
 
 export class TaskRepository {
@@ -152,9 +173,10 @@ export class TaskRepository {
           (task_id, provider_id, operation_name, operation_snapshot_id,
            authorization_context_hash, execution_mode, simulation_id, arguments,
            argument_hash, external_execution_id, internal_state, mcp_status,
-           substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms)
+           substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms,
+           timing, not_before, latest_start_at, deadline_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
-                 $16::jsonb,$17,clock_timestamp(),$18)`,
+                 $16::jsonb,$17,$18,$19,$20::jsonb,$21,$22,$23)`,
         [
           input.taskId,
           input.providerId,
@@ -173,7 +195,12 @@ export class TaskRepository {
           jsonOrNull(input.transition.result),
           jsonOrNull(input.transition.error),
           input.adapterRevision,
+          input.acceptedAt,
           input.ttlMs,
+          JSON.stringify(input.timing),
+          input.notBefore,
+          input.latestStartAt,
+          input.deadlineAt,
         ],
       );
       const revision = Math.max(1, input.adapterRevision);
@@ -188,6 +215,62 @@ export class TaskRepository {
       await client.query("COMMIT");
       const task = await this.getById(input.taskId);
       if (task === null) throw new Error("TASK_NOT_VISIBLE_AFTER_COMMIT");
+      return task;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async publishScheduled(input: PublishScheduledInput): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO provider_task
+          (task_id, provider_id, operation_name, operation_snapshot_id,
+           authorization_context_hash, execution_mode, simulation_id, arguments,
+           argument_hash, external_execution_id, internal_state, mcp_status,
+           substate, status_message, adapter_revision, accepted_at, ttl_ms,
+           timing, not_before, latest_start_at, deadline_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,NULL,'SCHEDULED','working',
+                 'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15)`,
+        [
+          input.taskId,
+          input.providerId,
+          input.operationName,
+          input.operationSnapshotId,
+          input.authorization.hash,
+          input.authorization.executionMode,
+          input.authorization.simulationId,
+          JSON.stringify(input.arguments),
+          input.argumentHash,
+          input.acceptedAt,
+          input.ttlMs,
+          JSON.stringify(input.timing),
+          input.notBefore,
+          input.latestStartAt,
+          input.deadlineAt,
+        ],
+      );
+      await client.query(
+        `INSERT INTO task_observation(task_id, revision, type, occurred_at, payload)
+         VALUES ($1,0,'task.scheduled',$2,'{}'::jsonb)`,
+        [input.taskId, input.acceptedAt],
+      );
+      await insertOutbox(client, input.taskId, "task.created", {
+        status: "working",
+        substate: "scheduled",
+      });
+      await client.query(
+        "UPDATE admission_intent SET state='PUBLISHED', updated_at=clock_timestamp() WHERE task_id=$1",
+        [input.taskId],
+      );
+      await client.query("COMMIT");
+      const task = await this.getById(input.taskId);
+      if (task === null) throw new Error("SCHEDULED_TASK_NOT_VISIBLE_AFTER_COMMIT");
       return task;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -214,6 +297,163 @@ export class TaskRepository {
       taskId,
     ]);
     return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
+  }
+
+  async claimDueScheduled(now: Date, ownerId: string, limit = 32): Promise<TaskRecord[]> {
+    const result = await this.pool.query<TaskRow>(
+      `WITH due AS (
+         SELECT task_id FROM provider_task
+         WHERE external_execution_id IS NULL AND not_before <= $1
+           AND (internal_state='SCHEDULED' OR
+                (internal_state='STARTING' AND schedule_claim_until < $1))
+         ORDER BY not_before, task_id
+         FOR UPDATE SKIP LOCKED LIMIT $3
+       )
+       UPDATE provider_task task SET internal_state='STARTING',
+         status_message='Claimed for scheduled start.', schedule_claim_owner=$2,
+         schedule_claim_until=$1 + interval '30 seconds', version=version+1,
+         updated_at=clock_timestamp()
+       FROM due WHERE task.task_id=due.task_id RETURNING task.*`,
+      [now, ownerId, limit],
+    );
+    return result.rows.map(fromRow);
+  }
+
+  async acceptScheduled(
+    taskId: string,
+    externalExecutionId: string,
+    adapterRevision: number,
+    transition: SnapshotTransition,
+    adapterResponse: Record<string, unknown>,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query<TaskRow>(
+        `UPDATE provider_task SET external_execution_id=$2, internal_state=$3,
+           mcp_status=$4, substate=$5, status_message=$6, result=$7::jsonb,
+           error=$8::jsonb, adapter_revision=$9, actual_started_at=clock_timestamp(),
+           schedule_claim_owner=NULL, schedule_claim_until=NULL, version=version+1,
+           updated_at=clock_timestamp()
+         WHERE task_id=$1 AND internal_state='STARTING' RETURNING *`,
+        [
+          taskId,
+          externalExecutionId,
+          transition.internalState,
+          transition.mcpStatus,
+          transition.substate,
+          transition.statusMessage,
+          jsonOrNull(transition.result),
+          jsonOrNull(transition.error),
+          adapterRevision,
+        ],
+      );
+      const row = updated.rows[0];
+      if (row === undefined) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
+      await insertObservation(client, taskId, Math.max(1, adapterRevision), transition);
+      await insertOutbox(client, taskId, "task.started", { status: transition.mcpStatus });
+      await client.query(
+        `UPDATE admission_intent SET state='PUBLISHED', adapter_response=$2::jsonb,
+         updated_at=clock_timestamp() WHERE task_id=$1`,
+        [taskId, JSON.stringify(adapterResponse)],
+      );
+      await client.query("COMMIT");
+      return fromRow(row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async releaseScheduleClaim(taskId: string, message: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE provider_task SET internal_state='SCHEDULED', substate='scheduled',
+       status_message=$2, schedule_claim_owner=NULL, schedule_claim_until=NULL,
+       version=version+1, updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='STARTING'`,
+      [taskId, message],
+    );
+  }
+
+  async completeStartWindowMissed(taskId: string, completedAt: Date): Promise<TaskRecord> {
+    const result = await this.pool.query<TaskRow>(
+      `UPDATE provider_task SET internal_state='TERMINAL_COMPLETED', mcp_status='completed',
+       substate=NULL, status_message='Scheduled start window was missed.',
+       result=$2::jsonb, schedule_claim_owner=NULL, schedule_claim_until=NULL,
+       version=version+1, updated_at=$3
+       WHERE task_id=$1 AND internal_state IN ('SCHEDULED','STARTING') RETURNING *`,
+      [
+        taskId,
+        JSON.stringify({
+          content: [{ type: "text", text: "Scheduled start window was missed." }],
+          isError: true,
+          structuredContent: {
+            outcome: "start_window_missed",
+            reasonCode: "START_WINDOW_MISSED",
+            retryable: true,
+            completedAt: completedAt.toISOString(),
+          },
+        }),
+        completedAt,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error("SCHEDULED_TASK_NOT_COMPLETED");
+    return fromRow(row);
+  }
+
+  async completeScheduledRejection(
+    taskId: string,
+    completedAt: Date,
+    reasonCode: string,
+    message: string,
+    retryable: boolean,
+  ): Promise<TaskRecord> {
+    const result = await this.pool.query<TaskRow>(
+      `UPDATE provider_task SET internal_state='TERMINAL_COMPLETED', mcp_status='completed',
+       substate=NULL, status_message=$3, result=$2::jsonb,
+       schedule_claim_owner=NULL, schedule_claim_until=NULL, version=version+1,
+       updated_at=$4 WHERE task_id=$1 AND internal_state='STARTING' RETURNING *`,
+      [
+        taskId,
+        JSON.stringify({
+          content: [{ type: "text", text: message }],
+          isError: true,
+          structuredContent: {
+            outcome: "admission_rejected",
+            reasonCode,
+            retryable,
+            completedAt: completedAt.toISOString(),
+          },
+        }),
+        message,
+        completedAt,
+      ],
+    );
+    const row = result.rows[0];
+    if (row === undefined) throw new Error("SCHEDULED_REJECTION_NOT_COMPLETED");
+    return fromRow(row);
+  }
+
+  async claimExpiredDeadlines(now: Date, limit = 32): Promise<TaskRecord[]> {
+    const result = await this.pool.query<TaskRow>(
+      `WITH expired AS (
+         SELECT task_id FROM provider_task
+         WHERE deadline_at <= $1 AND cancel_requested=false
+           AND external_execution_id IS NOT NULL
+           AND internal_state NOT LIKE 'TERMINAL_%'
+         ORDER BY deadline_at, task_id FOR UPDATE SKIP LOCKED LIMIT $2
+       )
+       UPDATE provider_task task SET internal_state='STOPPING', mcp_status='working',
+         substate='stopping', status_message='Deadline reached; safe stop requested.',
+         cancel_requested=true, stop_reason='DEADLINE_REACHED', version=version+1,
+         updated_at=clock_timestamp()
+       FROM expired WHERE task.task_id=expired.task_id RETURNING task.*`,
+      [now, limit],
+    );
+    return result.rows.map(fromRow);
   }
 
   async applySnapshot(
@@ -326,5 +566,12 @@ function fromRow(row: TaskRow): TaskRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: Number(row.version),
+    acceptedAt: row.accepted_at,
+    notBefore: row.not_before,
+    latestStartAt: row.latest_start_at,
+    deadlineAt: row.deadline_at,
+    cancelRequested: row.cancel_requested,
+    stopReason: row.stop_reason,
+    timing: row.timing,
   };
 }

@@ -99,3 +99,10 @@ export interface ReconcileExecutionResponse {
   message: string;
   retryable: boolean;
 }
+
+export interface CommandAck {
+  accepted: boolean;
+  reasonCode: string;
+  message: string;
+  commandSequence: string | number;
+}

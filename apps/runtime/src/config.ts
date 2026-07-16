@@ -9,6 +9,7 @@ const EnvironmentSchema = z.object({
   ADAPTER_ENDPOINT: z.string().min(1).default("127.0.0.1:7001"),
   ADAPTER_TLS_MODE: z.enum(["disabled", "required"]).default("disabled"),
   ADAPTER_RPC_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
+  SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
 });
 
 export type RuntimeConfig = z.infer<typeof EnvironmentSchema>;

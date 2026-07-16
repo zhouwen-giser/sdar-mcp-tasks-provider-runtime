@@ -232,6 +232,40 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         retryable: false,
       });
     },
+    requestCancel: (
+      call: grpc.ServerUnaryCall<
+        { identity?: { taskId?: string; commandSequence?: string | number } },
+        unknown
+      >,
+      callback: grpc.sendUnaryData<unknown>,
+    ) => {
+      const taskId = call.request.identity?.taskId ?? "";
+      const execution = executions.get(taskId);
+      if (execution === undefined) {
+        callback(null, {
+          accepted: false,
+          reasonCode: "EXECUTION_NOT_FOUND",
+          message: "Execution does not exist.",
+          commandSequence: call.request.identity?.commandSequence ?? "0",
+        });
+        return;
+      }
+      execution.snapshot = {
+        ...execution.snapshot,
+        state: "CANCELLED",
+        revision: String(Number(execution.snapshot.revision ?? 1) + 1),
+        reasonCode: "SAFE_STOP_CONFIRMED",
+        message: "Reference execution safely stopped.",
+        observedAt: timestamp(new Date()),
+      };
+      execution.terminalSnapshot = execution.snapshot;
+      callback(null, {
+        accepted: true,
+        reasonCode: "STOP_ACCEPTED",
+        message: "Safe stop accepted.",
+        commandSequence: call.request.identity?.commandSequence ?? "1",
+      });
+    },
     startOperation: (
       call: grpc.ServerUnaryCall<
         {

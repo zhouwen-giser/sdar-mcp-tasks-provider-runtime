@@ -12,7 +12,7 @@ import {
   createMockAdapterServer,
 } from "../../examples/mock-adapter-typescript/src/server.js";
 import { GrpcAdapterGateway } from "../../packages/adapter-protocol/src/index.js";
-import type { AuthorizationContext } from "../../packages/domain/src/index.js";
+import type { AuthorizationContext, Clock } from "../../packages/domain/src/index.js";
 import { McpProtocolHandler } from "../../packages/mcp-protocol/src/index.js";
 import { OperationRegistry } from "../../packages/operation-registry/src/index.js";
 import {
@@ -21,7 +21,7 @@ import {
   TaskRepository,
   runMigrations,
 } from "../../packages/persistence-postgres/src/index.js";
-import { TaskEngine } from "../../packages/task-engine/src/index.js";
+import { DurableScheduler, TaskEngine } from "../../packages/task-engine/src/index.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (databaseUrl === undefined)
@@ -37,6 +37,16 @@ let adapter: grpc.Server;
 let gateway: GrpcAdapterGateway;
 let engine: TaskEngine;
 let sideEffectCount = 0;
+
+class FakeClock implements Clock {
+  constructor(private value: Date) {}
+  now(): Date {
+    return new Date(this.value);
+  }
+  advance(milliseconds: number): void {
+    this.value = new Date(this.value.getTime() + milliseconds);
+  }
+}
 
 beforeAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS
@@ -207,6 +217,34 @@ describe("durable task lifecycle", () => {
       );
       expect(idempotentDuplicate.task.taskId).toBe(idempotentFirst.task.taskId);
       expect(sideEffectCount - beforeIdempotentMcp).toBe(1);
+
+      const beforeScheduledMcp = sideEffectCount;
+      const scheduled = await client.request(
+        {
+          method: "tools/call",
+          params: {
+            name: "durable_task",
+            arguments: { resourceId: "resource-mcp-scheduled" },
+            _meta: {
+              "io.sdar/taskExecution": {
+                idempotencyKey: "mcp-scheduled-key",
+                timing: {
+                  start: {
+                    mode: "scheduled",
+                    scheduledAt: "2030-01-01T00:00:00Z",
+                    startToleranceMs: 30_000,
+                  },
+                  maxElapsedMs: null,
+                },
+              },
+            },
+          },
+        },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      expect(scheduled.task.status).toBe("working");
+      expect(sideEffectCount).toBe(beforeScheduledMcp);
     } finally {
       await client.close();
       await app.close();
@@ -408,6 +446,146 @@ describe("durable task lifecycle", () => {
     } finally {
       unavailable.close();
     }
+  });
+
+  it("starts scheduled work no earlier than notBefore and only once across workers", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T12:00:00Z"));
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      new TaskRepository(pool),
+      new IdempotencyRepository(pool),
+      clock,
+    );
+    const repository = new TaskRepository(pool);
+    const firstWorker = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      repository,
+      clock,
+      "worker-1",
+    );
+    const secondWorker = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      new TaskRepository(pool),
+      clock,
+      "worker-2",
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-scheduled" },
+      authorization,
+      undefined,
+      "scheduled-idempotency",
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: "2026-07-16T12:00:01Z",
+          startToleranceMs: 1_000,
+        },
+        maxElapsedMs: 5_000,
+      },
+    );
+    expect(created.kind).toBe("task");
+    if (created.kind !== "task") throw new Error("Expected scheduled task");
+    expect(created.task).toMatchObject({ status: "working" });
+    expect(sideEffectCount).toBe(before);
+    expect(await firstWorker.tick()).toMatchObject({ started: 0 });
+    expect(sideEffectCount).toBe(before);
+
+    clock.advance(1_000);
+    const claims = await Promise.all([firstWorker.tick(), secondWorker.tick()]);
+    expect(claims.reduce((sum, tick) => sum + tick.started, 0)).toBe(1);
+    expect(sideEffectCount - before).toBe(1);
+    const task = await scheduledEngine.getTask(String(created.task.taskId), authorization);
+    expect(task.status).toBe("completed");
+  });
+
+  it("completes a missed start window without invoking the Adapter", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T13:00:00Z"));
+    const scheduledEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      new TaskRepository(pool),
+      undefined,
+      clock,
+    );
+    const scheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      new TaskRepository(pool),
+      clock,
+      "miss-worker",
+    );
+    const before = sideEffectCount;
+    const created = await scheduledEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-window-missed" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: {
+          mode: "scheduled",
+          scheduledAt: "2026-07-16T13:00:01Z",
+          startToleranceMs: 500,
+        },
+        maxElapsedMs: null,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected scheduled task");
+    clock.advance(2_000);
+    expect(await scheduler.tick()).toMatchObject({ missed: 1, started: 0 });
+    expect(sideEffectCount).toBe(before);
+    const completed = await scheduledEngine.getTask(String(created.task.taskId), authorization);
+    expect(completed).toMatchObject({
+      status: "completed",
+      result: { isError: true, structuredContent: { outcome: "start_window_missed" } },
+    });
+  });
+
+  it("requests safe stop at maxElapsed and publishes deadline only after Adapter proof", async () => {
+    const clock = new FakeClock(new Date("2026-07-16T14:00:00Z"));
+    const timedEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      new TaskRepository(pool),
+      undefined,
+      clock,
+    );
+    const scheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      new TaskRepository(pool),
+      clock,
+      "deadline-worker",
+    );
+    const created = await timedEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-deadline" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: { mode: "immediate", startToleranceMs: 1_000 },
+        maxElapsedMs: 2_000,
+      },
+    );
+    if (created.kind !== "task") throw new Error("Expected timed task");
+    clock.advance(2_001);
+    expect(await scheduler.tick()).toMatchObject({ deadlineStops: 1 });
+    const stopping = await new TaskRepository(pool).getById(String(created.task.taskId));
+    expect(stopping).toMatchObject({ mcpStatus: "working", internalState: "STOPPING" });
+    const completed = await timedEngine.getTask(String(created.task.taskId), authorization);
+    expect(completed).toMatchObject({
+      status: "completed",
+      result: { structuredContent: { outcome: "deadline_reached" } },
+    });
   });
 });
 

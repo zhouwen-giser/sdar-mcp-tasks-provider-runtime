@@ -29,7 +29,7 @@ export interface TaskRecord {
   simulationId: string | null;
   arguments: Record<string, unknown>;
   argumentHash: string;
-  externalExecutionId: string;
+  externalExecutionId: string | null;
   internalState: InternalTaskState;
   mcpStatus: McpTaskStatus;
   substate: string | null;
@@ -42,6 +42,13 @@ export interface TaskRecord {
   createdAt: Date;
   updatedAt: Date;
   version: number;
+  acceptedAt: Date;
+  notBefore: Date | null;
+  latestStartAt: Date | null;
+  deadlineAt: Date | null;
+  cancelRequested: boolean;
+  stopReason: string | null;
+  timing: Record<string, unknown>;
 }
 
 export interface SnapshotTransition {

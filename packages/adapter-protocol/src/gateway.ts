@@ -6,6 +6,7 @@ import { ADAPTER_PROTOCOL_VERSION } from "./types.js";
 import type {
   AvailabilityCheckInput,
   CheckAvailabilityResponse,
+  CommandAck,
   ExecutionSnapshot,
   ProviderManifest,
   ReconcileExecutionResponse,
@@ -38,6 +39,11 @@ type AdapterClient = grpc.Client & {
     options: grpc.CallOptions,
     callback: grpc.requestCallback<ReconcileExecutionResponse>,
   ): grpc.ClientUnaryCall;
+  requestCancel(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<CommandAck>,
+  ): grpc.ClientUnaryCall;
 };
 
 export interface AdapterGatewayOptions {
@@ -54,6 +60,7 @@ export interface StartOperationOptions {
   simulationId?: string | null;
   argumentHash?: string;
   invocationAttempt?: number;
+  timing?: Record<string, unknown>;
 }
 
 export class GrpcAdapterGateway {
@@ -132,6 +139,27 @@ export class GrpcAdapterGateway {
     });
   }
 
+  requestCancel(
+    taskId: string,
+    operationName: string,
+    argumentHash: string,
+    reason: "USER_REQUESTED" | "DEADLINE_REACHED",
+    commandSequence: number,
+    options: StartOperationOptions = {},
+  ): Promise<CommandAck> {
+    return this.#unary<CommandAck>("requestCancel", {
+      metadata: this.#metadata(),
+      identity: {
+        taskId,
+        operationName,
+        argumentHash,
+        executionContext: this.#executionContext(options),
+        commandSequence,
+      },
+      reason,
+    });
+  }
+
   startOperation(
     operationName: string,
     argumentsValue: Record<string, unknown>,
@@ -144,7 +172,7 @@ export class GrpcAdapterGateway {
       taskId,
       operationName,
       arguments: jsonToProtoStruct(argumentsValue),
-      timing: { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
+      timing: options.timing ?? { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
       executionContext: this.#executionContext(options),
       argumentHash:
         options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
@@ -179,7 +207,8 @@ export class GrpcAdapterGateway {
       | "getExecution"
       | "startOperation"
       | "checkAvailability"
-      | "reconcileExecution",
+      | "reconcileExecution"
+      | "requestCancel",
     request: unknown,
   ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
@@ -213,11 +242,17 @@ export class GrpcAdapterGateway {
           { deadline },
           callback as grpc.requestCallback<CheckAvailabilityResponse>,
         );
-      } else {
+      } else if (method === "reconcileExecution") {
         this.#client.reconcileExecution(
           request,
           { deadline },
           callback as grpc.requestCallback<ReconcileExecutionResponse>,
+        );
+      } else {
+        this.#client.requestCancel(
+          request,
+          { deadline },
+          callback as grpc.requestCallback<CommandAck>,
         );
       }
     });

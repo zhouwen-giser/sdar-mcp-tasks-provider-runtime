@@ -16,6 +16,7 @@ import type {
   AuthorizationContext,
   AvailabilityCheck,
   ExecutionMode,
+  TaskExecutionTiming,
 } from "../../domain/src/index.js";
 import type { TaskEngine } from "../../task-engine/src/index.js";
 import { z } from "zod";
@@ -48,6 +49,18 @@ const AvailabilityCheckSchema = z.object({
 const CheckAvailabilityRequestSchema = RequestSchema.extend({
   method: z.literal("io.sdar/taskExecution/checkAvailability"),
   params: z.object({ checks: z.array(AvailabilityCheckSchema).min(1).max(128) }),
+});
+
+const TaskTimingSchema = z.object({
+  start: z.discriminatedUnion("mode", [
+    z.object({ mode: z.literal("immediate"), startToleranceMs: z.number().int().nonnegative() }),
+    z.object({
+      mode: z.literal("scheduled"),
+      scheduledAt: z.string(),
+      startToleranceMs: z.number().int().nonnegative(),
+    }),
+  ]),
+  maxElapsedMs: z.number().int().positive().nullable(),
 });
 
 export class McpProtocolHandler {
@@ -108,6 +121,7 @@ export class McpProtocolHandler {
           authorization,
           params.task?.ttl,
           idempotencyKey(params._meta),
+          taskTiming(params._meta),
         );
         return invocation.kind === "result" ? invocation.result : { task: invocation.task };
       }
@@ -162,13 +176,25 @@ export class McpProtocolHandler {
 }
 
 function idempotencyKey(meta: unknown): string | undefined {
-  if (typeof meta !== "object" || meta === null) return undefined;
-  const profile = (meta as Record<string, unknown>)["io.sdar/taskExecution"];
-  if (typeof profile !== "object" || profile === null) return undefined;
-  const key = (profile as Record<string, unknown>).idempotencyKey;
+  const profile = profileMetadata(meta);
+  if (profile === undefined) return undefined;
+  const key = profile.idempotencyKey;
   if (key === undefined) return undefined;
   if (typeof key !== "string") throw new Error("INVALID_IDEMPOTENCY_KEY");
   return key;
+}
+
+function taskTiming(meta: unknown): TaskExecutionTiming | undefined {
+  const timing = profileMetadata(meta)?.timing;
+  if (timing === undefined) return undefined;
+  return TaskTimingSchema.parse(timing);
+}
+
+function profileMetadata(meta: unknown): Record<string, unknown> | undefined {
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const profile = (meta as Record<string, unknown>)["io.sdar/taskExecution"];
+  if (typeof profile !== "object" || profile === null) return undefined;
+  return profile as Record<string, unknown>;
 }
 
 function authorizationFromRequest(request: IncomingMessage): AuthorizationContext {

@@ -12,7 +12,7 @@ import {
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
-import { TaskEngine } from "../../../packages/task-engine/src/index.js";
+import { DurableScheduler, TaskEngine } from "../../../packages/task-engine/src/index.js";
 import type { RuntimeConfig } from "./config.js";
 
 function createHttpServer(logger: RuntimeLogger) {
@@ -51,6 +51,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   };
   let manifest: ProviderManifest | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
+  let schedulerTimer: NodeJS.Timeout | undefined;
+  let schedulerTicking = false;
 
   app.get("/health/live", () => ({ status: "live" }));
   app.get("/health/ready", async (_request, reply) => {
@@ -83,6 +85,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   });
 
   app.addHook("onClose", async () => {
+    if (schedulerTimer !== undefined) clearInterval(schedulerTimer);
     gateway.close();
     await pool.end();
   });
@@ -114,6 +117,19 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         new IdempotencyRepository(pool),
       );
       mcpHandler = new McpProtocolHandler(validated, gateway, taskEngine);
+      const scheduler = new DurableScheduler(validated, gateway, new TaskRepository(pool));
+      await scheduler.tick();
+      schedulerTimer = setInterval(() => {
+        if (schedulerTicking) return;
+        schedulerTicking = true;
+        void scheduler
+          .tick()
+          .catch((error: unknown) => logger.error({ err: error }, "scheduler tick failed"))
+          .finally(() => {
+            schedulerTicking = false;
+          });
+      }, config.SCHEDULER_POLL_MS);
+      schedulerTimer.unref();
       dependencies.adapter = "ready";
     } catch (error) {
       dependencies.adapter = "failed";
