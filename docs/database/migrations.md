@@ -19,4 +19,6 @@ The Runtime never returns a task identifier before `provider_task`, its initial 
 
 `005_task_controls.sql` adds a per-Task command sequence, stable input-request description/required metadata, and the durable command journal for cancel, update, pause, and resume. Command intent and the matching outbox record commit before the Adapter RPC. Deadline workers allocate the same command sequence and journal entries as user cancellation, so the first persisted stop reason wins and a duplicate control request cannot create another Adapter side effect.
 
+`006_recovery_hardening.sql` persists admission timing/TTL anchors needed to recover a response-lost start without a new client call, adds Task recovery attempt/audit fields, and creates partial recovery indexes. Recovery workers take a transaction-scoped PostgreSQL advisory lock per taskId before replaying a pending command or applying a Reconcile Snapshot. Confirmed Adapter `NOT_FOUND` after an external binding becomes an explicit technical failure; transient unavailability leaves the last confirmed Task unchanged.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

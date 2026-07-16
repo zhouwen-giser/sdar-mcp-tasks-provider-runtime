@@ -21,7 +21,10 @@ interface IdempotencyRow {
 }
 
 export class IdempotencyRepository {
-  constructor(readonly pool: Pool) {}
+  constructor(
+    readonly pool: Pool,
+    readonly onHit: () => void = () => undefined,
+  ) {}
 
   async execute(
     input: IdempotencyInput,
@@ -35,6 +38,7 @@ export class IdempotencyRepository {
       if (row !== undefined && row.argument_hash !== input.argumentHash) {
         throw new Error("IDEMPOTENCY_KEY_CONFLICT");
       }
+      if (row !== undefined) this.onHit();
       if (row?.state === "COMPLETE") return completed(row);
 
       const recovering = row !== undefined;

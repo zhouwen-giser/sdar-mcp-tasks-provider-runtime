@@ -9,19 +9,24 @@ import {
   ListToolsRequestSchema,
   RequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
-import type {
-  AuthorizationContext,
-  AvailabilityCheck,
-  ExecutionMode,
-  TaskExecutionTiming,
-} from "../../domain/src/index.js";
+import type { AvailabilityCheck, TaskExecutionTiming } from "../../domain/src/index.js";
 import type { TaskEngine } from "../../task-engine/src/index.js";
 import { z } from "zod";
+import { createAuthorizationResolver } from "./security.js";
+import type { AuthorizationResolver } from "./security.js";
+
+const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
+
+export interface McpProtocolOptions {
+  resolveAuthorization?: AuthorizationResolver;
+  maxArgumentBytes?: number;
+  maxJsonDepth?: number;
+  maxJsonNodes?: number;
+}
 
 const AvailabilityCheckSchema = z.object({
   requestId: z.string().min(1).max(256),
@@ -86,10 +91,11 @@ export class McpProtocolHandler {
     readonly manifest: ValidatedManifest,
     readonly gateway: GrpcAdapterGateway,
     readonly taskEngine?: TaskEngine,
+    readonly options: McpProtocolOptions = {},
   ) {}
 
   async handle(request: IncomingMessage, response: ServerResponse, body: unknown): Promise<void> {
-    const authorization = authorizationFromRequest(request);
+    const authorization = (this.options.resolveAuthorization ?? developmentAuthorization)(request);
     const profileCapability = {
       version: "1.0",
       availability: this.manifest.operations.some(
@@ -131,6 +137,12 @@ export class McpProtocolHandler {
       );
       if (operation === undefined) throw new Error("UNKNOWN_TOOL");
       const argumentsValue = params.arguments ?? {};
+      assertJsonLimits(
+        argumentsValue,
+        this.options.maxArgumentBytes ?? 1_048_576,
+        this.options.maxJsonDepth ?? 32,
+        this.options.maxJsonNodes ?? 10_000,
+      );
       operation.validateArguments(argumentsValue);
       if (this.taskEngine !== undefined) {
         const invocation = await this.taskEngine.callOperation(
@@ -189,10 +201,15 @@ export class McpProtocolHandler {
         CancelTaskRequestSchema,
         ({ params }) => taskEngine.cancelTask(params.taskId, authorization) as never,
       );
-      server.setRequestHandler(
-        UpdateTaskRequestSchema,
-        ({ params }) => taskEngine.updateTask(params.taskId, params.inputs, authorization) as never,
-      );
+      server.setRequestHandler(UpdateTaskRequestSchema, ({ params }) => {
+        assertJsonLimits(
+          params.inputs,
+          this.options.maxArgumentBytes ?? 1_048_576,
+          this.options.maxJsonDepth ?? 32,
+          this.options.maxJsonNodes ?? 10_000,
+        );
+        return taskEngine.updateTask(params.taskId, params.inputs, authorization);
+      });
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/pause"),
         ({ params }) => taskEngine.controlTask(params.taskId, "PAUSE", authorization) as never,
@@ -235,27 +252,23 @@ function profileMetadata(meta: unknown): Record<string, unknown> | undefined {
   return profile as Record<string, unknown>;
 }
 
-function authorizationFromRequest(request: IncomingMessage): AuthorizationContext {
-  const subject = header(request, "x-sdar-subject") ?? "development-anonymous";
-  const tenant = header(request, "x-sdar-tenant") ?? "default";
-  const modeHeader = header(request, "x-sdar-execution-mode") ?? "live";
-  if (!isExecutionMode(modeHeader)) throw new Error("INVALID_EXECUTION_MODE");
-  const simulationId = header(request, "x-sdar-simulation-id") ?? null;
-  if ((modeHeader === "live") !== (simulationId === null)) {
-    throw new Error("INVALID_SIMULATION_CONTEXT");
-  }
-  return {
-    hash: createHash("sha256").update(`${tenant}\u0000${subject}`).digest("hex"),
-    executionMode: modeHeader,
-    simulationId,
+export function assertJsonLimits(
+  value: unknown,
+  maxBytes: number,
+  maxDepth: number,
+  maxNodes: number,
+): void {
+  if (Buffer.byteLength(JSON.stringify(value)) > maxBytes) throw new Error("ARGUMENTS_TOO_LARGE");
+  let nodes = 0;
+  const visit = (item: unknown, depth: number): void => {
+    nodes += 1;
+    if (nodes > maxNodes) throw new Error("ARGUMENTS_TOO_COMPLEX");
+    if (depth > maxDepth) throw new Error("ARGUMENTS_TOO_DEEP");
+    if (Array.isArray(item)) {
+      for (const child of item) visit(child, depth + 1);
+    } else if (typeof item === "object" && item !== null) {
+      for (const child of Object.values(item)) visit(child, depth + 1);
+    }
   };
-}
-
-function header(request: IncomingMessage, name: string): string | undefined {
-  const value = request.headers[name];
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function isExecutionMode(value: string): value is ExecutionMode {
-  return value === "live" || value === "simulation" || value === "historical-replay";
+  visit(value, 0);
 }

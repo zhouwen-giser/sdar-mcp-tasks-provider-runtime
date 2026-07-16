@@ -59,6 +59,7 @@ jobs:
       - run: pnpm test:unit
       - run: pnpm test:contract
       - run: pnpm test:integration
+      - run: pnpm test:recovery
       - run: pnpm test:security
 
   compose-smoke:

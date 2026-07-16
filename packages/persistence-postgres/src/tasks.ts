@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import type {
   AuthorizationContext,
   SnapshotTransition,
+  TaskExecutionTiming,
   TaskRecord,
 } from "../../domain/src/index.js";
 import { isTerminalState } from "../../domain/src/index.js";
@@ -15,19 +16,19 @@ export interface AdmissionIntentInput {
   authorization: AuthorizationContext;
   arguments: Record<string, unknown>;
   argumentHash: string;
+  acceptedAt: Date;
+  notBefore: Date;
+  latestStartAt: Date;
+  deadlineAt: Date | null;
+  ttlMs: number | null;
+  timing: TaskExecutionTiming;
 }
 
 export interface PublishTaskInput extends AdmissionIntentInput {
   externalExecutionId: string;
   transition: SnapshotTransition;
   adapterRevision: number;
-  ttlMs: number | null;
   adapterResponse: Record<string, unknown>;
-  acceptedAt: Date;
-  notBefore: Date;
-  latestStartAt: Date;
-  deadlineAt: Date | null;
-  timing: unknown;
   inputRequests?: {
     key: string;
     description: string;
@@ -36,17 +37,17 @@ export interface PublishTaskInput extends AdmissionIntentInput {
   }[];
 }
 
-export interface PublishScheduledInput extends AdmissionIntentInput {
-  acceptedAt: Date;
-  notBefore: Date;
-  latestStartAt: Date;
-  deadlineAt: Date | null;
-  ttlMs: number | null;
-  timing: unknown;
-}
+export type PublishScheduledInput = AdmissionIntentInput;
 
 export interface AdmissionIntentRecord extends AdmissionIntentInput {
   state: "PENDING" | "ACCEPTED" | "REJECTED" | "PUBLISHED" | "UNCERTAIN";
+}
+
+export interface PendingCommandRecord {
+  taskId: string;
+  commandSequence: number;
+  commandType: "CANCEL" | "UPDATE" | "PAUSE" | "RESUME";
+  payload: Record<string, unknown>;
 }
 
 export interface InputRequestRecord {
@@ -102,6 +103,8 @@ interface TaskRow {
   stop_reason: string | null;
   next_command_sequence: string;
   timing: Record<string, unknown>;
+  recovery_attempts: number;
+  last_reconciled_at: Date | null;
 }
 
 export class TaskRepository {
@@ -112,8 +115,9 @@ export class TaskRepository {
       `INSERT INTO admission_intent
         (task_id, provider_id, operation_name, operation_snapshot_id,
          authorization_context_hash, execution_mode, simulation_id, arguments,
-         argument_hash, state)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING')
+         argument_hash, state, accepted_at, not_before, latest_start_at,
+         deadline_at, ttl_ms, timing)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING',$10,$11,$12,$13,$14,$15::jsonb)
        ON CONFLICT (task_id) DO NOTHING`,
       [
         input.taskId,
@@ -125,6 +129,12 @@ export class TaskRepository {
         input.authorization.simulationId,
         JSON.stringify(input.arguments),
         input.argumentHash,
+        input.acceptedAt,
+        input.notBefore,
+        input.latestStartAt,
+        input.deadlineAt,
+        input.ttlMs,
+        JSON.stringify(input.timing),
       ],
     );
     return result.rowCount === 1;
@@ -142,6 +152,12 @@ export class TaskRepository {
       arguments: Record<string, unknown>;
       argument_hash: string;
       state: AdmissionIntentRecord["state"];
+      accepted_at: Date;
+      not_before: Date;
+      latest_start_at: Date;
+      deadline_at: Date | null;
+      ttl_ms: string | null;
+      timing: TaskExecutionTiming;
     }>("SELECT * FROM admission_intent WHERE task_id=$1", [taskId]);
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -157,6 +173,12 @@ export class TaskRepository {
       },
       arguments: row.arguments,
       argumentHash: row.argument_hash,
+      acceptedAt: row.accepted_at,
+      notBefore: row.not_before,
+      latestStartAt: row.latest_start_at,
+      deadlineAt: row.deadline_at,
+      ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
+      timing: row.timing,
       state: row.state,
     };
   }
@@ -327,6 +349,129 @@ export class TaskRepository {
       taskId,
     ]);
     return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
+  }
+
+  async listAdmissionsForRecovery(limit = 128): Promise<AdmissionIntentRecord[]> {
+    const result = await this.pool.query<{ task_id: string }>(
+      `SELECT task_id FROM admission_intent
+       WHERE state IN ('PENDING','UNCERTAIN')
+       ORDER BY updated_at, task_id LIMIT $1`,
+      [limit],
+    );
+    const records = await Promise.all(result.rows.map((row) => this.getAdmission(row.task_id)));
+    return records.filter((record): record is AdmissionIntentRecord => record !== null);
+  }
+
+  async listTasksForRecovery(limit = 256): Promise<TaskRecord[]> {
+    const result = await this.pool.query<TaskRow>(
+      `SELECT * FROM provider_task
+       WHERE internal_state NOT LIKE 'TERMINAL_%' AND internal_state <> 'SCHEDULED'
+       ORDER BY updated_at, task_id LIMIT $1`,
+      [limit],
+    );
+    return result.rows.map(fromRow);
+  }
+
+  async withRecoveryLock<T>(taskId: string, recover: () => Promise<T>): Promise<T | null> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lock = await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0)) AS acquired",
+        [`sdar-recovery:${taskId}`],
+      );
+      if (lock.rows[0]?.acquired !== true) {
+        await client.query("ROLLBACK");
+        return null;
+      }
+      const result = await recover();
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listPendingCommands(taskId: string): Promise<PendingCommandRecord[]> {
+    const result = await this.pool.query<{
+      task_id: string;
+      command_sequence: string;
+      command_type: PendingCommandRecord["commandType"];
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT task_id, command_sequence, command_type, payload
+       FROM task_command WHERE task_id=$1 AND state='PENDING'
+       ORDER BY command_sequence`,
+      [taskId],
+    );
+    return result.rows.map((row) => ({
+      taskId: row.task_id,
+      commandSequence: Number(row.command_sequence),
+      commandType: row.command_type,
+      payload: row.payload,
+    }));
+  }
+
+  async noteRecovery(taskId: string): Promise<void> {
+    await this.pool.query(
+      `UPDATE provider_task SET recovery_attempts=recovery_attempts+1,
+       last_reconciled_at=clock_timestamp() WHERE task_id=$1`,
+      [taskId],
+    );
+  }
+
+  async failRecoveryNotFound(taskId: string, message: string): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const updated = await client.query<TaskRow>(
+        `UPDATE provider_task SET internal_state='TERMINAL_FAILED', mcp_status='failed',
+           substate=NULL, status_message=$2, result=NULL,
+           error=$3::jsonb, adapter_revision=adapter_revision+1,
+           recovery_attempts=recovery_attempts+1, last_reconciled_at=clock_timestamp(),
+           version=version+1, updated_at=clock_timestamp()
+         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%' RETURNING *`,
+        [
+          taskId,
+          message,
+          JSON.stringify({ code: -32603, message, data: { reasonCode: "EXECUTION_NOT_FOUND" } }),
+        ],
+      );
+      const row = updated.rows[0];
+      if (row === undefined) {
+        const existing = await client.query<TaskRow>(
+          "SELECT * FROM provider_task WHERE task_id=$1",
+          [taskId],
+        );
+        const existingRow = existing.rows[0];
+        if (existingRow === undefined) throw new Error("TASK_NOT_FOUND");
+        await client.query("COMMIT");
+        return fromRow(existingRow);
+      }
+      await insertObservation(client, taskId, Number(row.adapter_revision), {
+        internalState: "TERMINAL_FAILED",
+        mcpStatus: "failed",
+        substate: null,
+        statusMessage: message,
+        result: null,
+        error: row.error,
+        terminal: true,
+        observationType: "task.progress",
+      });
+      await insertOutbox(client, taskId, "task.recovery_failed", {
+        reasonCode: "EXECUTION_NOT_FOUND",
+      });
+      await client.query("COMMIT");
+      return fromRow(row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async claimDueScheduled(now: Date, ownerId: string, limit = 32): Promise<TaskRecord[]> {
@@ -851,5 +996,7 @@ function fromRow(row: TaskRow): TaskRecord {
     cancelRequested: row.cancel_requested,
     stopReason: row.stop_reason,
     timing: row.timing,
+    recoveryAttempts: row.recovery_attempts,
+    lastReconciledAt: row.last_reconciled_at,
   };
 }

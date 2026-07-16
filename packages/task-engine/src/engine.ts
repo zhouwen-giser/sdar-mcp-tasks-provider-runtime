@@ -25,7 +25,9 @@ import {
 } from "../../domain/src/index.js";
 import type { ValidatedManifest, ValidatedOperation } from "../../operation-registry/src/index.js";
 import type {
+  AdmissionIntentRecord,
   IdempotencyRepository,
+  PendingCommandRecord,
   StoredInvocation,
   TaskRepository,
 } from "../../persistence-postgres/src/index.js";
@@ -33,6 +35,20 @@ import type {
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
   | { kind: "task"; task: Record<string, unknown> };
+
+export interface TaskEngineMetrics {
+  increment(name: string, labels?: Record<string, string>, amount?: number): void;
+}
+
+export interface TaskTraceEvent {
+  event: string;
+  providerId: string;
+  taskId: string;
+  operationName: string;
+  resourceRef: string | null;
+  executionMode: string;
+  correlationId: string | null;
+}
 
 export class TaskEngine {
   readonly #repository: TaskRepository;
@@ -44,6 +60,8 @@ export class TaskEngine {
     repository: TaskRepository,
     readonly idempotency?: IdempotencyRepository,
     readonly clock: Clock = systemClock,
+    readonly metrics?: TaskEngineMetrics,
+    readonly onTrace?: (event: TaskTraceEvent) => void,
   ) {
     this.#repository = repository;
   }
@@ -56,46 +74,58 @@ export class TaskEngine {
     idempotencyKey?: string,
     timing: TaskExecutionTiming = defaultTiming,
   ): Promise<ToolInvocationResult> {
-    operation.validateArguments(argumentsValue);
-    const anchors = validateTiming(timing, operation.capabilities, this.clock.now());
-    const argumentHash = hashArguments(argumentsValue);
-    if (idempotencyKey !== undefined) {
-      if (!operation.capabilities.idempotency || this.idempotency === undefined) {
-        throw new Error("IDEMPOTENCY_NOT_SUPPORTED");
-      }
-      if (idempotencyKey.length < 1 || idempotencyKey.length > 256) {
-        throw new Error("INVALID_IDEMPOTENCY_KEY");
-      }
-      const outcome = await this.idempotency.execute(
-        { authorization, operationName: operation.name, idempotencyKey, argumentHash },
-        async (stableTaskId, recovering) =>
-          storedInvocation(
-            await this.#executeOperation(
-              operation,
-              argumentsValue,
-              authorization,
-              ttlMs,
-              stableTaskId,
-              recovering,
-              argumentHash,
-              timing,
-              anchors,
+    const startedAt = performance.now();
+    try {
+      operation.validateArguments(argumentsValue);
+      const anchors = validateTiming(timing, operation.capabilities, this.clock.now());
+      const argumentHash = hashArguments(argumentsValue);
+      if (idempotencyKey !== undefined) {
+        if (!operation.capabilities.idempotency || this.idempotency === undefined) {
+          throw new Error("IDEMPOTENCY_NOT_SUPPORTED");
+        }
+        if (idempotencyKey.length < 1 || idempotencyKey.length > 256) {
+          throw new Error("INVALID_IDEMPOTENCY_KEY");
+        }
+        const outcome = await this.idempotency.execute(
+          { authorization, operationName: operation.name, idempotencyKey, argumentHash },
+          async (stableTaskId, recovering) =>
+            storedInvocation(
+              await this.#executeOperation(
+                operation,
+                argumentsValue,
+                authorization,
+                ttlMs,
+                stableTaskId,
+                recovering,
+                argumentHash,
+                timing,
+                anchors,
+              ),
             ),
-          ),
+        );
+        return await this.#restoreStored(outcome, authorization);
+      }
+      return await this.#executeOperation(
+        operation,
+        argumentsValue,
+        authorization,
+        ttlMs,
+        randomUUID(),
+        false,
+        argumentHash,
+        timing,
+        anchors,
       );
-      return this.#restoreStored(outcome, authorization);
+    } finally {
+      const labels = { operation: operation.name, executionMode: authorization.executionMode };
+      this.metrics?.increment("sdar_tool_calls_total", labels);
+      this.metrics?.increment("sdar_tool_call_duration_seconds_count", labels);
+      this.metrics?.increment(
+        "sdar_tool_call_duration_seconds_sum",
+        labels,
+        (performance.now() - startedAt) / 1_000,
+      );
     }
-    return this.#executeOperation(
-      operation,
-      argumentsValue,
-      authorization,
-      ttlMs,
-      randomUUID(),
-      false,
-      argumentHash,
-      timing,
-      anchors,
-    );
   }
 
   async checkAvailability(
@@ -142,6 +172,15 @@ export class TaskEngine {
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
   ): Promise<ToolInvocationResult> {
+    this.onTrace?.({
+      event: "operation.admission",
+      providerId: this.manifest.providerId,
+      taskId,
+      operationName: operation.name,
+      resourceRef: resourceReference(operation, argumentsValue),
+      executionMode: authorization.executionMode,
+      correlationId: authorization.correlationId ?? null,
+    });
     if (operation.execution === "SYNCHRONOUS") {
       const response = await this.gateway.startOperation(operation.name, argumentsValue, {
         ...executionOptions(authorization),
@@ -162,6 +201,12 @@ export class TaskEngine {
       authorization,
       arguments: argumentsValue,
       argumentHash,
+      acceptedAt: anchors.acceptedAt,
+      notBefore: anchors.notBefore,
+      latestStartAt: anchors.latestStartAt,
+      deadlineAt: anchors.deadlineAt,
+      ttlMs: ttlMs ?? 259_200_000,
+      timing,
     };
     const inserted = await this.#repository.createAdmissionIntent(intent);
     if (!inserted || recovering) {
@@ -271,6 +316,12 @@ export class TaskEngine {
       authorization: AuthorizationContext;
       arguments: Record<string, unknown>;
       argumentHash: string;
+      acceptedAt: Date;
+      notBefore: Date;
+      latestStartAt: Date;
+      deadlineAt: Date | null;
+      ttlMs: number | null;
+      timing: TaskExecutionTiming;
     },
     externalExecutionId: string,
     snapshotValue: ExecutionSnapshot,
@@ -329,7 +380,11 @@ export class TaskEngine {
       task.internalState !== "STARTING"
     ) {
       if (task.externalExecutionId === null) return detailedTask(task);
-      const snapshot = await this.gateway.getExecution(task.taskId, task.externalExecutionId);
+      const snapshot = await this.gateway.getExecution(
+        task.taskId,
+        task.externalExecutionId,
+        executionOptions(authorization),
+      );
       task = await this.#repository.applySnapshot(
         task.taskId,
         Number(snapshot.revision),
@@ -346,6 +401,144 @@ export class TaskEngine {
     );
   }
 
+  async recoverAdmission(admission: AdmissionIntentRecord): Promise<ToolInvocationResult> {
+    const operation = this.manifest.operations.find(
+      (candidate) => candidate.name === admission.operationName,
+    );
+    if (operation === undefined) throw new Error("RECOVERY_OPERATION_NOT_FOUND");
+    return this.#executeOperation(
+      operation,
+      admission.arguments,
+      admission.authorization,
+      admission.ttlMs ?? undefined,
+      admission.taskId,
+      true,
+      admission.argumentHash,
+      admission.timing,
+      {
+        acceptedAt: admission.acceptedAt,
+        notBefore: admission.notBefore,
+        latestStartAt: admission.latestStartAt,
+        deadlineAt: admission.deadlineAt,
+      },
+    );
+  }
+
+  async reconcileTask(task: TaskRecord): Promise<"found" | "not_found" | "deferred"> {
+    const response = await this.gateway.reconcileExecution(
+      task.taskId,
+      task.operationName,
+      task.argumentHash,
+      executionOptions({
+        hash: task.authorizationContextHash,
+        executionMode: task.executionMode,
+        simulationId: task.simulationId,
+      }),
+    );
+    if (response.status === "TRANSIENT_UNAVAILABLE") return "deferred";
+    if (response.status === "CONFLICT") {
+      await this.#repository.failRecoveryNotFound(
+        task.taskId,
+        "Adapter reported a conflicting execution identity during recovery.",
+      );
+      return "not_found";
+    }
+    if (response.status === "NOT_FOUND" || response.snapshot === undefined) {
+      if (task.internalState === "STARTING" && task.externalExecutionId === null) {
+        await this.#repository.releaseScheduleClaim(
+          task.taskId,
+          "Scheduled start was not found during recovery; claim released for retry.",
+        );
+        return "not_found";
+      }
+      await this.#repository.failRecoveryNotFound(
+        task.taskId,
+        "Adapter execution was not found during recovery.",
+      );
+      return "not_found";
+    }
+    const snapshot = response.snapshot;
+    if (task.internalState === "STARTING" && task.externalExecutionId === null) {
+      await this.#repository.acceptScheduled(
+        task.taskId,
+        response.externalExecutionId || snapshot.externalExecutionId,
+        Number(snapshot.revision),
+        mapAdapterSnapshot(normalizeSnapshot(snapshot)),
+        response as unknown as Record<string, unknown>,
+        normalizeInputRequests(snapshot),
+      );
+    } else {
+      await this.#repository.applySnapshot(
+        task.taskId,
+        Number(snapshot.revision),
+        task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
+          ? deadlineReached(snapshot.message, this.clock.now())
+          : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
+        normalizeInputRequests(snapshot),
+      );
+    }
+    await this.#repository.noteRecovery(task.taskId);
+    return "found";
+  }
+
+  async replayPendingCommand(task: TaskRecord, command: PendingCommandRecord): Promise<void> {
+    const authorization = {
+      hash: task.authorizationContextHash,
+      executionMode: task.executionMode,
+      simulationId: task.simulationId,
+    };
+    const identity = {
+      taskId: task.taskId,
+      operationName: task.operationName,
+      argumentHash: task.argumentHash,
+      commandSequence: command.commandSequence,
+    };
+    let ack;
+    let completedAnswers: { key: string; hash: string; value: unknown }[] = [];
+    if (command.commandType === "CANCEL") {
+      ack = await this.gateway.requestCancel(
+        task.taskId,
+        task.operationName,
+        task.argumentHash,
+        task.stopReason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "USER_REQUESTED",
+        command.commandSequence,
+        executionOptions(authorization),
+      );
+    } else if (command.commandType === "UPDATE") {
+      const answers = command.payload.answers;
+      if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
+        throw new Error("INVALID_RECOVERY_UPDATE_PAYLOAD");
+      }
+      completedAnswers = Object.entries(answers as Record<string, unknown>).map(([key, value]) => ({
+        key,
+        value,
+        hash: createHash("sha256").update(canonicalize(value)).digest("hex"),
+      }));
+      ack = await this.gateway.updateExecution(
+        identity,
+        completedAnswers.map((answer) => ({
+          key: answer.key,
+          value: answer.value,
+          answerHash: answer.hash,
+        })),
+        executionOptions(authorization),
+      );
+    } else if (command.commandType === "PAUSE") {
+      ack = await this.gateway.pauseExecution(identity, executionOptions(authorization));
+    } else {
+      ack = await this.gateway.resumeExecution(identity, executionOptions(authorization));
+    }
+    await this.#repository.acknowledgeCommand(
+      task.taskId,
+      command.commandSequence,
+      ack.accepted,
+      ack as unknown as Record<string, unknown>,
+    );
+    if (ack.accepted && completedAnswers.length > 0) {
+      await this.#repository.completeInputAnswers(task.taskId, completedAnswers);
+    }
+  }
+
   async getTaskResult(
     taskId: string,
     authorization: AuthorizationContext,
@@ -359,7 +552,19 @@ export class TaskEngine {
     taskId: string,
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
+    this.metrics?.increment("sdar_cancel_requests_total", {
+      executionMode: authorization.executionMode,
+    });
     let task = await this.#repository.getAuthorized(taskId, authorization);
+    this.onTrace?.({
+      event: "task.cancel_requested",
+      providerId: task.providerId,
+      taskId,
+      operationName: task.operationName,
+      resourceRef: null,
+      executionMode: authorization.executionMode,
+      correlationId: authorization.correlationId ?? null,
+    });
     if (isTerminalState(task.internalState)) return detailedTask(task);
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
     const command = await this.#repository.beginCancel(taskId, requestHash);
@@ -613,6 +818,9 @@ function executionOptions(authorization: AuthorizationContext) {
     authorizationContextHash: authorization.hash,
     executionMode: authorization.executionMode,
     simulationId: authorization.simulationId,
+    ...(authorization.correlationId === undefined
+      ? {}
+      : { correlationId: authorization.correlationId }),
   };
 }
 
@@ -624,6 +832,23 @@ function canonicalize(value: unknown): string {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonicalize(object[key])}`)
     .join(",")}}`;
+}
+
+function resourceReference(
+  operation: ValidatedOperation,
+  argumentsValue: Record<string, unknown>,
+): string | null {
+  const pointer = operation.resourceBinding?.resourceIdJsonPointer;
+  if (operation.resourceBinding?.mode !== "ARGUMENT_REFERENCE" || !pointer?.startsWith("/")) {
+    return null;
+  }
+  let current: unknown = argumentsValue;
+  for (const encoded of pointer.slice(1).split("/")) {
+    if (typeof current !== "object" || current === null || Array.isArray(current)) return null;
+    const key = encoded.replaceAll("~1", "/").replaceAll("~0", "~");
+    current = (current as Record<string, unknown>)[key];
+  }
+  return typeof current === "string" || typeof current === "number" ? String(current) : null;
 }
 
 function toAdapterAvailabilityCheck(check: AvailabilityCheck): AvailabilityCheckInput {

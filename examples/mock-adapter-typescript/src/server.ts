@@ -23,6 +23,7 @@ interface MockExecution {
   holdSnapshot?: boolean;
   holdReads?: number;
   inputRound?: number;
+  commandAcks: Map<string, Record<string, unknown>>;
 }
 
 function notFound(message: string): grpc.ServiceError {
@@ -259,6 +260,12 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         });
         return;
       }
+      const commandKey = `cancel:${String(call.request.identity?.commandSequence ?? "0")}`;
+      const existingAck = execution.commandAcks.get(commandKey);
+      if (existingAck !== undefined) {
+        callback(null, existingAck);
+        return;
+      }
       options.onControlSideEffect?.(taskId, "cancel");
       execution.snapshot =
         execution.scenario === "natural_completion"
@@ -272,12 +279,22 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               observedAt: timestamp(new Date()),
             };
       execution.terminalSnapshot = execution.snapshot;
-      callback(null, {
+      const ack = {
         accepted: true,
         reasonCode: "STOP_ACCEPTED",
         message: "Safe stop accepted.",
         commandSequence: call.request.identity?.commandSequence ?? "1",
-      });
+      };
+      execution.commandAcks.set(commandKey, ack);
+      if (execution.scenario === "cancel_response_loss") {
+        callback(
+          Object.assign(new Error("injected RequestCancel response loss"), {
+            code: grpc.status.UNAVAILABLE,
+          }),
+        );
+        return;
+      }
+      callback(null, ack);
     },
     updateExecution: (
       call: grpc.ServerUnaryCall<
@@ -291,6 +308,12 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
     ) => {
       const taskId = call.request.identity?.taskId ?? "";
       const execution = executions.get(taskId);
+      const commandKey = `update:${String(call.request.identity?.commandSequence ?? "0")}`;
+      const existingAck = execution?.commandAcks.get(commandKey);
+      if (existingAck !== undefined) {
+        callback(null, existingAck);
+        return;
+      }
       const expectedKey = execution?.inputRound === 2 ? "comment" : "approval";
       const accepted =
         execution?.waitingForInput === true &&
@@ -331,12 +354,14 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           };
         }
       }
-      callback(null, {
+      const ack = {
         accepted,
         reasonCode: accepted ? "INPUT_ACCEPTED" : "INPUT_REJECTED",
         message: accepted ? "Input accepted." : "Input was not expected.",
         commandSequence: call.request.identity?.commandSequence ?? "0",
-      });
+      };
+      execution?.commandAcks.set(commandKey, ack);
+      callback(null, ack);
     },
     pauseExecution: createPauseResumeHandler(executions, options, "PAUSED", "pause"),
     resumeExecution: createPauseResumeHandler(executions, options, "RESUMING", "resume"),
@@ -407,6 +432,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           argumentHash: call.request.argumentHash ?? "",
           snapshot: terminalSnapshot,
           terminalSnapshot,
+          commandAcks: new Map(),
         });
         callback(null, {
           accepted: { externalExecutionId, initialSnapshot: terminalSnapshot },
@@ -457,6 +483,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           argumentHash: call.request.argumentHash ?? "",
           snapshot: initialSnapshot,
           terminalSnapshot,
+          commandAcks: new Map(),
           waitingForInput:
             result.scenario === "input_required" || result.scenario === "multi_round_input",
           ...(result.scenario === "multi_round_input" ? { inputRound: 1 } : {}),
@@ -492,6 +519,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         argumentHash: call.request.argumentHash ?? "",
         snapshot: terminalSnapshot,
         terminalSnapshot,
+        commandAcks: new Map(),
       });
       callback(null, {
         accepted: { externalExecutionId, initialSnapshot: terminalSnapshot },
@@ -531,6 +559,12 @@ function createPauseResumeHandler(
       });
       return;
     }
+    const commandKey = `${command}:${String(call.request.identity?.commandSequence ?? "0")}`;
+    const existingAck = execution.commandAcks.get(commandKey);
+    if (existingAck !== undefined) {
+      callback(null, existingAck);
+      return;
+    }
     options.onControlSideEffect?.(taskId, command);
     execution.snapshot = {
       ...execution.snapshot,
@@ -547,12 +581,14 @@ function createPauseResumeHandler(
         revision: String(Number(execution.snapshot.revision ?? 1) + 1),
       };
     }
-    callback(null, {
+    const ack = {
       accepted: true,
       reasonCode: command === "pause" ? "PAUSE_ACCEPTED" : "RESUME_ACCEPTED",
       message: `${command} accepted.`,
       commandSequence: call.request.identity?.commandSequence ?? "1",
-    });
+    };
+    execution.commandAcks.set(commandKey, ack);
+    callback(null, ack);
   };
 }
 

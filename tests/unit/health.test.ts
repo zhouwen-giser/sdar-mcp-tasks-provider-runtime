@@ -24,4 +24,15 @@ describe("Runtime health", () => {
       dependencies: { database: "starting", adapter: "starting", recovery: "starting" },
     });
   });
+
+  it("rejects an oversized HTTP body before protocol handling", async () => {
+    runtime = createRuntime(loadRuntimeConfig({ HTTP_BODY_LIMIT_BYTES: "1024" }));
+    const response = await runtime.app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: { "content-type": "application/json" },
+      payload: { value: "x".repeat(2_048) },
+    });
+    expect(response.statusCode).toBe(413);
+  });
 });

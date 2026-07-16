@@ -4,7 +4,7 @@ An independently deployable, language-neutral Runtime for the SEP-2663 task life
 
 The implementation follows [`SDAR_MCP_Tasks_Runtime_Codex_Goal_Task_Package_V1.0.md`](SDAR_MCP_Tasks_Runtime_Codex_Goal_Task_Package_V1.0.md). Normative design inputs are under [`references/`](references/), the living execution plan is [`docs/implementation/runtime-exec-plan.md`](docs/implementation/runtime-exec-plan.md), and delivery evidence is under [`reports/runtime-v1/`](reports/runtime-v1/).
 
-## R1 foundation quick start
+## Runtime quick start
 
 Prerequisites: Node.js 22, Corepack/pnpm 11, and Docker with Compose access.
 
@@ -25,4 +25,6 @@ The default stack exposes Runtime HTTP on `:8080`, PostgreSQL on `:5432`, and an
 docker compose --profile python-adapter build adapter-python
 ```
 
-Root commands for all release gates are discoverable in `package.json`; `pnpm verify` becomes the complete RC gate as R2-R9 add their assigned suites.
+Runtime startup runs durable scheduling and recovery before readiness. Authentication, execution-mode isolation, mutual TLS, limits, recovery behavior, and Prometheus metrics are documented in [`docs/operations/security-recovery.md`](docs/operations/security-recovery.md).
+
+Root commands for all release gates are discoverable in `package.json`; `pnpm verify` becomes the complete RC gate as R8-R9 add their assigned suites.

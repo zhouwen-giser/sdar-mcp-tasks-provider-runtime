@@ -17,6 +17,7 @@ export interface AuthorizationContext {
   hash: string;
   executionMode: ExecutionMode;
   simulationId: string | null;
+  correlationId?: string;
 }
 
 export interface TaskRecord {
@@ -49,6 +50,8 @@ export interface TaskRecord {
   cancelRequested: boolean;
   stopReason: string | null;
   timing: Record<string, unknown>;
+  recoveryAttempts: number;
+  lastReconciledAt: Date | null;
 }
 
 export interface SnapshotTransition {

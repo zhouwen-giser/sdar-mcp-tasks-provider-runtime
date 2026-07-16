@@ -66,6 +66,7 @@ export interface AdapterGatewayOptions {
   providerId: string;
   credentials?: grpc.ChannelCredentials;
   timeoutMs?: number;
+  onRpc?: (method: string, outcome: "success" | "error", durationMs: number) => void;
 }
 
 export interface StartOperationOptions {
@@ -76,12 +77,14 @@ export interface StartOperationOptions {
   argumentHash?: string;
   invocationAttempt?: number;
   timing?: Record<string, unknown>;
+  correlationId?: string;
 }
 
 export class GrpcAdapterGateway {
   readonly #client: AdapterClient;
   readonly #providerId: string;
   readonly #timeoutMs: number;
+  readonly #onRpc: AdapterGatewayOptions["onRpc"];
 
   constructor(options: AdapterGatewayOptions) {
     const Client = adapterClientConstructor();
@@ -91,6 +94,7 @@ export class GrpcAdapterGateway {
     ) as unknown as AdapterClient;
     this.#providerId = options.providerId;
     this.#timeoutMs = options.timeoutMs ?? 5_000;
+    this.#onRpc = options.onRpc;
   }
 
   describeProvider(): Promise<ProviderManifest> {
@@ -99,15 +103,17 @@ export class GrpcAdapterGateway {
     });
   }
 
-  getExecution(taskId: string, externalExecutionId = ""): Promise<ExecutionSnapshot> {
+  getExecution(
+    taskId: string,
+    externalExecutionId = "",
+    options: StartOperationOptions = {},
+  ): Promise<ExecutionSnapshot> {
     return this.#unary<ExecutionSnapshot>("getExecution", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       taskId,
       externalExecutionId,
       executionContext: {
-        authorizationContextHash: "runtime-health",
-        executionMode: "LIVE",
-        correlationId: randomUUID(),
+        ...this.#executionContext(options),
       },
     });
   }
@@ -117,7 +123,7 @@ export class GrpcAdapterGateway {
     options: StartOperationOptions = {},
   ): Promise<CheckAvailabilityResponse> {
     return this.#unary<CheckAvailabilityResponse>("checkAvailability", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       executionContext: this.#executionContext(options),
       checks: checks.map((check) => ({
         requestId: check.requestId,
@@ -146,7 +152,7 @@ export class GrpcAdapterGateway {
     options: StartOperationOptions = {},
   ): Promise<ReconcileExecutionResponse> {
     return this.#unary<ReconcileExecutionResponse>("reconcileExecution", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       taskId,
       operationName,
       argumentHash,
@@ -163,7 +169,7 @@ export class GrpcAdapterGateway {
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
     return this.#unary<CommandAck>("requestCancel", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       identity: {
         taskId,
         operationName,
@@ -186,7 +192,7 @@ export class GrpcAdapterGateway {
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
     return this.#unary<CommandAck>("updateExecution", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       identity: {
         ...identity,
         executionContext: this.#executionContext(options),
@@ -209,7 +215,7 @@ export class GrpcAdapterGateway {
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
     return this.#unary<CommandAck>("pauseExecution", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       identity: { ...identity, executionContext: this.#executionContext(options) },
       reasonCode: "CLIENT_REQUESTED",
     });
@@ -225,7 +231,7 @@ export class GrpcAdapterGateway {
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
     return this.#unary<CommandAck>("resumeExecution", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       identity: { ...identity, executionContext: this.#executionContext(options) },
       reasonCode: "CLIENT_REQUESTED",
     });
@@ -239,7 +245,7 @@ export class GrpcAdapterGateway {
     const taskId = options.taskId ?? randomUUID();
     const canonicalArguments = JSON.stringify(argumentsValue, Object.keys(argumentsValue).sort());
     return this.#unary<StartOperationResponse>("startOperation", {
-      metadata: this.#metadata(),
+      metadata: this.#metadata(options.correlationId),
       taskId,
       operationName,
       arguments: jsonToProtoStruct(argumentsValue),
@@ -255,11 +261,11 @@ export class GrpcAdapterGateway {
     this.#client.close();
   }
 
-  #metadata(): Record<string, string> {
+  #metadata(correlationId: string = randomUUID()): Record<string, string> {
     return {
       adapterProtocolVersion: ADAPTER_PROTOCOL_VERSION,
       providerId: this.#providerId,
-      correlationId: randomUUID(),
+      correlationId,
     };
   }
 
@@ -268,7 +274,7 @@ export class GrpcAdapterGateway {
       authorizationContextHash: options.authorizationContextHash ?? "r2-development",
       executionMode: (options.executionMode ?? "live").replace("-", "_").toUpperCase(),
       simulationId: options.simulationId ?? "",
-      correlationId: randomUUID(),
+      correlationId: options.correlationId ?? randomUUID(),
     };
   }
 
@@ -286,11 +292,19 @@ export class GrpcAdapterGateway {
     request: unknown,
   ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
+    const startedAt = performance.now();
     return new Promise<T>((resolve, reject) => {
       const callback: grpc.requestCallback<T> = (error, value) => {
-        if (error !== null) reject(error);
-        else if (value === undefined) reject(new Error(`Adapter ${method} returned no value`));
-        else resolve(value);
+        if (error !== null) {
+          this.#onRpc?.(method, "error", performance.now() - startedAt);
+          reject(error);
+        } else if (value === undefined) {
+          this.#onRpc?.(method, "error", performance.now() - startedAt);
+          reject(new Error(`Adapter ${method} returned no value`));
+        } else {
+          this.#onRpc?.(method, "success", performance.now() - startedAt);
+          resolve(value);
+        }
       };
       if (method === "describeProvider") {
         this.#client.describeProvider(
