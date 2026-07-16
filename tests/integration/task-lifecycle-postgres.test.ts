@@ -52,7 +52,7 @@ class FakeClock implements Clock {
 
 beforeAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS
-    runtime_lease, outbox_event, idempotency_record, task_input_request,
+    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
     task_observation, provider_task, admission_intent, operation_snapshot,
     runtime_schema_migration CASCADE`);
   await runMigrations(pool);
