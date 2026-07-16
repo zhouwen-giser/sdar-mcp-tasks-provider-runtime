@@ -6,6 +6,7 @@
 - Default branch changes: none
 - Parallel conflicts: none
 - Force push/history rewrite: none
-- Phase commit: pending
-- Push: pending
-- Exit CI: pending
+- Phase commit: `3b896caa3f3a5aa82ab9c434477984b908d9bb91`
+- Test-reset fix: `e619a1d6d02fb38b677aa4b6799c771eea71cd6e`
+- Push: PASS, `origin/feature/mcp-tasks-provider-runtime-v1`
+- Exit CI: PASS, run `29497170920` (`quality`, `compose-smoke`)
