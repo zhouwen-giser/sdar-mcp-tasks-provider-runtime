@@ -13,3 +13,5 @@
 | PostgreSQL lifecycle integration | CI pending | 5 real PostgreSQL/gRPC/MCP tests |
 
 No PostgreSQL test is skipped when its environment is missing. The local Docker socket limitation remains documented; the pushed GitHub Actions PostgreSQL 17 service is the authoritative database gate.
+
+Initial pushed run `29493247279` exposed test-database isolation between the R2 and R3 migration suites (`provider_task` survived the R2 fixture reset). The fixture now removes every lifecycle table before replaying the append-only migration chain; this is a test isolation repair, not a migration modification.
