@@ -1,6 +1,7 @@
 # ADR-006: Runtime observation revision and transactional outbox
 
-Status: accepted  
+Status: accepted
+
 Date: 2026-07-16
 
 ## Context

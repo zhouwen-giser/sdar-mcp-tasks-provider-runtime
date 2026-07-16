@@ -3,18 +3,22 @@
 Executed on 2026-07-16 against isolated PostgreSQL 17 at `127.0.0.1:57611`. No test was
 skipped.
 
-| Command                 | Result       |           Tests | Notes                                   |
-| ----------------------- | ------------ | --------------: | --------------------------------------- |
-| `pnpm format:check`     | PASS         |             n/a | all tracked text after formatting       |
-| `pnpm lint`             | PASS         |             n/a | ESLint                                  |
-| `pnpm typecheck`        | PASS         |             n/a | TypeScript no-emit                      |
-| `pnpm test:unit`        | PASS         |              25 | six files                               |
-| `pnpm test:contract`    | PASS         |               4 | Adapter protocol contract               |
-| `pnpm test:integration` | PASS         |              34 | four files, real PostgreSQL/gRPC        |
-| `pnpm test:recovery`    | PASS         |               6 | startup and response-loss recovery      |
-| `pnpm test:security`    | PASS         |               6 | two files                               |
-| `pnpm test:e2e`         | PASS         |               2 | MCP HTTP stack                          |
-| `pnpm test:rc2:red`     | EXPECTED RED | 4 pass / 2 fail | only H4 Snapshot/identity guards remain |
+| Command                    | Result       |           Tests | Notes                                              |
+| -------------------------- | ------------ | --------------: | -------------------------------------------------- |
+| `pnpm format:check`        | PASS         |             n/a | all tracked text after formatting                  |
+| `pnpm lint`                | PASS         |             n/a | ESLint                                             |
+| `pnpm typecheck`           | PASS         |             n/a | TypeScript no-emit                                 |
+| `pnpm test:unit`           | PASS         |              25 | six files                                          |
+| `pnpm test:contract`       | PASS         |               4 | Adapter protocol contract                          |
+| `pnpm test:integration`    | PASS         |              34 | four files, real PostgreSQL/gRPC                   |
+| `pnpm test:recovery`       | PASS         |               6 | startup and response-loss recovery                 |
+| `pnpm test:security`       | PASS         |               6 | two files                                          |
+| `pnpm test:e2e`            | PASS         |               2 | MCP HTTP stack                                     |
+| `pnpm test:rc2:red`        | EXPECTED RED | 4 pass / 2 fail | only H4 Snapshot/identity guards remain            |
+| push runtime `29514013921` | PASS         |       full gate | `pnpm verify`, Buf and both Compose Adapter builds |
+| PR runtime `29514017780`   | PASS         |       full gate | `pnpm verify`, Buf and both Compose Adapter builds |
+| PR quality `29514019017`   | PASS         |    focused gate | repository quality workflow                        |
+| PR Compose `29514017491`   | PASS         |    focused gate | governance Compose workflow                        |
 
 ## Required matrix evidence
 

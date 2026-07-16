@@ -63,10 +63,17 @@ commits. See `test-results.md` for the complete local regression evidence.
 
 ## 7. Commit and CI
 
-The implementation commit, non-force push and push/PR CI run identifiers are recorded after
-they exist; this report does not pre-claim them.
+- Implementation commit: `f3ad0383fbf34c4dd78fe9ae88e335ec151c26eb`
+- Push: `f0fe46f..f3ad038`, no force
+- Push runtime CI: `29514013921`, SUCCESS (`pnpm verify`, Buf and Compose)
+- PR #3 runtime CI: `29514017780`, SUCCESS (`pnpm verify`, Buf and Compose)
+- PR #3 quality: `29514019017`, SUCCESS
+- PR #3 Compose: `29514017491`, SUCCESS
 
 ## 8. Exit status
 
-Implementation and local gates are complete. Phase closure remains pending the implementation
-commit, push and successful branch/PR checks.
+- [x] Runtime and Adapter revisions are separated.
+- [x] Lifecycle transitions use the atomic state/observation/outbox primitive.
+- [x] Latest revision and stable terminal observation remain consistent.
+- [x] T-014..T-016 and old lifecycle/control regressions pass without skip.
+- [x] Branch and PR checks pass at the implementation SHA.
