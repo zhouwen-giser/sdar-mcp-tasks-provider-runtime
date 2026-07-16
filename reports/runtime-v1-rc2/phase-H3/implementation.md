@@ -86,3 +86,7 @@ character of a JWT signature can leave the decoded bytes unchanged when only unu
 bits differ. Runtime accepted that non-canonical spelling. The fix rejects any segment whose
 decoded bytes do not round-trip to the exact canonical base64url text. The security suite
 passed 20 consecutive local runs; H3 remains open until the fix Head passes push and PR gates.
+
+Fix commit `b599480` subsequently passed push runtime `29514585761`, PR runtime
+`29514590381`, PR quality `29514592620` and PR Compose `29514590244`. H3 is closed with the
+failure retained above as evidence rather than erased.

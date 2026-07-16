@@ -21,6 +21,10 @@ skipped.
 | PR Compose `29514017491`           | PASS         |             focused gate | governance Compose workflow                        |
 | closure push `29514255881`         | FAIL         | 5 pass / 1 fail security | non-canonical JWT signature alias exposed          |
 | `pnpm test:security` x20 after fix | PASS         |           120 assertions | canonical-base64url validation                     |
+| repair push `29514585761`          | PASS         |                full gate | `pnpm verify`, Buf and Compose                     |
+| repair PR runtime `29514590381`    | PASS         |                full gate | `pnpm verify`, Buf and Compose                     |
+| repair PR quality `29514592620`    | PASS         |             focused gate | repository quality workflow                        |
+| repair PR Compose `29514590244`    | PASS         |             focused gate | governance Compose workflow                        |
 
 ## Required matrix evidence
 
