@@ -36,7 +36,7 @@ implementation.
 | R3    | Migrations, task repository/state engine, admission, `tasks/get`                   | async lifecycle and restart query                    | completed (`98cc5a0`, fix `db21497`, CI green) |
 | R4    | Availability, full idempotency, admission recovery/concurrency                     | one external execution per duplicate/concurrent call | completed (`8c23d2d`, fix `df5898e`, CI green) |
 | R5    | DB scheduler, timing contract, start windows, deadlines                            | clock/time matrix and restart claims pass            | completed (`28d35d9`, CI green)                |
-| R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | in progress                                    |
+| R6    | update/input, cancel/stop, observations/outbox, pause/resume gateway               | no premature cancellation; stable revisions/inputs   | implementation complete; exit CI pending       |
 | R7    | reconcile/recovery, auth/mode isolation, mTLS, limits, telemetry                   | fault/security suites and readiness pass             | pending                                        |
 | R8    | P0-P4 conformance CLI, complete TS/Python Adapters                                 | machine-readable dual-language results               | pending                                        |
 | R9    | production images/deployments/docs/audit/capacity/release                          | `pnpm verify`, final report, ready PR, RC tag        | pending                                        |
@@ -129,6 +129,15 @@ deadline safe stop.
 - Apply monotonic snapshots, observations, input requests and outbox events in
   one transaction; add outbox publisher and optional notifications.
 - Wire conditional update/pause/resume commands with command sequences.
+
+Implementation: complete. Migration 005 and PostgreSQL transactions journal
+update/cancel/pause/resume intent before gRPC, including the deadline path.
+Official MCP task result/cancel plus Profile update/pause/resume are wired.
+Stable schema-validated inputs support multiple rounds; duplicate answers,
+commands and Snapshot revisions cannot repeat side effects or observations.
+Cancellation stays working/stopping until Adapter proof and preserves natural
+success and first-writer user/deadline outcomes. Exit awaits remote PostgreSQL
+and Compose CI because the local Docker socket is unavailable.
 
 ### R7 — hardening
 

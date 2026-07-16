@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type {
   AuthorizationContext,
@@ -28,6 +28,12 @@ export interface PublishTaskInput extends AdmissionIntentInput {
   latestStartAt: Date;
   deadlineAt: Date | null;
   timing: unknown;
+  inputRequests?: {
+    key: string;
+    description: string;
+    schema: Record<string, unknown>;
+    required: boolean;
+  }[];
 }
 
 export interface PublishScheduledInput extends AdmissionIntentInput {
@@ -41,6 +47,28 @@ export interface PublishScheduledInput extends AdmissionIntentInput {
 
 export interface AdmissionIntentRecord extends AdmissionIntentInput {
   state: "PENDING" | "ACCEPTED" | "REJECTED" | "PUBLISHED" | "UNCERTAIN";
+}
+
+export interface InputRequestRecord {
+  key: string;
+  description: string;
+  schema: Record<string, unknown>;
+  required: boolean;
+  status: "OPEN" | "ANSWERED";
+  answerHash: string | null;
+}
+
+export interface ObservationRecord {
+  revision: number;
+  type: string;
+  occurredAt: Date;
+  reasonCode: string | null;
+  payload: Record<string, unknown>;
+}
+
+export interface DeadlineStopRecord {
+  task: TaskRecord;
+  commandSequence: number;
 }
 
 interface TaskRow {
@@ -72,6 +100,7 @@ interface TaskRow {
   deadline_at: Date | null;
   cancel_requested: boolean;
   stop_reason: string | null;
+  next_command_sequence: string;
   timing: Record<string, unknown>;
 }
 
@@ -205,6 +234,7 @@ export class TaskRepository {
       );
       const revision = Math.max(1, input.adapterRevision);
       await insertObservation(client, input.taskId, revision, input.transition);
+      await upsertInputRequests(client, input.taskId, input.inputRequests ?? []);
       await insertOutbox(client, input.taskId, "task.created", {
         status: input.transition.mcpStatus,
       });
@@ -325,6 +355,12 @@ export class TaskRepository {
     adapterRevision: number,
     transition: SnapshotTransition,
     adapterResponse: Record<string, unknown>,
+    inputRequests: {
+      key: string;
+      description: string;
+      schema: Record<string, unknown>;
+      required: boolean;
+    }[] = [],
   ): Promise<TaskRecord> {
     const client = await this.pool.connect();
     try {
@@ -351,6 +387,7 @@ export class TaskRepository {
       const row = updated.rows[0];
       if (row === undefined) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
       await insertObservation(client, taskId, Math.max(1, adapterRevision), transition);
+      await upsertInputRequests(client, taskId, inputRequests);
       await insertOutbox(client, taskId, "task.started", { status: transition.mcpStatus });
       await client.query(
         `UPDATE admission_intent SET state='PUBLISHED', adapter_response=$2::jsonb,
@@ -437,29 +474,239 @@ export class TaskRepository {
     return fromRow(row);
   }
 
-  async claimExpiredDeadlines(now: Date, limit = 32): Promise<TaskRecord[]> {
-    const result = await this.pool.query<TaskRow>(
-      `WITH expired AS (
-         SELECT task_id FROM provider_task
+  async claimExpiredDeadlines(now: Date, limit = 32): Promise<DeadlineStopRecord[]> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const expired = await client.query<TaskRow>(
+        `SELECT * FROM provider_task
          WHERE deadline_at <= $1 AND cancel_requested=false
            AND external_execution_id IS NOT NULL
            AND internal_state NOT LIKE 'TERMINAL_%'
-         ORDER BY deadline_at, task_id FOR UPDATE SKIP LOCKED LIMIT $2
-       )
-       UPDATE provider_task task SET internal_state='STOPPING', mcp_status='working',
-         substate='stopping', status_message='Deadline reached; safe stop requested.',
-         cancel_requested=true, stop_reason='DEADLINE_REACHED', version=version+1,
-         updated_at=clock_timestamp()
-       FROM expired WHERE task.task_id=expired.task_id RETURNING task.*`,
-      [now, limit],
+         ORDER BY deadline_at, task_id FOR UPDATE SKIP LOCKED LIMIT $2`,
+        [now, limit],
+      );
+      const claimed: DeadlineStopRecord[] = [];
+      for (const row of expired.rows) {
+        const updated = await client.query<TaskRow>(
+          `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
+             internal_state='STOPPING', mcp_status='working', substate='stopping',
+             status_message='Deadline reached; safe stop requested.', cancel_requested=true,
+             stop_reason='DEADLINE_REACHED', version=version+1, updated_at=clock_timestamp()
+           WHERE task_id=$1 RETURNING *`,
+          [row.task_id],
+        );
+        const taskRow = updated.rows[0];
+        if (taskRow === undefined) throw new Error("DEADLINE_CLAIM_LOST");
+        const commandSequence = Number(taskRow.next_command_sequence);
+        await client.query(
+          `INSERT INTO task_command
+            (task_id, command_sequence, command_type, request_hash, state, payload)
+           VALUES ($1,$2,'CANCEL',$3,'PENDING',$4::jsonb)`,
+          [
+            taskRow.task_id,
+            commandSequence,
+            commandHash("DEADLINE_REACHED"),
+            JSON.stringify({ reason: "DEADLINE_REACHED" }),
+          ],
+        );
+        await insertOutbox(client, taskRow.task_id, "task.cancel_requested", {
+          reason: "DEADLINE_REACHED",
+        });
+        claimed.push({ task: fromRow(taskRow), commandSequence });
+      }
+      await client.query("COMMIT");
+      return claimed;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listInputRequests(taskId: string): Promise<InputRequestRecord[]> {
+    const result = await this.pool.query<{
+      request_key: string;
+      description: string;
+      schema: Record<string, unknown>;
+      required: boolean;
+      status: "OPEN" | "ANSWERED";
+      answer_hash: string | null;
+    }>(
+      `SELECT request_key, description, schema, required, status, answer_hash
+       FROM task_input_request WHERE task_id=$1 ORDER BY created_at, request_key`,
+      [taskId],
     );
-    return result.rows.map(fromRow);
+    return result.rows.map((row) => ({
+      key: row.request_key,
+      description: row.description,
+      schema: row.schema,
+      required: row.required,
+      status: row.status,
+      answerHash: row.answer_hash,
+    }));
+  }
+
+  async listObservations(taskId: string): Promise<ObservationRecord[]> {
+    const result = await this.pool.query<{
+      revision: string;
+      type: string;
+      occurred_at: Date;
+      reason_code: string | null;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT revision, type, occurred_at, reason_code, payload
+       FROM task_observation WHERE task_id=$1 ORDER BY revision`,
+      [taskId],
+    );
+    return result.rows.map((row) => ({
+      revision: Number(row.revision),
+      type: row.type,
+      occurredAt: row.occurred_at,
+      reasonCode: row.reason_code,
+      payload: row.payload,
+    }));
+  }
+
+  async beginCancel(
+    taskId: string,
+    requestHash: string,
+  ): Promise<{ sequence: number; duplicate: boolean }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<{ command_sequence: string }>(
+        `SELECT command_sequence FROM task_command
+         WHERE task_id=$1 AND command_type='CANCEL'
+         ORDER BY command_sequence LIMIT 1`,
+        [taskId],
+      );
+      if (existing.rows[0] !== undefined) {
+        await client.query("COMMIT");
+        return { sequence: Number(existing.rows[0].command_sequence), duplicate: true };
+      }
+      const updated = await client.query<{ next_command_sequence: string }>(
+        `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
+           cancel_requested=true, stop_reason='USER_REQUESTED', internal_state='STOPPING',
+           mcp_status='working', substate='stopping', status_message='Cancellation requested.',
+           version=version+1, updated_at=clock_timestamp()
+         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
+         RETURNING next_command_sequence`,
+        [taskId],
+      );
+      const sequence = updated.rows[0]?.next_command_sequence;
+      if (sequence === undefined) throw new Error("TASK_ALREADY_TERMINAL");
+      await client.query(
+        `INSERT INTO task_command(task_id, command_sequence, command_type, request_hash, state)
+         VALUES ($1,$2,'CANCEL',$3,'PENDING')`,
+        [taskId, sequence, requestHash],
+      );
+      await insertOutbox(client, taskId, "task.cancel_requested", {});
+      await client.query("COMMIT");
+      return { sequence: Number(sequence), duplicate: false };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async beginCommand(
+    taskId: string,
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+    requestHash: string,
+    payload: Record<string, unknown>,
+  ): Promise<{ sequence: number; duplicate: boolean }> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query<{ command_sequence: string }>(
+        `SELECT command_sequence FROM task_command
+         WHERE task_id=$1 AND command_type=$2 AND request_hash=$3`,
+        [taskId, commandType, requestHash],
+      );
+      if (existing.rows[0] !== undefined) {
+        await client.query("COMMIT");
+        return { sequence: Number(existing.rows[0].command_sequence), duplicate: true };
+      }
+      const updated = await client.query<{ next_command_sequence: string }>(
+        `UPDATE provider_task SET next_command_sequence=next_command_sequence+1,
+           version=version+1, updated_at=clock_timestamp()
+         WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
+         RETURNING next_command_sequence`,
+        [taskId],
+      );
+      const sequence = updated.rows[0]?.next_command_sequence;
+      if (sequence === undefined) throw new Error("TASK_ALREADY_TERMINAL");
+      await client.query(
+        `INSERT INTO task_command
+          (task_id, command_sequence, command_type, request_hash, state, payload)
+         VALUES ($1,$2,$3,$4,'PENDING',$5::jsonb)`,
+        [taskId, sequence, commandType, requestHash, JSON.stringify(payload)],
+      );
+      await client.query("COMMIT");
+      return { sequence: Number(sequence), duplicate: false };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async acknowledgeCommand(
+    taskId: string,
+    sequence: number,
+    accepted: boolean,
+    ack: Record<string, unknown>,
+  ): Promise<void> {
+    await this.pool.query(
+      `UPDATE task_command SET state=$3, adapter_ack=$4::jsonb,
+       updated_at=clock_timestamp() WHERE task_id=$1 AND command_sequence=$2`,
+      [taskId, sequence, accepted ? "ACKNOWLEDGED" : "REJECTED", JSON.stringify(ack)],
+    );
+  }
+
+  async completeInputAnswers(
+    taskId: string,
+    answers: { key: string; hash: string; value: unknown }[],
+  ): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const answer of answers) {
+        const result = await client.query(
+          `UPDATE task_input_request SET status='ANSWERED', answer_hash=$3,
+           answer=$4::jsonb, answered_at=clock_timestamp()
+           WHERE task_id=$1 AND request_key=$2 AND status='OPEN'`,
+          [taskId, answer.key, answer.hash, JSON.stringify(answer.value)],
+        );
+        if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
+      }
+      await insertOutbox(client, taskId, "task.input_answered", {
+        keys: answers.map((answer) => answer.key),
+      });
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async applySnapshot(
     taskId: string,
     adapterRevision: number,
     transition: SnapshotTransition,
+    inputRequests: {
+      key: string;
+      description: string;
+      schema: Record<string, unknown>;
+      required: boolean;
+    }[] = [],
   ): Promise<TaskRecord> {
     const client = await this.pool.connect();
     try {
@@ -494,6 +741,7 @@ export class TaskRepository {
       );
       if (updated.rowCount !== 1) throw new Error("TASK_VERSION_CONFLICT");
       await insertObservation(client, taskId, adapterRevision, transition);
+      await upsertInputRequests(client, taskId, inputRequests);
       await insertOutbox(client, taskId, "task.updated", { status: transition.mcpStatus });
       await client.query("COMMIT");
       const updatedRow = updated.rows[0];
@@ -524,6 +772,36 @@ async function insertObservation(
       JSON.stringify({ substate: transition.substate }),
     ],
   );
+}
+
+async function upsertInputRequests(
+  client: PoolClient,
+  taskId: string,
+  inputRequests: {
+    key: string;
+    description: string;
+    schema: Record<string, unknown>;
+    required: boolean;
+  }[],
+): Promise<void> {
+  for (const input of inputRequests) {
+    const result = await client.query(
+      `INSERT INTO task_input_request
+        (task_id, request_key, description, schema, required, status)
+       VALUES ($1,$2,$3,$4::jsonb,$5,'OPEN')
+       ON CONFLICT (task_id, request_key) DO UPDATE SET
+         description=EXCLUDED.description
+       WHERE task_input_request.schema=EXCLUDED.schema
+         AND task_input_request.required=EXCLUDED.required
+       RETURNING request_key`,
+      [taskId, input.key, input.description, JSON.stringify(input.schema), input.required],
+    );
+    if (result.rowCount !== 1) throw new Error("STABLE_INPUT_REQUEST_CONFLICT");
+  }
+}
+
+function commandHash(reason: string): string {
+  return createHash("sha256").update(`cancel:${reason.toLowerCase()}`).digest("hex");
 }
 
 async function insertOutbox(

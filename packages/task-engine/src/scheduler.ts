@@ -80,6 +80,12 @@ export class DurableScheduler {
             result: protoStructToJson(snapshot.result),
           }),
           response as unknown as Record<string, unknown>,
+          (snapshot.inputRequests ?? []).map((input) => ({
+            key: input.key,
+            description: input.description,
+            schema: protoStructToJson(input.inputSchema),
+            required: input.required,
+          })),
         );
         result.started += 1;
       } catch (error) {
@@ -92,18 +98,24 @@ export class DurableScheduler {
     }
 
     const expired = await this.repository.claimExpiredDeadlines(now);
-    for (const task of expired) {
+    for (const { task, commandSequence } of expired) {
       const ack = await this.gateway.requestCancel(
         task.taskId,
         task.operationName,
         task.argumentHash,
         "DEADLINE_REACHED",
-        task.version + 1,
+        commandSequence,
         {
           authorizationContextHash: task.authorizationContextHash,
           executionMode: task.executionMode,
           simulationId: task.simulationId,
         },
+      );
+      await this.repository.acknowledgeCommand(
+        task.taskId,
+        commandSequence,
+        ack.accepted,
+        ack as unknown as Record<string, unknown>,
       );
       if (ack.accepted) result.deadlineStops += 1;
     }

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type {
@@ -228,6 +229,7 @@ export class TaskEngine {
     }
     const snapshot = normalizeSnapshot(accepted.initialSnapshot);
     const transition = mapAdapterSnapshot(snapshot);
+    const inputRequests = normalizeInputRequests(accepted.initialSnapshot);
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
       const result = transition.result ?? transition.error ?? {};
       await this.#repository.completeAdmissionWithoutTask(
@@ -250,12 +252,13 @@ export class TaskEngine {
         latestStartAt: anchors.latestStartAt,
         deadlineAt: anchors.deadlineAt,
         timing,
+        inputRequests,
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
       throw error;
     }
-    return { kind: "task", task: detailedTask(task) };
+    return { kind: "task", task: detailedTask(task, inputRequests) };
   }
 
   async #publishReconciled(
@@ -277,6 +280,7 @@ export class TaskEngine {
     anchors: TimingAnchors,
   ): Promise<ToolInvocationResult> {
     const transition = mapAdapterSnapshot(normalizeSnapshot(snapshotValue));
+    const inputRequests = normalizeInputRequests(snapshotValue);
     if (operation.execution === "TASK_CAPABLE" && transition.terminal) {
       await this.#repository.completeAdmissionWithoutTask(intent.taskId, adapterResponse);
       return { kind: "result", result: transition.result ?? transition.error ?? {} };
@@ -293,8 +297,9 @@ export class TaskEngine {
       latestStartAt: anchors.latestStartAt,
       deadlineAt: anchors.deadlineAt,
       timing,
+      inputRequests,
     });
-    return { kind: "task", task: detailedTask(task) };
+    return { kind: "task", task: detailedTask(task, inputRequests) };
   }
 
   async #restoreStored(
@@ -303,7 +308,14 @@ export class TaskEngine {
   ): Promise<ToolInvocationResult> {
     if (outcome.kind === "result") return outcome;
     const task = await this.#repository.getAuthorized(outcome.taskId, authorization);
-    return { kind: "task", task: detailedTask(task) };
+    return {
+      kind: "task",
+      task: detailedTask(
+        task,
+        await this.#repository.listInputRequests(task.taskId),
+        await this.#repository.listObservations(task.taskId),
+      ),
+    };
   }
 
   async getTask(
@@ -324,9 +336,137 @@ export class TaskEngine {
         task.stopReason === "DEADLINE_REACHED" && snapshot.state === "CANCELLED"
           ? deadlineReached(snapshot.message, this.clock.now())
           : mapAdapterSnapshot(normalizeSnapshot(snapshot)),
+        normalizeInputRequests(snapshot),
       );
     }
+    return detailedTask(
+      task,
+      await this.#repository.listInputRequests(task.taskId),
+      await this.#repository.listObservations(task.taskId),
+    );
+  }
+
+  async getTaskResult(
+    taskId: string,
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, unknown>> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    if (!isTerminalState(task.internalState)) throw new Error("TASK_NOT_TERMINAL");
+    return task.result ?? task.error ?? { content: [], isError: task.mcpStatus !== "completed" };
+  }
+
+  async cancelTask(
+    taskId: string,
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, unknown>> {
+    let task = await this.#repository.getAuthorized(taskId, authorization);
+    if (isTerminalState(task.internalState)) return detailedTask(task);
+    const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
+    const command = await this.#repository.beginCancel(taskId, requestHash);
+    if (!command.duplicate) {
+      const ack = await this.gateway.requestCancel(
+        task.taskId,
+        task.operationName,
+        task.argumentHash,
+        "USER_REQUESTED",
+        command.sequence,
+        executionOptions(authorization),
+      );
+      await this.#repository.acknowledgeCommand(
+        taskId,
+        command.sequence,
+        ack.accepted,
+        ack as unknown as Record<string, unknown>,
+      );
+    }
+    task = (await this.#repository.getById(taskId)) ?? task;
     return detailedTask(task);
+  }
+
+  async updateTask(
+    taskId: string,
+    answers: Record<string, unknown>,
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, never>> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    const requests = await this.#repository.listInputRequests(taskId);
+    const ajv = new Ajv2020({ strict: true, allErrors: true });
+    const pending: { key: string; hash: string; value: unknown }[] = [];
+    for (const [key, value] of Object.entries(answers)) {
+      const request = requests.find((candidate) => candidate.key === key);
+      if (request === undefined) throw new Error("UNKNOWN_INPUT_REQUEST_KEY");
+      const hash = createHash("sha256").update(canonicalize(value)).digest("hex");
+      if (request.status === "ANSWERED") {
+        if (request.answerHash !== hash) throw new Error("INPUT_ANSWER_CONFLICT");
+        continue;
+      }
+      if (!ajv.compile(request.schema)(value)) throw new Error("INVALID_INPUT_ANSWER");
+      pending.push({ key, hash, value });
+    }
+    if (pending.length === 0) return {};
+    const requestHash = createHash("sha256").update(canonicalize(pending)).digest("hex");
+    const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
+      answers,
+    });
+    if (!command.duplicate) {
+      const ack = await this.gateway.updateExecution(
+        {
+          taskId,
+          operationName: task.operationName,
+          argumentHash: task.argumentHash,
+          commandSequence: command.sequence,
+        },
+        pending.map((answer) => ({
+          key: answer.key,
+          value: answer.value,
+          answerHash: answer.hash,
+        })),
+        executionOptions(authorization),
+      );
+      await this.#repository.acknowledgeCommand(
+        taskId,
+        command.sequence,
+        ack.accepted,
+        ack as unknown as Record<string, unknown>,
+      );
+      if (!ack.accepted) throw new Error("ADAPTER_INPUT_REJECTED");
+      await this.#repository.completeInputAnswers(taskId, pending);
+    }
+    return {};
+  }
+
+  async controlTask(
+    taskId: string,
+    commandType: "PAUSE" | "RESUME",
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, unknown>> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = this.manifest.operations.find(
+      (candidate) => candidate.name === task.operationName,
+    );
+    if (!operation?.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
+    const requestHash = createHash("sha256").update(commandType).digest("hex");
+    const command = await this.#repository.beginCommand(taskId, commandType, requestHash, {});
+    if (!command.duplicate) {
+      const identity = {
+        taskId,
+        operationName: task.operationName,
+        argumentHash: task.argumentHash,
+        commandSequence: command.sequence,
+      };
+      const ack =
+        commandType === "PAUSE"
+          ? await this.gateway.pauseExecution(identity, executionOptions(authorization))
+          : await this.gateway.resumeExecution(identity, executionOptions(authorization));
+      await this.#repository.acknowledgeCommand(
+        taskId,
+        command.sequence,
+        ack.accepted,
+        ack as unknown as Record<string, unknown>,
+      );
+      if (!ack.accepted) throw new Error("ADAPTER_CONTROL_REJECTED");
+    }
+    return this.getTask(taskId, authorization);
   }
 }
 
@@ -338,6 +478,16 @@ function normalizeSnapshot(snapshot: ExecutionSnapshot) {
     retryable: snapshot.retryable,
     result: protoStructToJson(snapshot.result),
   };
+}
+
+function normalizeInputRequests(snapshot: ExecutionSnapshot) {
+  return (snapshot.inputRequests ?? []).map((request) => ({
+    key: request.key,
+    description: request.description,
+    schema: protoStructToJson(request.inputSchema),
+    required: request.required,
+    status: "OPEN" as const,
+  }));
 }
 
 function resultFromStart(
@@ -370,7 +520,23 @@ function hashArguments(value: Record<string, unknown>): string {
   return createHash("sha256").update(canonicalize(value)).digest("hex");
 }
 
-function detailedTask(task: TaskRecord): Record<string, unknown> {
+function detailedTask(
+  task: TaskRecord,
+  inputRequests: {
+    key: string;
+    description: string;
+    schema: Record<string, unknown>;
+    required: boolean;
+    status: "OPEN" | "ANSWERED";
+  }[] = [],
+  observations: {
+    revision: number;
+    type: string;
+    occurredAt: Date;
+    reasonCode: string | null;
+    payload: Record<string, unknown>;
+  }[] = [],
+): Record<string, unknown> {
   return {
     taskId: task.taskId,
     status: task.mcpStatus,
@@ -379,6 +545,16 @@ function detailedTask(task: TaskRecord): Record<string, unknown> {
     lastUpdatedAt: task.updatedAt.toISOString(),
     ttl: task.ttlMs,
     pollInterval: task.pollIntervalMs,
+    ...(inputRequests.some((request) => request.status === "OPEN")
+      ? {
+          inputRequests: inputRequests
+            .filter((request) => request.status === "OPEN")
+            .map(({ status, ...request }) => {
+              void status;
+              return request;
+            }),
+        }
+      : {}),
     ...(task.result === null ? {} : { result: task.result }),
     ...(task.error === null ? {} : { error: task.error }),
     _meta: {
@@ -393,6 +569,13 @@ function detailedTask(task: TaskRecord): Record<string, unknown> {
           latestStartAt: task.latestStartAt?.toISOString(),
           deadlineAt: task.deadlineAt?.toISOString() ?? null,
         },
+        observations: observations.map((observation) => ({
+          revision: observation.revision,
+          type: observation.type,
+          occurredAt: observation.occurredAt.toISOString(),
+          ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
+          ...observation.payload,
+        })),
       },
     },
   };

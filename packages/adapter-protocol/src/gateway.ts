@@ -1,7 +1,7 @@
 import * as grpc from "@grpc/grpc-js";
 import { createHash, randomUUID } from "node:crypto";
 import { adapterClientConstructor } from "./proto.js";
-import { jsonToProtoStruct } from "./struct.js";
+import { jsonToProtoStruct, jsonToProtoValue } from "./struct.js";
 import { ADAPTER_PROTOCOL_VERSION } from "./types.js";
 import type {
   AvailabilityCheckInput,
@@ -40,6 +40,21 @@ type AdapterClient = grpc.Client & {
     callback: grpc.requestCallback<ReconcileExecutionResponse>,
   ): grpc.ClientUnaryCall;
   requestCancel(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<CommandAck>,
+  ): grpc.ClientUnaryCall;
+  updateExecution(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<CommandAck>,
+  ): grpc.ClientUnaryCall;
+  pauseExecution(
+    request: unknown,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<CommandAck>,
+  ): grpc.ClientUnaryCall;
+  resumeExecution(
     request: unknown,
     options: grpc.CallOptions,
     callback: grpc.requestCallback<CommandAck>,
@@ -160,6 +175,62 @@ export class GrpcAdapterGateway {
     });
   }
 
+  updateExecution(
+    identity: {
+      taskId: string;
+      operationName: string;
+      argumentHash: string;
+      commandSequence: number;
+    },
+    inputs: { key: string; value: unknown; answerHash: string }[],
+    options: StartOperationOptions = {},
+  ): Promise<CommandAck> {
+    return this.#unary<CommandAck>("updateExecution", {
+      metadata: this.#metadata(),
+      identity: {
+        ...identity,
+        executionContext: this.#executionContext(options),
+      },
+      inputs: inputs.map((input) => ({
+        inputRequestKey: input.key,
+        value: jsonToProtoValue(input.value),
+        answerHash: input.answerHash,
+      })),
+    });
+  }
+
+  pauseExecution(
+    identity: {
+      taskId: string;
+      operationName: string;
+      argumentHash: string;
+      commandSequence: number;
+    },
+    options: StartOperationOptions = {},
+  ): Promise<CommandAck> {
+    return this.#unary<CommandAck>("pauseExecution", {
+      metadata: this.#metadata(),
+      identity: { ...identity, executionContext: this.#executionContext(options) },
+      reasonCode: "CLIENT_REQUESTED",
+    });
+  }
+
+  resumeExecution(
+    identity: {
+      taskId: string;
+      operationName: string;
+      argumentHash: string;
+      commandSequence: number;
+    },
+    options: StartOperationOptions = {},
+  ): Promise<CommandAck> {
+    return this.#unary<CommandAck>("resumeExecution", {
+      metadata: this.#metadata(),
+      identity: { ...identity, executionContext: this.#executionContext(options) },
+      reasonCode: "CLIENT_REQUESTED",
+    });
+  }
+
   startOperation(
     operationName: string,
     argumentsValue: Record<string, unknown>,
@@ -208,7 +279,10 @@ export class GrpcAdapterGateway {
       | "startOperation"
       | "checkAvailability"
       | "reconcileExecution"
-      | "requestCancel",
+      | "requestCancel"
+      | "updateExecution"
+      | "pauseExecution"
+      | "resumeExecution",
     request: unknown,
   ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
@@ -248,12 +322,14 @@ export class GrpcAdapterGateway {
           { deadline },
           callback as grpc.requestCallback<ReconcileExecutionResponse>,
         );
-      } else {
+      } else if (method === "requestCancel") {
         this.#client.requestCancel(
           request,
           { deadline },
           callback as grpc.requestCallback<CommandAck>,
         );
+      } else {
+        this.#client[method](request, { deadline }, callback as grpc.requestCallback<CommandAck>);
       }
     });
   }

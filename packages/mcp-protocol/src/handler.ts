@@ -3,6 +3,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   CallToolRequestSchema,
+  CancelTaskRequestSchema,
+  GetTaskPayloadRequestSchema,
   GetTaskRequestSchema,
   ListToolsRequestSchema,
   RequestSchema,
@@ -63,6 +65,22 @@ const TaskTimingSchema = z.object({
   maxElapsedMs: z.number().int().positive().nullable(),
 });
 
+const UpdateTaskRequestSchema = RequestSchema.extend({
+  method: z.literal("tasks/update"),
+  params: z.object({
+    taskId: z.uuid(),
+    inputs: z.record(z.string().min(1).max(256), z.unknown()),
+  }),
+});
+
+const ControlTaskRequestSchema = (
+  method: "io.sdar/taskExecution/tasks/pause" | "io.sdar/taskExecution/tasks/resume",
+) =>
+  RequestSchema.extend({
+    method: z.literal(method),
+    params: z.object({ taskId: z.uuid() }),
+  });
+
 export class McpProtocolHandler {
   constructor(
     readonly manifest: ValidatedManifest,
@@ -85,7 +103,7 @@ export class McpProtocolHandler {
     };
     const capabilities = {
       tools: {},
-      tasks: { requests: { tools: { call: {} } } },
+      tasks: { cancel: {}, requests: { tools: { call: {} } } },
       experimental: {
         "io.modelcontextprotocol/tasks": {},
         "io.sdar/taskExecution": profileCapability,
@@ -162,6 +180,26 @@ export class McpProtocolHandler {
       server.setRequestHandler(
         GetTaskRequestSchema,
         ({ params }) => taskEngine.getTask(params.taskId, authorization) as never,
+      );
+      server.setRequestHandler(
+        GetTaskPayloadRequestSchema,
+        ({ params }) => taskEngine.getTaskResult(params.taskId, authorization) as never,
+      );
+      server.setRequestHandler(
+        CancelTaskRequestSchema,
+        ({ params }) => taskEngine.cancelTask(params.taskId, authorization) as never,
+      );
+      server.setRequestHandler(
+        UpdateTaskRequestSchema,
+        ({ params }) => taskEngine.updateTask(params.taskId, params.inputs, authorization) as never,
+      );
+      server.setRequestHandler(
+        ControlTaskRequestSchema("io.sdar/taskExecution/tasks/pause"),
+        ({ params }) => taskEngine.controlTask(params.taskId, "PAUSE", authorization) as never,
+      );
+      server.setRequestHandler(
+        ControlTaskRequestSchema("io.sdar/taskExecution/tasks/resume"),
+        ({ params }) => taskEngine.controlTask(params.taskId, "RESUME", authorization) as never,
       );
     }
 

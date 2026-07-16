@@ -51,7 +51,14 @@ export interface ExecutionSnapshot {
   retryable: boolean;
   observedAt?: unknown;
   result?: unknown;
-  inputRequests?: unknown[];
+  inputRequests?: AdapterInputRequest[];
+}
+
+export interface AdapterInputRequest {
+  key: string;
+  description: string;
+  inputSchema: unknown;
+  required: boolean;
 }
 
 export interface StartOperationResponse {

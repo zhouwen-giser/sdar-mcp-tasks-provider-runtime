@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import Fastify from "fastify";
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
@@ -18,6 +18,7 @@ import { OperationRegistry } from "../../packages/operation-registry/src/index.j
 import {
   OperationSnapshotRepository,
   IdempotencyRepository,
+  OutboxRepository,
   TaskRepository,
   runMigrations,
 } from "../../packages/persistence-postgres/src/index.js";
@@ -37,6 +38,7 @@ let adapter: grpc.Server;
 let gateway: GrpcAdapterGateway;
 let engine: TaskEngine;
 let sideEffectCount = 0;
+let controlSideEffectCount = 0;
 
 class FakeClock implements Clock {
   constructor(private value: Date) {}
@@ -58,6 +60,9 @@ beforeAll(async () => {
     providerId: "task-provider",
     onStartSideEffect: () => {
       sideEffectCount += 1;
+    },
+    onControlSideEffect: () => {
+      controlSideEffectCount += 1;
     },
   });
   const port = await bindMockAdapter(adapter, "127.0.0.1:0");
@@ -196,6 +201,9 @@ describe("durable task lifecycle", () => {
       expect(created.task.status).toBe("working");
       const completed = await client.experimental.tasks.getTask(created.task.taskId);
       expect(completed.status).toBe("completed");
+      expect(
+        await client.experimental.tasks.getTaskResult(created.task.taskId, CallToolResultSchema),
+      ).toMatchObject({ isError: false });
 
       const beforeIdempotentMcp = sideEffectCount;
       const idempotentParams = {
@@ -245,6 +253,44 @@ describe("durable task lifecycle", () => {
       );
       expect(scheduled.task.status).toBe("working");
       expect(sideEffectCount).toBe(beforeScheduledMcp);
+
+      const inputTask = await client.request(
+        {
+          method: "tools/call",
+          params: {
+            name: "durable_task",
+            arguments: { resourceId: "resource-mcp-input", scenario: "input_required" },
+          },
+        },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      expect(inputTask.task.status).toBe("input_required");
+      await client.request(
+        {
+          method: "tasks/update",
+          params: { taskId: inputTask.task.taskId, inputs: { approval: true } },
+        },
+        z.object({}).loose(),
+      );
+      expect((await client.experimental.tasks.getTask(inputTask.task.taskId)).status).toBe(
+        "completed",
+      );
+
+      const cancelTask = await client.request(
+        {
+          method: "tools/call",
+          params: { name: "durable_task", arguments: { resourceId: "resource-mcp-cancel" } },
+        },
+        CreateTaskResultSchema,
+        { task: { ttl: 60_000 } },
+      );
+      expect((await client.experimental.tasks.cancelTask(cancelTask.task.taskId)).status).toBe(
+        "working",
+      );
+      expect((await client.experimental.tasks.getTask(cancelTask.task.taskId)).status).toBe(
+        "cancelled",
+      );
     } finally {
       await client.close();
       await app.close();
@@ -586,6 +632,178 @@ describe("durable task lifecycle", () => {
       status: "completed",
       result: { structuredContent: { outcome: "deadline_reached" } },
     });
+  });
+
+  it("persists stable input requests and applies idempotent validated updates", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-input", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    expect(created.task).toMatchObject({
+      status: "input_required",
+      inputRequests: [{ key: "approval", required: true }],
+    });
+    const taskId = String(created.task.taskId);
+    const repeated = await engine.getTask(taskId, authorization);
+    expect(repeated).toMatchObject({
+      status: "input_required",
+      inputRequests: [{ key: "approval" }],
+    });
+
+    const before = controlSideEffectCount;
+    await expect(engine.updateTask(taskId, { unknown: true }, authorization)).rejects.toThrow(
+      "UNKNOWN_INPUT_REQUEST_KEY",
+    );
+    expect(controlSideEffectCount).toBe(before);
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    expect(controlSideEffectCount - before).toBe(1);
+    const completed = await engine.getTask(taskId, authorization);
+    expect(completed.status).toBe("completed");
+    await expect(engine.updateTask(taskId, { approval: false }, authorization)).rejects.toThrow(
+      "INPUT_ANSWER_CONFLICT",
+    );
+  });
+
+  it("supports multiple durable input_required rounds with stable unique keys", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-multi-input", scenario: "multi_round_input" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected multi-round input task");
+    const taskId = String(created.task.taskId);
+    expect(created.task).toMatchObject({
+      status: "input_required",
+      inputRequests: [{ key: "approval" }],
+    });
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    const secondRound = await engine.getTask(taskId, authorization);
+    expect(secondRound).toMatchObject({
+      status: "input_required",
+      inputRequests: [{ key: "comment" }],
+    });
+    await engine.updateTask(taskId, { comment: "approved after review" }, authorization);
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
+
+    const requests = await new TaskRepository(pool).listInputRequests(taskId);
+    expect(requests.map(({ key, status }) => ({ key, status }))).toEqual([
+      { key: "approval", status: "ANSWERED" },
+      { key: "comment", status: "ANSWERED" },
+    ]);
+  });
+
+  it("keeps cancellation Ack-only, idempotent, and preserves natural completion races", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-cancel" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected cancellable task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+    const acknowledged = await engine.cancelTask(taskId, authorization);
+    expect(acknowledged).toMatchObject({ status: "working" });
+    expect(
+      (acknowledged._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
+    ).toMatchObject({ substate: "stopping" });
+    await engine.cancelTask(taskId, authorization);
+    expect(controlSideEffectCount - before).toBe(1);
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
+
+    const race = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-natural-race", scenario: "natural_completion" },
+      authorization,
+    );
+    if (race.kind !== "task") throw new Error("Expected race task");
+    const raceId = String(race.task.taskId);
+    expect(await engine.cancelTask(raceId, authorization)).toMatchObject({ status: "working" });
+    expect(await engine.getTask(raceId, authorization)).toMatchObject({
+      status: "completed",
+      result: { structuredContent: { outcome: "success" } },
+    });
+
+    const deadlineClock = new FakeClock(new Date("2026-07-16T15:00:00Z"));
+    const deadlineEngine = new TaskEngine(
+      engine.manifest,
+      engine.operationSnapshotIds,
+      gateway,
+      new TaskRepository(pool),
+      undefined,
+      deadlineClock,
+    );
+    const deadlineTask = await deadlineEngine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-deadline-cancel-race" },
+      authorization,
+      undefined,
+      undefined,
+      {
+        start: { mode: "immediate", startToleranceMs: 0 },
+        maxElapsedMs: 1_000,
+      },
+    );
+    if (deadlineTask.kind !== "task") throw new Error("Expected deadline race task");
+    deadlineClock.advance(1_001);
+    const deadlineScheduler = new DurableScheduler(
+      engine.manifest,
+      gateway,
+      new TaskRepository(pool),
+      deadlineClock,
+      "deadline-race-worker",
+    );
+    await deadlineScheduler.tick();
+    const controlsBeforeDuplicate = controlSideEffectCount;
+    await deadlineEngine.cancelTask(String(deadlineTask.task.taskId), authorization);
+    expect(controlSideEffectCount).toBe(controlsBeforeDuplicate);
+    expect(
+      await deadlineEngine.getTask(String(deadlineTask.task.taskId), authorization),
+    ).toMatchObject({
+      status: "completed",
+      result: { structuredContent: { outcome: "deadline_reached" } },
+    });
+  });
+
+  it("records pause/resume observations without changing Workflow status", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-pause" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected pausable task");
+    const taskId = String(created.task.taskId);
+    const paused = await engine.controlTask(taskId, "PAUSE", authorization);
+    expect(paused).toMatchObject({ status: "working" });
+    expect(
+      (paused._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
+    ).toMatchObject({ substate: "paused" });
+    const resumed = await engine.controlTask(taskId, "RESUME", authorization);
+    expect(resumed.status).toBe("working");
+    expect(
+      (resumed._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
+    ).toMatchObject({ substate: "resuming" });
+    const completed = await engine.getTask(taskId, authorization);
+    expect(completed.status).toBe("completed");
+    const observations = ((completed._meta as Record<string, Record<string, unknown>>)[
+      "io.sdar/taskExecution"
+    ]?.observations ?? []) as { revision: number; type: string }[];
+    expect(observations.map((observation) => observation.revision)).toEqual(
+      [...new Set(observations.map((observation) => observation.revision))].sort((a, b) => a - b),
+    );
+    expect(observations.some((observation) => observation.type === "task.paused")).toBe(true);
+
+    const outbox = new OutboxRepository(pool);
+    const pending = await outbox.pending(1);
+    const event = pending[0];
+    if (event === undefined) throw new Error("Expected a pending outbox event");
+    expect(await outbox.markPublished([event.eventId])).toBe(1);
+    expect((await outbox.pending()).some((candidate) => candidate.eventId === event.eventId)).toBe(
+      false,
+    );
   });
 });
 

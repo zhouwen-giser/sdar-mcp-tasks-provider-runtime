@@ -17,4 +17,6 @@ The Runtime never returns a task identifier before `provider_task`, its initial 
 
 `004_durable_timing.sql` permits a scheduled Task to exist before it has an external execution binding, adds durable not-before and scheduler claim fields, permits revision zero for the Runtime-created scheduling observation, and adds partial due/deadline indexes. Claims are database rows selected with `FOR UPDATE SKIP LOCKED`; an expired `STARTING` claim is eligible for another Runtime, so restart does not depend on an in-process timer.
 
+`005_task_controls.sql` adds a per-Task command sequence, stable input-request description/required metadata, and the durable command journal for cancel, update, pause, and resume. Command intent and the matching outbox record commit before the Adapter RPC. Deadline workers allocate the same command sequence and journal entries as user cancellation, so the first persisted stop reason wins and a duplicate control request cannot create another Adapter side effect.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate Snapshot insertion, task lifecycle constraints, crash windows, and applied-migration tamper detection against real PostgreSQL 17.

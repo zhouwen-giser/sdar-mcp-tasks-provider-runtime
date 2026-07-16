@@ -10,6 +10,19 @@ export interface MockAdapterOptions {
   providerId?: string;
   providerVersion?: string;
   onStartSideEffect?: (taskId: string) => void;
+  onControlSideEffect?: (taskId: string, command: string) => void;
+}
+
+interface MockExecution {
+  externalExecutionId: string;
+  argumentHash: string;
+  snapshot: Record<string, unknown>;
+  terminalSnapshot: Record<string, unknown>;
+  waitingForInput?: boolean;
+  scenario?: string;
+  holdSnapshot?: boolean;
+  holdReads?: number;
+  inputRound?: number;
 }
 
 function notFound(message: string): grpc.ServiceError {
@@ -20,15 +33,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
   const providerId = options.providerId ?? "mock-provider";
   const providerVersion = options.providerVersion ?? "1.0.0";
   const server = new grpc.Server();
-  const executions = new Map<
-    string,
-    {
-      externalExecutionId: string;
-      argumentHash: string;
-      snapshot: Record<string, unknown>;
-      terminalSnapshot: Record<string, unknown>;
-    }
-  >();
+  const executions = new Map<string, MockExecution>();
 
   server.addService(adapterServiceDefinition(), {
     checkAvailability: (
@@ -197,7 +202,11 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         callback(notFound(`Execution ${taskId || "<missing>"} does not exist`));
         return;
       }
-      execution.snapshot = execution.terminalSnapshot;
+      if ((execution.holdReads ?? 0) > 0) {
+        execution.holdReads = (execution.holdReads ?? 1) - 1;
+      } else if (!execution.waitingForInput && !execution.holdSnapshot) {
+        execution.snapshot = execution.terminalSnapshot;
+      }
       callback(null, execution.snapshot);
     },
     reconcileExecution: (
@@ -250,14 +259,18 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         });
         return;
       }
-      execution.snapshot = {
-        ...execution.snapshot,
-        state: "CANCELLED",
-        revision: String(Number(execution.snapshot.revision ?? 1) + 1),
-        reasonCode: "SAFE_STOP_CONFIRMED",
-        message: "Reference execution safely stopped.",
-        observedAt: timestamp(new Date()),
-      };
+      options.onControlSideEffect?.(taskId, "cancel");
+      execution.snapshot =
+        execution.scenario === "natural_completion"
+          ? execution.terminalSnapshot
+          : {
+              ...execution.snapshot,
+              state: "CANCELLED",
+              revision: String(Number(execution.snapshot.revision ?? 1) + 1),
+              reasonCode: "SAFE_STOP_CONFIRMED",
+              message: "Reference execution safely stopped.",
+              observedAt: timestamp(new Date()),
+            };
       execution.terminalSnapshot = execution.snapshot;
       callback(null, {
         accepted: true,
@@ -266,6 +279,67 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         commandSequence: call.request.identity?.commandSequence ?? "1",
       });
     },
+    updateExecution: (
+      call: grpc.ServerUnaryCall<
+        {
+          identity?: { taskId?: string; commandSequence?: string | number };
+          inputs?: { inputRequestKey?: string }[];
+        },
+        unknown
+      >,
+      callback: grpc.sendUnaryData<unknown>,
+    ) => {
+      const taskId = call.request.identity?.taskId ?? "";
+      const execution = executions.get(taskId);
+      const expectedKey = execution?.inputRound === 2 ? "comment" : "approval";
+      const accepted =
+        execution?.waitingForInput === true &&
+        (call.request.inputs ?? []).length > 0 &&
+        (call.request.inputs ?? []).every((input) => input.inputRequestKey === expectedKey);
+      if (accepted) {
+        options.onControlSideEffect?.(taskId, "update");
+        if (execution.scenario === "multi_round_input" && execution.inputRound !== 2) {
+          execution.inputRound = 2;
+          execution.snapshot = {
+            ...execution.snapshot,
+            state: "WAITING_INPUT",
+            revision: "2",
+            reasonCode: "COMMENT_REQUIRED",
+            message: "A second input round is required.",
+            inputRequests: [
+              {
+                key: "comment",
+                description: "Provide an audit comment.",
+                inputSchema: jsonToProtoStruct({ type: "string", minLength: 1 }),
+                required: true,
+              },
+            ],
+          };
+        } else {
+          execution.waitingForInput = false;
+          execution.snapshot = {
+            ...execution.snapshot,
+            state: "RUNNING",
+            revision: execution.inputRound === 2 ? "3" : "2",
+            reasonCode: "INPUT_ACCEPTED",
+            message: "Input accepted; execution resumed.",
+            inputRequests: [],
+          };
+          execution.terminalSnapshot = {
+            ...execution.terminalSnapshot,
+            revision: execution.inputRound === 2 ? "4" : "3",
+          };
+        }
+      }
+      callback(null, {
+        accepted,
+        reasonCode: accepted ? "INPUT_ACCEPTED" : "INPUT_REJECTED",
+        message: accepted ? "Input accepted." : "Input was not expected.",
+        commandSequence: call.request.identity?.commandSequence ?? "0",
+      });
+    },
+    pauseExecution: createPauseResumeHandler(executions, options, "PAUSED", "pause"),
+    resumeExecution: createPauseResumeHandler(executions, options, "RESUMING", "resume"),
     startOperation: (
       call: grpc.ServerUnaryCall<
         {
@@ -355,6 +429,21 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           retryable: false,
           observedAt: { seconds: String(Math.floor(now.getTime() / 1000)), nanos: 0 },
         };
+        if (result.scenario === "input_required" || result.scenario === "multi_round_input") {
+          initialSnapshot.state = "WAITING_INPUT";
+          initialSnapshot.reasonCode = "APPROVAL_REQUIRED";
+          initialSnapshot.message = "Approval input is required.";
+          Object.assign(initialSnapshot, {
+            inputRequests: [
+              {
+                key: "approval",
+                description: "Approve the reference operation.",
+                inputSchema: jsonToProtoStruct({ type: "boolean" }),
+                required: true,
+              },
+            ],
+          });
+        }
         const terminalSnapshot = {
           ...initialSnapshot,
           state: "SUCCEEDED",
@@ -368,6 +457,10 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           argumentHash: call.request.argumentHash ?? "",
           snapshot: initialSnapshot,
           terminalSnapshot,
+          waitingForInput:
+            result.scenario === "input_required" || result.scenario === "multi_round_input",
+          ...(result.scenario === "multi_round_input" ? { inputRound: 1 } : {}),
+          ...(typeof result.scenario === "string" ? { scenario: result.scenario } : {}),
         });
         if (result.scenario === "response_loss") {
           callback(
@@ -412,6 +505,55 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
 
 function timestamp(value: Date): { seconds: string; nanos: number } {
   return { seconds: String(Math.floor(value.getTime() / 1000)), nanos: 0 };
+}
+
+function createPauseResumeHandler(
+  executions: Map<string, MockExecution>,
+  options: MockAdapterOptions,
+  state: "PAUSED" | "RESUMING",
+  command: "pause" | "resume",
+) {
+  return (
+    call: grpc.ServerUnaryCall<
+      { identity?: { taskId?: string; commandSequence?: string | number } },
+      unknown
+    >,
+    callback: grpc.sendUnaryData<unknown>,
+  ) => {
+    const taskId = call.request.identity?.taskId ?? "";
+    const execution = executions.get(taskId);
+    if (execution === undefined) {
+      callback(null, {
+        accepted: false,
+        reasonCode: "EXECUTION_NOT_FOUND",
+        message: "Execution does not exist.",
+        commandSequence: call.request.identity?.commandSequence ?? "0",
+      });
+      return;
+    }
+    options.onControlSideEffect?.(taskId, command);
+    execution.snapshot = {
+      ...execution.snapshot,
+      state,
+      revision: String(Number(execution.snapshot.revision ?? 1) + 1),
+      reasonCode: command === "pause" ? "PAUSED_BY_CLIENT" : "RESUMED_BY_CLIENT",
+      message: command === "pause" ? "Execution paused." : "Execution resuming.",
+    };
+    execution.holdSnapshot = command === "pause";
+    if (command === "resume") {
+      execution.holdReads = 1;
+      execution.terminalSnapshot = {
+        ...execution.terminalSnapshot,
+        revision: String(Number(execution.snapshot.revision ?? 1) + 1),
+      };
+    }
+    callback(null, {
+      accepted: true,
+      reasonCode: command === "pause" ? "PAUSE_ACCEPTED" : "RESUME_ACCEPTED",
+      message: `${command} accepted.`,
+      commandSequence: call.request.identity?.commandSequence ?? "1",
+    });
+  };
 }
 
 export function bindMockAdapter(server: grpc.Server, address: string): Promise<number> {
