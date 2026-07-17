@@ -83,7 +83,7 @@ is green.
 | H7    | `c997578` | complete |
 | H8    | `dc30f45` | complete |
 | H9    | `dc9a60b` | complete |
-| H10   | pending   | verified |
+| H10   | `f658bdc` | complete |
 
 The full `pnpm verify:rc3` gate passed on 2026-07-17 against PostgreSQL 17 and Docker Desktop. It
 included 27 unit, 4 contract, 77 integration, 8 recovery, 16 security, 4 E2E and 6 rc.1 guard
