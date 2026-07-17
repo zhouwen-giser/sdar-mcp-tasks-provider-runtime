@@ -156,7 +156,7 @@ export class McpProtocolHandler {
     // validated Draft 2020-12 documents, not Zod schemas owned by the Runtime.
     // eslint-disable-next-line @typescript-eslint/no-deprecated
     const server = new Server(
-      { name: "sdar-mcp-tasks-provider-runtime", version: "1.0.0-rc.2" },
+      { name: "sdar-mcp-tasks-provider-runtime", version: "1.0.0-rc.3" },
       {
         capabilities,
       },

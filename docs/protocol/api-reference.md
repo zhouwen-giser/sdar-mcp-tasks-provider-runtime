@@ -85,7 +85,7 @@ protocol version.
 
 ## rc.2 verification boundary
 
-`pnpm verify:rc2` is the aggregate Runtime gate. Adapter protocol reports qualify the reference
+`pnpm verify:rc3` is the aggregate Runtime gate. Adapter protocol reports qualify the reference
 TypeScript and Python implementations only; they mark Runtime Profile coverage `partial` and
 real-resource safety `not_claimed`. Production Adapters must separately prove resource-specific
 side-effect identity and safe-stop behavior.

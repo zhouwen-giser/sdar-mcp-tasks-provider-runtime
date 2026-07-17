@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -7,46 +7,90 @@ import { getProtoPath } from "google-proto-files";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const out = resolve(root, "packages/adapter-protocol/generated");
+const staging = resolve(root, `.tmp-proto-${String(process.pid)}`);
 const protoRoot = resolve(root, "proto");
 const protoFile = resolve(protoRoot, "io/sdar/mcp/tasks/adapter/v1/adapter.proto");
 const googleRoot = resolve(getProtoPath(), "..");
 const bin = (name) =>
   resolve(root, "node_modules/.bin", process.platform === "win32" ? `${name}.cmd` : name);
 
-rmSync(out, { recursive: true, force: true });
-mkdirSync(out, { recursive: true });
+rmSync(staging, { recursive: true, force: true });
+mkdirSync(staging, { recursive: true });
 
 const protocArgs = [
   `--proto_path=${protoRoot}`,
   `--proto_path=${googleRoot}`,
-  `--js_out=import_style=commonjs,binary:${out}`,
-  `--grpc_out=grpc_js:${out}`,
+  `--js_out=import_style=commonjs,binary:${staging}`,
+  `--grpc_out=grpc_js:${staging}`,
   protoFile,
 ];
 const protoc = spawnSync(bin("grpc_tools_node_protoc"), protocArgs, {
   cwd: root,
   stdio: "inherit",
 });
-if (protoc.status !== 0) process.exit(protoc.status ?? 1);
-
-const types = spawnSync(
-  bin("grpc_tools_node_protoc"),
-  [
-    `--plugin=protoc-gen-ts=${bin("protoc-gen-ts")}`,
-    `--ts_out=grpc_js:${out}`,
-    `--proto_path=${protoRoot}`,
-    `--proto_path=${googleRoot}`,
-    protoFile,
-  ],
-  { cwd: root, stdio: "inherit" },
-);
-if (types.status !== 0) process.exit(types.status ?? 1);
+let generated = protoc.status === 0;
+if (generated) {
+  const types = spawnSync(
+    bin("grpc_tools_node_protoc"),
+    [
+      `--plugin=protoc-gen-ts=${bin("protoc-gen-ts")}`,
+      `--ts_out=grpc_js:${staging}`,
+      `--proto_path=${protoRoot}`,
+      `--proto_path=${googleRoot}`,
+      protoFile,
+    ],
+    { cwd: root, stdio: "inherit" },
+  );
+  generated = types.status === 0;
+}
+if (!generated && process.platform === "win32") {
+  process.stderr.write(
+    "Windows grpc-tools binary unavailable; regenerating with pinned tools in Docker.\n",
+  );
+  rmSync(staging, { recursive: true, force: true });
+  mkdirSync(staging, { recursive: true });
+  const container = spawnSync(
+    "docker",
+    [
+      "run",
+      "--rm",
+      "-v",
+      `${root}:/workspace`,
+      "-w",
+      "/workspace",
+      "node:22-bookworm-slim",
+      "sh",
+      "-lc",
+      [
+        "set -eu",
+        "mkdir -p /tmp/proto-tools",
+        "cd /tmp/proto-tools",
+        "npm init -y >/dev/null",
+        "npm install --silent grpc-tools@1.13.1 grpc_tools_node_protoc_ts@5.3.3 google-proto-files@5.0.2",
+        "./node_modules/.bin/grpc_tools_node_protoc --proto_path=/workspace/proto --proto_path=/tmp/proto-tools/node_modules/google-proto-files --js_out=import_style=commonjs,binary:/workspace/.tmp-proto-" +
+          String(process.pid) +
+          " --grpc_out=grpc_js:/workspace/.tmp-proto-" +
+          String(process.pid) +
+          " /workspace/proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto",
+        "./node_modules/.bin/grpc_tools_node_protoc --plugin=protoc-gen-ts=./node_modules/.bin/protoc-gen-ts --ts_out=grpc_js:/workspace/.tmp-proto-" +
+          String(process.pid) +
+          " --proto_path=/workspace/proto --proto_path=/tmp/proto-tools/node_modules/google-proto-files /workspace/proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto",
+      ].join("; "),
+    ],
+    { cwd: root, stdio: "inherit" },
+  );
+  generated = container.status === 0;
+}
+if (!generated) {
+  rmSync(staging, { recursive: true, force: true });
+  process.exit(1);
+}
 
 for (const generatedType of [
   "io/sdar/mcp/tasks/adapter/v1/adapter_pb.d.ts",
   "io/sdar/mcp/tasks/adapter/v1/adapter_grpc_pb.d.ts",
 ]) {
-  const path = resolve(out, generatedType);
+  const path = resolve(staging, generatedType);
   writeFileSync(
     path,
     `${readFileSync(path, "utf8")
@@ -54,4 +98,6 @@ for (const generatedType of [
       .trimEnd()}\n`,
   );
 }
-writeFileSync(resolve(out, "package.json"), '{"type":"commonjs"}\n');
+writeFileSync(resolve(staging, "package.json"), '{"type":"commonjs"}\n');
+rmSync(out, { recursive: true, force: true });
+renameSync(staging, out);

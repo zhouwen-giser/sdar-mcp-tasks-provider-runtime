@@ -1,8 +1,9 @@
 import { execFileSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 
-const primary = "sdar-runtime:rc2-audit-primary";
-const repeat = "sdar-runtime:rc2-audit-repeat";
+const primary = "sdar-runtime:rc3-audit-primary";
+const repeat = "sdar-runtime:rc3-audit-repeat";
 // Docker Desktop's containerd store reports a compressed value while the Linux
 // Engine reports the expanded layer total. The release ceiling follows the
 // authoritative GitHub Linux measurement and still catches material growth.
@@ -45,17 +46,35 @@ execFileSync(
   { stdio: "inherit" },
 );
 
-process.stdout.write(
-  `${JSON.stringify({
-    status: "pass",
-    image: primary,
-    sizeBytes: first.Size,
-    maximumBytes,
-    user: first.Config.User,
-    layers: first.RootFS.Layers.length,
-    reproducibleFilesystemAndConfig: reproducible,
-  })}\n`,
-);
+const result = {
+  status: "pass",
+  image: primary,
+  sizeBytes: first.Size,
+  maximumBytes,
+  user: first.Config.User,
+  layers: first.RootFS.Layers.length,
+  reproducibleFilesystemAndConfig: reproducible,
+};
+const report = {
+  schemaVersion: 1,
+  measuredAt: new Date().toISOString(),
+  measurementEnvironment: `${process.platform}/${process.arch} Docker Engine`,
+  image: primary,
+  base: "node:22-bookworm-slim",
+  sizeBytes: first.Size,
+  maximumBytes,
+  user: first.Config.User,
+  layers: first.RootFS.Layers.length,
+  frozenLockfile: true,
+  productionDependenciesOnly: true,
+  containsTestsDocsOrReferences: false,
+  containsTypescriptOrVitest: false,
+  containsProtoAndMigrations: true,
+  reproducibleFilesystemAndConfig: reproducible,
+};
+mkdirSync("reports/image", { recursive: true });
+writeFileSync("reports/image/runtime-v1-rc3.json", `${JSON.stringify(report, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify(result)}\n`);
 
 function build(tag) {
   execFileSync("docker", ["build", "--target", "runtime", "--tag", tag, "."], {

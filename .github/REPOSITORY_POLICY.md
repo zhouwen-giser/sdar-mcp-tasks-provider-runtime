@@ -4,7 +4,7 @@ The declarative configuration in this directory establishes the intended
 GitHub governance controls:
 
 - `main` accepts changes only through pull requests. It requires the
-  `quality` and `compose-smoke` checks, resolved review conversations, and
+  `runtime-ci` and `runtime-compose` checks, resolved review conversations, and
   zero approving reviews so a sole maintainer is not blocked.
 - Pull requests can be merged only with the squash merge method. Force pushes
   and branch deletion are disabled for `main`.

@@ -68,3 +68,24 @@ is green.
 - recovery gives new candidates service despite persistent failures;
 - all result variants validate after sanitization;
 - append-only migration upgrade, all tests, `pnpm verify`, and regenerated rc.3 evidence pass.
+
+## Execution record
+
+| Phase | Commit    | Status   |
+| ----- | --------- | -------- |
+| H0    | `1c85124` | complete |
+| H1    | `b26b62f` | complete |
+| H2    | `89a6707` | complete |
+| H3    | `77ab5c5` | complete |
+| H4    | `2afccad` | complete |
+| H5    | `d91f219` | complete |
+| H6    | `abfd707` | complete |
+| H7    | `c997578` | complete |
+| H8    | `dc30f45` | complete |
+| H9    | `dc9a60b` | complete |
+| H10   | pending   | verified |
+
+The full `pnpm verify:rc3` gate passed on 2026-07-17 against PostgreSQL 17 and Docker Desktop. It
+included 27 unit, 4 contract, 77 integration, 8 recovery, 16 security, 4 E2E and 6 rc.1 guard
+tests; TypeScript/Python conformance; rc.1 and rc.2 forward migration; reproducible images; and the
+required two-replica capacity workload. H10 release reports record the exact governance commit.

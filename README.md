@@ -2,11 +2,10 @@
 
 An independently deployable, language-neutral Runtime for the SEP-2663 task lifecycle and the `io.sdar/taskExecution` Provider Profile. The Runtime is implemented in strict TypeScript and delegates resource facts and side effects to versioned gRPC/Protobuf Adapters.
 
-The current release candidate is `v1.0.0-rc.2`. Its hardening plan and traceability matrix are
-[`runtime-rc2-hardening-exec-plan.md`](docs/implementation/runtime-rc2-hardening-exec-plan.md)
-and
-[`runtime-rc2-requirement-traceability.md`](docs/implementation/runtime-rc2-requirement-traceability.md);
-phase and final evidence is under [`reports/runtime-v1-rc2/`](reports/runtime-v1-rc2/).
+The current release candidate is `v1.0.0-rc.3`. Its reliability hardening plan is
+[`runtime-rc3-hardening-plan.md`](docs/implementation/runtime-rc3-hardening-plan.md); regenerated
+release evidence is under [`reports/runtime-v1-rc3/`](reports/runtime-v1-rc3/). Published rc.2
+migrations, reports and release history remain immutable.
 
 ## Runtime quick start
 
@@ -33,7 +32,7 @@ readiness. The reference Adapter state and PostgreSQL data use named volumes.
 For a release gate with PostgreSQL and Docker available, run:
 
 ```bash
-TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify:rc2
+TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify:rc3
 ```
 
 Configuration and security are documented in
@@ -52,8 +51,8 @@ safety `not_claimed`; a Mock Adapter result is not production qualification.
 
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).
-Root commands in `package.json` expose every release gate; `pnpm verify:rc2` includes
+Root commands in `package.json` expose every release gate; `pnpm verify:rc3` includes
 formatting, lint, types, build/Proto drift, audit/SBOM, deployment/container,
 unit/contract/integration/recovery/security/E2E/conformance, the six rc.1 red-regression guards,
-and the expanded capacity checks. CI additionally runs Buf lint/breaking against the immutable
-rc.1 tag and builds the Runtime plus both Adapter images with Compose.
+and the rc.3 capacity checks. CI additionally runs Buf lint/breaking against the immutable rc.1
+tag and builds the Runtime plus both Adapter images with Compose.

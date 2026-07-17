@@ -39,7 +39,7 @@ TTL purge.
   tasks; another replica or restarted process scans them.
 - Streamable HTTP is stateless: do not configure sticky sessions, expect an
   `Mcp-Session-Id`, or depend on GET/DELETE/resumable notifications in rc.2.
-- Before rc.2 rollout, run `pnpm verify:rc2`, Buf breaking against `v1.0.0-rc.1`, and the
+- Before rc.3 rollout, run `pnpm verify:rc3`, Buf breaking against `v1.0.0-rc.1`, and the
   three-image Compose build. Archive conformance, capacity, SBOM and image JSON as evidence.
 - Size `DATABASE_POOL_MAX` for replicas and probes. The capacity gate proves a max-one pool can
   make SQL progress during a slow Adapter RPC; rising pool waiters still require investigation.

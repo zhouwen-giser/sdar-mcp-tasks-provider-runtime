@@ -112,6 +112,7 @@ export class BoundExecutionWatchdog {
       await this.repository.stopUnconfirmedBoundExecution(task.taskId, owner, completedAt);
       result.stopRequested += 1;
     } catch (error) {
+      if (error instanceof Error && error.message === "START_CONFIRMATION_CLAIM_LOST") return;
       const deferredAt = this.clock.now();
       await this.repository.deferStartConfirmation(
         task.taskId,

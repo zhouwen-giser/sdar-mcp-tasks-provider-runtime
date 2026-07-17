@@ -215,12 +215,16 @@ describe("T-047 rc.1 full-state database forward migration", () => {
       ),
     ).toMatchObject({ rowCount: 1 });
     expect(
-      (
-        await pool.query<{ count: string }>(
-          "SELECT count(*) FROM runtime_schema_migration WHERE version ~ '^0(0[1-9]|1[0-2])_'",
-        )
-      ).rows[0]?.count,
-    ).toBe("12");
+      (await pool.query<{ count: string }>("SELECT count(*) FROM runtime_schema_migration")).rows[0]
+        ?.count,
+    ).toBe("16");
+    expect(
+      await pool.query(
+        `SELECT 1 FROM provider_task WHERE task_id=$1
+         AND next_recovery_at IS NOT NULL AND recovery_failure_count=0`,
+        [ids.working],
+      ),
+    ).toMatchObject({ rowCount: 1 });
     await runMigrations(pool);
   });
 
