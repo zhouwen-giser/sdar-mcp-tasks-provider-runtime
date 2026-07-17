@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-rc.3 - Unreleased
+
+- Reliability hardening for multi-instance lease ownership, start-window correctness,
+  production safety and complete Runtime worker lifecycles.
+- No new product features; v1.0.0-rc.2 migrations and release evidence remain immutable.
+
 ## 1.0.0-rc.2 - 2026-07-17
 
 - Hardened durable commands, timing windows, observation revisions, immutable
