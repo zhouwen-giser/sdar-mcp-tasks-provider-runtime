@@ -1,6 +1,6 @@
 import * as grpc from "@grpc/grpc-js";
 import Fastify from "fastify";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index.js";
@@ -10,7 +10,11 @@ import {
   McpProtocolHandler,
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
-import { createLogger, RuntimeMetrics } from "../../../packages/observability/src/index.js";
+import {
+  createLogger,
+  ProviderTelemetry,
+  RuntimeMetrics,
+} from "../../../packages/observability/src/index.js";
 import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
 import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
 import {
@@ -25,6 +29,7 @@ import {
   DurableScheduler,
   InternalNoopOutboxSink,
   OutboxPublisher,
+  ProviderOpsOutboxSink,
   RecoveryManager,
   TaskEngine,
   OutboxCleaner,
@@ -71,6 +76,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   }
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
+  const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
   const gateway = new GrpcAdapterGateway({
@@ -92,6 +98,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     outboxCleaner: "starting",
   };
   let manifest: ProviderManifest | undefined;
+  let telemetry: ProviderTelemetry | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
   let schedulerTimer: NodeJS.Timeout | undefined;
   let recoveryTimer: NodeJS.Timeout | undefined;
@@ -205,6 +212,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
     if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
     gateway.close();
+    await telemetry?.shutdown();
     await pool.end();
   });
 
@@ -226,6 +234,24 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         );
       }
       const validated = new OperationRegistry().validate(manifest);
+      if (telemetry === undefined) {
+        telemetry = new ProviderTelemetry({
+          enabled: config.OTEL_ENABLED,
+          otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+          resource: {
+            serviceVersion: "1.1.0",
+            instanceId: telemetryInstanceId,
+            deploymentEnvironment: config.RUNTIME_ENV,
+            providerId: validated.providerId,
+            providerVersion: manifest.providerVersion,
+          },
+        });
+        try {
+          telemetry.start();
+        } catch (error) {
+          logger.warn({ err: error }, "Provider telemetry initialization failed");
+        }
+      }
       dependencies.adapter = "ready";
       const manifestWatcher = new AdapterManifestWatcher(gateway, validated.manifestHash);
       dependencies.adapterManifest = "ready";
@@ -291,14 +317,20 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
       });
-      const outboxPublisher = new OutboxPublisher(
-        new OutboxRepository(pool),
+      const downstreamOutboxSink =
         config.OUTBOX_SINK === "webhook"
           ? new WebhookOutboxSink(
               new URL(requiredOutboxWebhookUrl(config)),
               config.OUTBOX_WEBHOOK_TIMEOUT_MS,
             )
-          : new InternalNoopOutboxSink(),
+          : new InternalNoopOutboxSink();
+      const outboxPublisher = new OutboxPublisher(
+        new OutboxRepository(pool),
+        new ProviderOpsOutboxSink(downstreamOutboxSink, telemetry, {
+          providerId: validated.providerId,
+          runtimeVersion: "1.1.0",
+          instanceId: telemetryInstanceId,
+        }),
         config.OUTBOX_BATCH_SIZE,
       );
       const recovery = new RecoveryManager(

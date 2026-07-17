@@ -6,6 +6,8 @@ describe("Runtime configuration", () => {
     const config = loadRuntimeConfig({});
     expect(config.PORT).toBe(8080);
     expect(config.PROVIDER_ID).toBe("mock-provider");
+    expect(config.OTEL_ENABLED).toBe(false);
+    expect(config.OTEL_EXPORTER_OTLP_ENDPOINT).toBe("http://127.0.0.1:4318");
     expect(config.ADAPTER_TLS_MODE).toBe("disabled");
     expect(config.ADAPTER_RPC_TIMEOUT_MS).toBe(5_000);
     expect(config.AUTH_MODE).toBe("development");
@@ -19,6 +21,17 @@ describe("Runtime configuration", () => {
     expect(config.OUTBOX_SINK).toBe("internal_noop");
     expect(config.OUTBOX_BATCH_SIZE).toBe(100);
     expect(config.OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
+  });
+
+  it("parses opt-in OTLP configuration without making telemetry a readiness dependency", () => {
+    const config = loadRuntimeConfig({
+      OTEL_ENABLED: "true",
+      OTEL_EXPORTER_OTLP_ENDPOINT: "https://collector.example.test:4318",
+      OTEL_SERVICE_INSTANCE_ID: "runtime-a",
+    });
+    expect(config.OTEL_ENABLED).toBe(true);
+    expect(config.OTEL_EXPORTER_OTLP_ENDPOINT).toBe("https://collector.example.test:4318");
+    expect(config.OTEL_SERVICE_INSTANCE_ID).toBe("runtime-a");
   });
 
   it("rejects invalid ports and timeouts", () => {
