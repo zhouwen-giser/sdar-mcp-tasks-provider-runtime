@@ -9,6 +9,7 @@
     "HOST": "0.0.0.0",
     "PORT": "8080",
     "LOG_LEVEL": "info",
+    "RUNTIME_ENV": "production",
     "PROVIDER_ID": "replace-provider-id",
     "ADAPTER_ENDPOINT": "replace-adapter-service:7001",
     "ADAPTER_TLS_MODE": "required",
@@ -27,6 +28,7 @@
     "SCHEDULER_POLL_MS": "1000",
     "COMMAND_DISPATCH_CONCURRENCY": "8",
     "SCHEDULER_CONCURRENCY": "8",
+    "ALLOW_WEAK_LEASE_CONFIGURATION": "false",
     "RECOVERY_POLL_MS": "5000"
   }
 }

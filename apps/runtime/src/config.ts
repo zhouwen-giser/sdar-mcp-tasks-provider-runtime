@@ -1,10 +1,15 @@
 import { z } from "zod";
 
+const BooleanEnvironmentSchema = z
+  .union([z.string(), z.boolean()])
+  .transform((value) => parseBooleanEnv(value));
+
 const EnvironmentSchema = z
   .object({
     HOST: z.string().default("0.0.0.0"),
     PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
     LOG_LEVEL: z.string().default("info"),
+    RUNTIME_ENV: z.enum(["development", "test", "production"]).default("development"),
     PROVIDER_ID: z.string().min(1).max(128).default("mock-provider"),
     DATABASE_URL: z.url().default("postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime"),
     ADAPTER_ENDPOINT: z.string().refine(validAdapterEndpoint).default("127.0.0.1:7001"),
@@ -33,6 +38,7 @@ const EnvironmentSchema = z
     SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
     COMMAND_DISPATCH_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
     SCHEDULER_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
+    ALLOW_WEAK_LEASE_CONFIGURATION: BooleanEnvironmentSchema.default(false),
     RECOVERY_POLL_MS: z.coerce.number().int().min(500).max(300_000).default(5_000),
     TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
     TTL_PURGE_GRACE_MS: z.coerce.number().int().min(1_000).max(604_800_000).default(86_400_000),
@@ -50,12 +56,40 @@ const EnvironmentSchema = z
     if (value.AUTH_MODE === "jwt_hs256" && value.JWT_HS256_SECRET === undefined) {
       context.addIssue({ code: "custom", message: "jwt_hs256 requires JWT_HS256_SECRET" });
     }
+    if (value.RUNTIME_ENV === "production") {
+      if (value.AUTH_MODE === "development") {
+        context.addIssue({ code: "custom", message: "production forbids development auth" });
+      }
+      if (value.ADAPTER_TLS_MODE !== "required") {
+        context.addIssue({ code: "custom", message: "production requires Adapter mTLS" });
+      }
+      if (value.ALLOW_WEAK_LEASE_CONFIGURATION) {
+        context.addIssue({
+          code: "custom",
+          message: "production forbids weak lease configuration",
+        });
+      }
+    }
   });
 
 export type RuntimeConfig = z.infer<typeof EnvironmentSchema>;
 
 export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   return EnvironmentSchema.parse(environment);
+}
+
+export function parseBooleanEnv(value: string | boolean): boolean {
+  if (typeof value === "boolean") return value;
+  switch (value.toLowerCase()) {
+    case "true":
+    case "1":
+      return true;
+    case "false":
+    case "0":
+      return false;
+    default:
+      throw new Error(`INVALID_BOOLEAN_ENV:${value}`);
+  }
 }
 
 function validAdapterEndpoint(value: string): boolean {
