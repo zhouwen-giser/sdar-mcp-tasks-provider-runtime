@@ -80,13 +80,17 @@ export type RuntimeConfig = z.infer<typeof EnvironmentSchema> & {
 export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   const value = EnvironmentSchema.parse(environment);
   const commandClaimLeaseMinimum =
-    2 * value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+    2 * value.ADAPTER_RPC_TIMEOUT_MS +
+    value.DB_PUBLICATION_BUDGET_MS +
+    value.LEASE_SAFETY_MARGIN_MS;
   const scheduleClaimLeaseMinimum =
     value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
   const recoveryLeaseMinimum =
     value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
   const idempotencyLeaseMinimum =
-    2 * value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+    2 * value.ADAPTER_RPC_TIMEOUT_MS +
+    value.DB_PUBLICATION_BUDGET_MS +
+    value.LEASE_SAFETY_MARGIN_MS;
   const violations: string[] = [];
   if (value.COMMAND_CLAIM_LEASE_MS < commandClaimLeaseMinimum) {
     violations.push(

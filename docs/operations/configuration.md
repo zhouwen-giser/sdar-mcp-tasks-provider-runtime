@@ -36,7 +36,7 @@ authentication.
 | `RECOVERY_POLL_MS`                 | `5000`                | Nonterminal Reconcile interval                             |
 | `TTL_CLEANER_POLL_MS`              | `60000`               | Logical-expiry and purge worker interval                   |
 | `TTL_PURGE_GRACE_MS`               | `86400000`            | Expiry-to-purge delay, range 1 second-7 days               |
-| `OUTBOX_PUBLISHED_RETENTION_MS`     | `86400000`            | Published outbox retention, range 60 seconds-90 days        |
+| `OUTBOX_PUBLISHED_RETENTION_MS`    | `86400000`            | Published outbox retention, range 60 seconds-90 days       |
 | `TTL_CLEANER_BATCH_SIZE`           | `128`                 | Maximum rows claimed per cleaner stage and tick            |
 
 `development` authentication is limited to local Compose. `trusted_headers` requires an

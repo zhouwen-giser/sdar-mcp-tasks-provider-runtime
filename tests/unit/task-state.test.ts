@@ -11,7 +11,7 @@ const snapshot = (state: string) => ({
 
 describe("Adapter Snapshot mapping", () => {
   it.each([
-    ["ACCEPTED", "working", "scheduled"],
+    ["ACCEPTED", "working", "accepted"],
     ["QUEUED", "working", "queued"],
     ["RUNNING", "working", "running"],
     ["PAUSED", "working", "paused"],

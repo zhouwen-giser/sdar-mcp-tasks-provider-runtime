@@ -64,6 +64,7 @@ export class DurableCommandDispatcher {
           await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
         ).operation;
         if (command.commandType === "CANCEL") {
+          await this.repository.supersedeExpiredClaimedNormalCommandsForSafeStop(command.taskId);
           const outcome = await this.dispatchCancel(command, task, operation);
           if (outcome === "acknowledged") result.acknowledged += 1;
           else if (outcome === "retriable") result.retried += 1;
@@ -111,6 +112,14 @@ export class DurableCommandDispatcher {
             command,
             error instanceof Error ? error.message : "Safe stop could not be confirmed.",
           );
+          result.exhausted += 1;
+          continue;
+        }
+        if (
+          command.commandType !== "CANCEL" &&
+          (task.cancelRequested || task.stopReason !== null)
+        ) {
+          await this.repository.supersedeNormalCommandsForSafeStop(command.taskId, true);
           result.exhausted += 1;
           continue;
         }
@@ -350,7 +359,11 @@ export class DurableCommandDispatcher {
     return "acknowledged";
   }
 
-  private async retry(command: PendingCommandRecord, errorCode: string, errorMessage: string): Promise<void> {
+  private async retry(
+    command: PendingCommandRecord,
+    errorCode: string,
+    errorMessage: string,
+  ): Promise<void> {
     await this.repository.retryClaimedCommand(
       command,
       new Date(this.clock.now().getTime() + retryDelayMs(command)),

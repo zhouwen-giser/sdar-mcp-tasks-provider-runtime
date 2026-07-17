@@ -57,13 +57,13 @@ export class RecoveryManager {
         const outcome = await this.repository.withRecoveryLock(
           candidate.taskId,
           async () => {
-          const task = await this.repository.getById(candidate.taskId);
-          if (task === null || task.internalState.startsWith("TERMINAL_")) return "terminal";
-          const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
-            task.operationSnapshotId,
-          );
-          return this.engine.reconcileTask(task, resolvedOperation.operation);
-        },
+            const task = await this.repository.getById(candidate.taskId);
+            if (task === null || task.internalState.startsWith("TERMINAL_")) return "terminal";
+            const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
+              task.operationSnapshotId,
+            );
+            return this.engine.reconcileTask(task, resolvedOperation.operation);
+          },
           this.recoveryLeaseMs,
         );
         if (outcome === null) result.lockSkipped += 1;

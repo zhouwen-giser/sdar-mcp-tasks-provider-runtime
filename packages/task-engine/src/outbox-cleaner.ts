@@ -50,9 +50,10 @@ export class OutboxCleaner {
         await client.query("COMMIT");
         return { removed: 0 };
       }
-      const deleted = await client.query("DELETE FROM outbox_event WHERE event_id = ANY($1::uuid[])", [
-        eventIds,
-      ]);
+      const deleted = await client.query(
+        "DELETE FROM outbox_event WHERE event_id = ANY($1::uuid[])",
+        [eventIds],
+      );
       await client.query("COMMIT");
       const removed = deleted.rowCount ?? 0;
       if (removed > 0) this.#onMetric?.("removed", removed);

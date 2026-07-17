@@ -5,6 +5,7 @@ const engine = readFileSync("packages/task-engine/src/engine.ts", "utf8");
 const scheduler = readFileSync("packages/task-engine/src/scheduler.ts", "utf8");
 const recovery = readFileSync("packages/task-engine/src/recovery.ts", "utf8");
 const tasks = readFileSync("packages/persistence-postgres/src/tasks.ts", "utf8");
+const commandDispatcher = readFileSync("packages/task-engine/src/command-dispatcher.ts", "utf8");
 
 function methodBody(source: string, methodName: string, nextMethodName: string): string {
   const start = source.indexOf(`async ${methodName}`);
@@ -54,6 +55,6 @@ describe("rc.1 hardening red baseline", () => {
 
   it("T-019/T-021: rejects Snapshot and command Ack identity mismatches", () => {
     expect(engine).toContain("validateAdapterSnapshotIdentity");
-    expect(engine).toContain("validateCommandAckIdentity");
+    expect([engine, commandDispatcher].join("")).toContain("validateCommandAckIdentity");
   });
 });

@@ -75,6 +75,8 @@ export class BusinessToolError extends RuntimeError {
 
 export interface CommandInProgressContext {
   commandSequence: number;
+  requestedCommandType: string;
+  blockingCommandType: string;
   commandType: string;
   commandState: string;
   retryAfterMs: number;
@@ -85,16 +87,20 @@ export class CommandInProgressError extends RuntimeError {
     super(
       "command_in_progress",
       "COMMAND_IN_PROGRESS",
-      `Command is already in progress: ${context.commandType}.`,
+      `Command is already in progress: ${context.blockingCommandType}.`,
       options,
     );
     this.commandSequence = context.commandSequence;
-    this.commandType = context.commandType;
+    this.commandType = context.blockingCommandType;
+    this.requestedCommandType = context.requestedCommandType;
+    this.blockingCommandType = context.blockingCommandType;
     this.commandState = context.commandState;
     this.retryAfterMs = context.retryAfterMs;
   }
 
   readonly commandSequence: number;
+  readonly requestedCommandType: string;
+  readonly blockingCommandType: string;
   readonly commandType: string;
   readonly commandState: string;
   readonly retryAfterMs: number;

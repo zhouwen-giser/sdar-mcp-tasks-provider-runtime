@@ -661,7 +661,10 @@ export class TaskEngine {
       throw new CapabilityNotSupportedError("CANCEL_NOT_SUPPORTED");
     }
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
-    await this.#repository.beginCancel(taskId, requestHash);
+    const command = await this.#repository.beginCancel(taskId, requestHash);
+    if (command.commandType !== "CANCEL") {
+      throw new Error("CANCEL_COMMAND_NOT_PERSISTED");
+    }
     task = (await this.#repository.getById(taskId)) ?? task;
     return detailedTask(task);
   }
@@ -700,7 +703,7 @@ export class TaskEngine {
     if (command.disposition === "existing") {
       return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
     }
-    return this.#taskWithCommandReceipt(taskId, authorization, "UPDATE", command);
+    return this.#taskWithCommandReceipt(taskId, authorization, command);
   }
 
   async controlTask(
@@ -718,13 +721,12 @@ export class TaskEngine {
     if (command.disposition === "existing") {
       return this.#resolveExistingCommand(taskId, authorization, commandType, command);
     }
-    return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
+    return this.#taskWithCommandReceipt(taskId, authorization, command);
   }
 
   async #taskWithCommandReceipt(
     taskId: string,
     authorization: AuthorizationContext,
-    commandType: "UPDATE" | "PAUSE" | "RESUME",
     command: CommandResolution,
   ): Promise<Record<string, unknown>> {
     const [task, inputRequests, observations] = await Promise.all([
@@ -746,7 +748,7 @@ export class TaskEngine {
       "io.sdar/taskExecution": {
         ...(profile ?? {}),
         receipt: {
-          commandType,
+          commandType: command.commandType,
           commandSequence: command.sequence,
           commandState: command.state,
           durablyAccepted: true,
@@ -773,18 +775,19 @@ export class TaskEngine {
         this.#commandInProgressError(command, commandType);
         break;
       case "ACKNOWLEDGED":
-        return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
+        return this.#taskWithCommandReceipt(taskId, authorization, command);
       case "REJECTED":
-        return this.#commandRejectionResult(commandType, command);
+        return this.#commandRejectionResult(command);
       case "EXHAUSTED":
-        return this.#commandFailureResult(commandType, command);
+        return this.#commandFailureResult(command);
     }
-    return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
+    return this.#taskWithCommandReceipt(taskId, authorization, command);
   }
 
   #commandInProgressError(
     command: {
       sequence: number;
+      commandType: CommandResolution["commandType"];
       state: PendingCommandRecord["state"];
       nextAttemptAt: Date | null;
       claimUntil: Date | null;
@@ -802,19 +805,21 @@ export class TaskEngine {
     throw new CommandInProgressError({
       commandSequence: command.sequence,
       commandType,
+      requestedCommandType: commandType,
+      blockingCommandType: command.commandType,
       commandState: command.state,
       retryAfterMs,
     });
   }
 
   #commandRetryAfterMs(nextAttemptAt: Date | null): number {
-    return nextAttemptAt === null ? 0 : Math.max(0, nextAttemptAt.getTime() - this.clock.now().getTime());
+    return nextAttemptAt === null
+      ? 0
+      : Math.max(0, nextAttemptAt.getTime() - this.clock.now().getTime());
   }
 
-  #commandRejectionResult(
-    commandType: "UPDATE" | "PAUSE" | "RESUME",
-    command: CommandResolution,
-  ): Record<string, unknown> {
+  #commandRejectionResult(command: CommandResolution): Record<string, unknown> {
+    const commandType = command.commandType;
     return {
       content: [
         {
@@ -835,10 +840,8 @@ export class TaskEngine {
     };
   }
 
-  #commandFailureResult(
-    commandType: "UPDATE" | "PAUSE" | "RESUME",
-    command: CommandResolution,
-  ): Record<string, unknown> {
+  #commandFailureResult(command: CommandResolution): Record<string, unknown> {
+    const commandType = command.commandType;
     return {
       content: [
         {

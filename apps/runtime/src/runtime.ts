@@ -187,8 +187,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (recoveryTimer !== undefined) clearInterval(recoveryTimer);
     if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
     if (ttlCleanerTimer !== undefined) clearInterval(ttlCleanerTimer);
-      if (outboxCleanerTimer !== undefined) clearInterval(outboxCleanerTimer);
-      if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
+    if (outboxCleanerTimer !== undefined) clearInterval(outboxCleanerTimer);
+    if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
     gateway.close();
     await pool.end();
   });

@@ -301,6 +301,8 @@ function mapProtocolError(error: unknown): McpError {
       reasonCode: error.reasonCode,
       commandSequence: error.commandSequence,
       commandType: error.commandType,
+      requestedCommandType: error.requestedCommandType,
+      blockingCommandType: error.blockingCommandType,
       commandState: error.commandState,
       retryAfterMs: error.retryAfterMs,
     });
@@ -347,7 +349,11 @@ function mapProtocolError(error: unknown): McpError {
   });
 }
 
-function wireMcpError(code: ErrorCode | number, message: string, data: Record<string, unknown>): McpError {
+function wireMcpError(
+  code: ErrorCode | number,
+  message: string,
+  data: Record<string, unknown>,
+): McpError {
   const error = new McpError(code, message, data);
   // The low-level SDK serializes Error.message verbatim, while McpError's
   // constructor prefixes it for local display. Restore the protocol message so

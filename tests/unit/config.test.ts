@@ -42,12 +42,13 @@ describe("Runtime configuration", () => {
   it("validates outbox published retention bounds", () => {
     expect(loadRuntimeConfig({}).OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
     expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "59999" })).toThrow();
-    expect(loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "60000" }).OUTBOX_PUBLISHED_RETENTION_MS).toBe(
-      60_000,
-    );
-    expect(loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000000" }).OUTBOX_PUBLISHED_RETENTION_MS).toBe(
-      7_776_000_000,
-    );
+    expect(
+      loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "60000" }).OUTBOX_PUBLISHED_RETENTION_MS,
+    ).toBe(60_000);
+    expect(
+      loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000000" })
+        .OUTBOX_PUBLISHED_RETENTION_MS,
+    ).toBe(7_776_000_000);
     expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000001" })).toThrow();
   });
 });
