@@ -43,7 +43,11 @@ import type {
   TaskRepository,
 } from "../../persistence-postgres/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
-import { synchronousResult, validatedSnapshotTransition } from "./result-contract.js";
+import {
+  sanitizedAdapterResultPayload,
+  synchronousResult,
+  validatedSnapshotTransition,
+} from "./result-contract.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -1078,7 +1082,11 @@ function deadlineReached(message: string, completedAt: Date) {
   };
 }
 
-function startWindowMissed(completedAt: Date, message: string): Record<string, unknown> {
+export function startWindowMissed(
+  completedAt: Date,
+  message: string,
+  adapterResult?: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     content: [{ type: "text", text: message }],
     isError: true,
@@ -1087,17 +1095,26 @@ function startWindowMissed(completedAt: Date, message: string): Record<string, u
       reasonCode: "START_WINDOW_MISSED",
       retryable: true,
       completedAt: completedAt.toISOString(),
+      ...(adapterResult === undefined ? {} : { adapterResult }),
     },
   };
 }
 
-function startWindowMissedTransition(message: string, completedAt: Date) {
+function startWindowMissedTransition(
+  message: string,
+  completedAt: Date,
+  adapterResult?: Record<string, unknown>,
+) {
   return {
     internalState: "TERMINAL_COMPLETED" as const,
     mcpStatus: "completed" as const,
     substate: null,
     statusMessage: message || "Start window was missed after safe stop.",
-    result: startWindowMissed(completedAt, message || "Start window was missed after safe stop."),
+    result: startWindowMissed(
+      completedAt,
+      message || "Start window was missed after safe stop.",
+      adapterResult,
+    ),
     error: null,
     terminal: true,
     observationType: "task.start_window_missed",
@@ -1114,7 +1131,11 @@ function stopTransition(
     return deadlineReached(snapshot.message, completedAt);
   }
   if (snapshot.state === "CANCELLED" && task.stopReason === "START_WINDOW_MISSED") {
-    return startWindowMissedTransition(snapshot.message, completedAt);
+    return startWindowMissedTransition(
+      snapshot.message,
+      completedAt,
+      sanitizedAdapterResultPayload(snapshot),
+    );
   }
   return validatedSnapshotTransition(operation, snapshot);
 }

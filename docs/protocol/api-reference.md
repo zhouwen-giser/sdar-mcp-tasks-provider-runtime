@@ -40,6 +40,11 @@ JSON limits. An invalid success becomes a technical contract failure with
 `reasonCode=ADAPTER_OUTPUT_SCHEMA_MISMATCH`; it is never returned as successful structured
 content.
 
+The same size, sanitization and output-schema pipeline applies to `BUSINESS_FAILED` and partial
+results. Dangerous object keys are removed before schema validation. A safe-stop confirmation for
+`START_WINDOW_MISSED` preserves the sanitized Adapter payload under `adapterResult` in the
+standardized business result.
+
 Unknown/hidden/expired Tasks, unknown Tools, malformed TTL/timing/input and unsupported
 capabilities return JSON-RPC Invalid Params with stable `data.reasonCode`. Technical failure
 before Task publication returns JSON-RPC Internal Error. A published technical failure is
