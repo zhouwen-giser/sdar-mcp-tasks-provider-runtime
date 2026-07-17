@@ -1,5 +1,6 @@
 import * as grpc from "@grpc/grpc-js";
 import Fastify from "fastify";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index.js";
@@ -23,6 +24,7 @@ import {
   DurableScheduler,
   RecoveryManager,
   TaskEngine,
+  OutboxCleaner,
   TtlCleaner,
 } from "../../../packages/task-engine/src/index.js";
 import type { RuntimeConfig } from "./config.js";
@@ -41,6 +43,7 @@ export interface RuntimeDependencies {
   scheduler: "starting" | "ready" | "failed";
   commandDispatcher: "starting" | "ready" | "failed";
   ttlCleaner: "starting" | "ready" | "failed";
+  outboxCleaner: "starting" | "ready" | "failed";
 }
 
 export interface RuntimeApplication {
@@ -53,6 +56,12 @@ export interface RuntimeApplication {
 
 export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   const logger = createLogger(config.LOG_LEVEL);
+  if (config.leaseValidationMode === "degraded") {
+    logger.warn(
+      { message: config.leaseValidationMessage },
+      "runtime lease configuration validation fell back to degraded mode",
+    );
+  }
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
@@ -71,6 +80,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     scheduler: "starting",
     commandDispatcher: "starting",
     ttlCleaner: "starting",
+    outboxCleaner: "starting",
   };
   let manifest: ProviderManifest | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
@@ -78,11 +88,13 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let recoveryTimer: NodeJS.Timeout | undefined;
   let commandDispatcherTimer: NodeJS.Timeout | undefined;
   let ttlCleanerTimer: NodeJS.Timeout | undefined;
+  let outboxCleanerTimer: NodeJS.Timeout | undefined;
   let adapterHealthTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
   let ttlCleanerTicking = false;
+  let outboxCleanerTicking = false;
   let adapterHealthTicking = false;
   let adapterHealthFailures = 0;
   const rateLimiter = new BoundedRateLimiter(
@@ -130,6 +142,19 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     return reply.type("text/plain; version=0.0.4").send(metrics.render(gauges));
   });
   app.get("/internal/provider", async (_request, reply) => {
+    if (!config.INTERNAL_ENDPOINTS_ENABLED) {
+      return reply.code(404).send({ error: "internal_endpoints_disabled" });
+    }
+    const header =
+      typeof _request.headers["x-sdar-admin-token"] === "string"
+        ? _request.headers["x-sdar-admin-token"]
+        : "";
+    if (header.length === 0) {
+      return reply.code(401).send({ error: "admin_token_required" });
+    }
+    if (!isValidInternalAdminToken(header, config.INTERNAL_ADMIN_TOKEN ?? "")) {
+      return reply.code(403).send({ error: "invalid_admin_token" });
+    }
     if (manifest === undefined) return reply.code(503).send({ error: "manifest_not_loaded" });
     return manifest;
   });
@@ -162,7 +187,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (recoveryTimer !== undefined) clearInterval(recoveryTimer);
     if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
     if (ttlCleanerTimer !== undefined) clearInterval(ttlCleanerTimer);
-    if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
+      if (outboxCleanerTimer !== undefined) clearInterval(outboxCleanerTimer);
+      if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
     gateway.close();
     await pool.end();
   });
@@ -210,20 +236,44 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
       const taskRepository = new TaskRepository(pool);
-      const scheduler = new DurableScheduler(validated, gateway, taskRepository);
-      const commandDispatcher = new DurableCommandDispatcher(gateway, taskRepository);
+      const scheduler = new DurableScheduler(
+        validated,
+        gateway,
+        taskRepository,
+        undefined,
+        undefined,
+        config.SCHEDULE_CLAIM_LEASE_MS,
+      );
+      const commandDispatcher = new DurableCommandDispatcher(
+        gateway,
+        taskRepository,
+        undefined,
+        undefined,
+        undefined,
+        config.COMMAND_CLAIM_LEASE_MS,
+      );
+      const outboxCleaner = new OutboxCleaner(taskRepository, {
+        onMetric: (outcome, amount) =>
+          metrics.increment("sdar_outbox_cleaner_total", { outcome }, amount),
+      });
       const ttlCleaner = new TtlCleaner(taskRepository, {
         batchSize: config.TTL_CLEANER_BATCH_SIZE,
         purgeGraceMs: config.TTL_PURGE_GRACE_MS,
+        recoveryLeaseMs: config.RECOVERY_LEASE_MS,
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
       });
-      const recovery = new RecoveryManager(taskEngine, taskRepository, (error, taskId) => {
-        logger.warn(
-          { err: error, taskId, providerId: validated.providerId },
-          "task recovery deferred",
-        );
-      });
+      const recovery = new RecoveryManager(
+        taskEngine,
+        taskRepository,
+        config.RECOVERY_LEASE_MS,
+        (error, taskId) => {
+          logger.warn(
+            { err: error, taskId, providerId: validated.providerId },
+            "task recovery deferred",
+          );
+        },
+      );
       const recovered = await recovery.scan();
       metrics.increment("sdar_recovery_total", { outcome: "scan" });
       dependencies.recovery = "ready";
@@ -235,6 +285,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       dependencies.scheduler = "ready";
       await commandDispatcher.tick();
       dependencies.commandDispatcher = "ready";
+      await outboxCleaner.tick();
+      dependencies.outboxCleaner = "ready";
       await ttlCleaner.tick();
       dependencies.ttlCleaner = "ready";
       schedulerTimer = setInterval(() => {
@@ -271,6 +323,23 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.SCHEDULER_POLL_MS);
       commandDispatcherTimer.unref();
+      outboxCleanerTimer = setInterval(() => {
+        if (outboxCleanerTicking) return;
+        outboxCleanerTicking = true;
+        void outboxCleaner
+          .tick()
+          .then(() => {
+            dependencies.outboxCleaner = "ready";
+          })
+          .catch((error: unknown) => {
+            dependencies.outboxCleaner = "failed";
+            logger.error({ err: error }, "outbox cleaner tick failed");
+          })
+          .finally(() => {
+            outboxCleanerTicking = false;
+          });
+      }, config.OUTBOX_CLEANER_POLL_MS);
+      outboxCleanerTimer.unref();
       ttlCleanerTimer = setInterval(() => {
         if (ttlCleanerTicking) return;
         ttlCleanerTicking = true;
@@ -376,4 +445,14 @@ function adapterCredentials(config: RuntimeConfig): grpc.ChannelCredentials {
     readFileSync(config.ADAPTER_TLS_KEY_PATH),
     readFileSync(config.ADAPTER_TLS_CERT_PATH),
   );
+}
+
+function isValidInternalAdminToken(token: string, expected: string): boolean {
+  const tokenDigest = adminTokenDigest(token);
+  const expectedDigest = adminTokenDigest(expected);
+  return timingSafeEqual(tokenDigest, expectedDigest);
+}
+
+function adminTokenDigest(token: string): Buffer {
+  return createHash("sha256").update("sdar-internal-admin-token-v1").update(token).digest();
 }

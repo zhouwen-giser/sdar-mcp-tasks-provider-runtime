@@ -17,6 +17,7 @@ export class RecoveryManager {
   constructor(
     readonly engine: TaskEngine,
     readonly repository: TaskRepository,
+    readonly recoveryLeaseMs = 30_000,
     readonly onTaskError: (error: unknown, taskId: string) => void = () => undefined,
   ) {}
 
@@ -33,13 +34,17 @@ export class RecoveryManager {
     const admissions = await this.repository.listAdmissionsForRecovery();
     for (const admission of admissions) {
       try {
-        const recovered = await this.repository.withRecoveryLock(admission.taskId, async () => {
-          const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
-            admission.operationSnapshotId,
-          );
-          await this.engine.recoverAdmission(admission, resolvedOperation.operation);
-          return true;
-        });
+        const recovered = await this.repository.withRecoveryLock(
+          admission.taskId,
+          async () => {
+            const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
+              admission.operationSnapshotId,
+            );
+            await this.engine.recoverAdmission(admission, resolvedOperation.operation);
+            return true;
+          },
+          this.recoveryLeaseMs,
+        );
         if (recovered === null) result.lockSkipped += 1;
         else result.admissionsRecovered += 1;
       } catch (error) {
@@ -51,20 +56,18 @@ export class RecoveryManager {
     const tasks = await this.repository.listTasksForRecovery();
     for (const candidate of tasks) {
       try {
-        const outcome = await this.repository.withRecoveryLock(candidate.taskId, async () => {
+        const outcome = await this.repository.withRecoveryLock(
+          candidate.taskId,
+          async () => {
           const task = await this.repository.getById(candidate.taskId);
           if (task === null || task.internalState.startsWith("TERMINAL_")) return "terminal";
           const resolvedOperation: ResolvedTaskOperation = await this.engine.resolveTaskOperation(
             task.operationSnapshotId,
           );
-          const pending = await this.repository.listPendingCommands(task.taskId);
-          for (const command of pending) {
-            if (command.commandType === "CANCEL") continue;
-            await this.engine.replayPendingCommand(task, command, resolvedOperation.operation);
-            result.commandsReplayed += 1;
-          }
           return this.engine.reconcileTask(task, resolvedOperation.operation);
-        });
+        },
+          this.recoveryLeaseMs,
+        );
         if (outcome === null) result.lockSkipped += 1;
         else if (outcome === "found") result.tasksReconciled += 1;
         else if (outcome === "not_found") result.notFound += 1;

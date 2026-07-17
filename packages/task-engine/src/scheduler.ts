@@ -29,6 +29,7 @@ export class DurableScheduler {
     readonly repository: TaskRepository,
     readonly clock: Clock = systemClock,
     workerId: string = randomUUID(),
+    readonly claimLeaseMs = 30_000,
     readonly operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
       repository.pool,
     ),
@@ -49,10 +50,14 @@ export class DurableScheduler {
       reconciled: 0,
     };
 
-    const uncertain = await this.repository.claimExpiredScheduledStarts(now, this.workerId);
+    const uncertain = await this.repository.claimExpiredScheduledStarts(
+      now,
+      this.workerId,
+      this.claimLeaseMs,
+    );
     for (const task of uncertain) await this.reconcileUncertainStart(task, result);
 
-    const due = await this.repository.claimDueScheduled(now, this.workerId);
+    const due = await this.repository.claimDueScheduled(now, this.workerId, this.claimLeaseMs);
     for (const task of due) await this.startClaimedTask(task, result);
 
     const expired = await this.repository.claimExpiredDeadlines(this.clock.now());
@@ -285,6 +290,7 @@ function snapshotHasStarted(state: string): boolean {
     "RUNNING",
     "PAUSED",
     "RESUMING",
+    "WAITING_INPUT",
     "SUCCEEDED",
     "BUSINESS_FAILED",
     "PARTIALLY_COMPLETED",
