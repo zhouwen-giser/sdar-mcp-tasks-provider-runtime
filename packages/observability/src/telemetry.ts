@@ -12,6 +12,7 @@ import type { SpanExporter } from "@opentelemetry/sdk-trace-node";
 import { createProviderResource } from "./provider-resource.js";
 import type { ProviderResourceInput } from "./provider-resource.js";
 import type { ProviderOpsEnvelope } from "./event-envelope.js";
+import { TelemetrySanitizer } from "./telemetry-sanitizer.js";
 
 const INSTRUMENTATION_NAME = "@sdar/provider-ops-telemetry";
 const INSTRUMENTATION_VERSION = "1.1.0";
@@ -69,6 +70,7 @@ export class ProviderTelemetry {
   #started = false;
   #shutdown = false;
   readonly #metricInstruments = new Map<string, ProviderMetricInstrument>();
+  readonly #sanitizer = new TelemetrySanitizer();
 
   constructor(options: ProviderTelemetryOptions) {
     this.#options = options;
@@ -125,20 +127,24 @@ export class ProviderTelemetry {
     const invocation = { started: false };
     try {
       const tracer = this.#tracerProvider.getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
-      return await tracer.startActiveSpan(name, { attributes }, async (span) => {
-        invocation.started = true;
-        try {
-          const result = await operation();
-          span.setStatus({ code: SpanStatusCode.OK });
-          return result;
-        } catch (error) {
-          span.setStatus({ code: SpanStatusCode.ERROR });
-          if (error instanceof Error) span.recordException(error);
-          throw error;
-        } finally {
-          span.end();
-        }
-      });
+      return await tracer.startActiveSpan(
+        name,
+        { attributes: this.#sanitizer.sanitizeAttributes(attributes) },
+        async (span) => {
+          invocation.started = true;
+          try {
+            const result = await operation();
+            span.setStatus({ code: SpanStatusCode.OK });
+            return result;
+          } catch (error) {
+            span.setStatus({ code: SpanStatusCode.ERROR });
+            if (error instanceof Error) span.recordException(error);
+            throw error;
+          } finally {
+            span.end();
+          }
+        },
+      );
     } catch (error) {
       if (invocation.started) throw error;
       return operation();
@@ -190,8 +196,8 @@ export class ProviderTelemetry {
     try {
       this.#loggerProvider.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION).emit({
         eventName: name,
-        body: body as never,
-        attributes,
+        body: this.#sanitizer.sanitize(body) as never,
+        attributes: this.#sanitizer.sanitizeAttributes(attributes),
         timestamp: new Date(),
       });
     } catch {
