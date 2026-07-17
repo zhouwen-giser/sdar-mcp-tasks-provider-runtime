@@ -94,13 +94,16 @@ export class ProviderTelemetry {
       });
     this.#tracerProvider = new NodeTracerProvider({
       resource,
-      spanProcessors: [new BatchSpanProcessor(spanExporter, this.#options.batch)],
+      spanProcessors: [new BatchSpanProcessor(spanExporter, batchOptions(this.#options.batch))],
     });
     this.#loggerProvider = new LoggerProvider({
       resource,
       forceFlushTimeoutMillis: this.#options.batch?.exportTimeoutMillis ?? 10_000,
       processors: [
-        new BatchLogRecordProcessor({ exporter: eventExporter, ...this.#options.batch }),
+        new BatchLogRecordProcessor({
+          exporter: eventExporter,
+          ...batchOptions(this.#options.batch),
+        }),
       ],
     });
     this.#meterProvider = new MeterProvider({ resource, readers: [metricReader] });
@@ -119,20 +122,27 @@ export class ProviderTelemetry {
 
   async trace<T>(name: string, attributes: Attributes, operation: () => Promise<T>): Promise<T> {
     if (!this.#started || this.#tracerProvider === undefined) return operation();
-    const tracer = this.#tracerProvider.getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
-    return tracer.startActiveSpan(name, { attributes }, async (span) => {
-      try {
-        const result = await operation();
-        span.setStatus({ code: SpanStatusCode.OK });
-        return result;
-      } catch (error) {
-        span.setStatus({ code: SpanStatusCode.ERROR });
-        if (error instanceof Error) span.recordException(error);
-        throw error;
-      } finally {
-        span.end();
-      }
-    });
+    const invocation = { started: false };
+    try {
+      const tracer = this.#tracerProvider.getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
+      return await tracer.startActiveSpan(name, { attributes }, async (span) => {
+        invocation.started = true;
+        try {
+          const result = await operation();
+          span.setStatus({ code: SpanStatusCode.OK });
+          return result;
+        } catch (error) {
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          if (error instanceof Error) span.recordException(error);
+          throw error;
+        } finally {
+          span.end();
+        }
+      });
+    } catch (error) {
+      if (invocation.started) throw error;
+      return operation();
+    }
   }
 
   adapterRpc(
@@ -177,12 +187,16 @@ export class ProviderTelemetry {
 
   event(name: string, body: unknown, attributes: Attributes = {}): void {
     if (!this.#started || this.#loggerProvider === undefined) return;
-    this.#loggerProvider.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION).emit({
-      eventName: name,
-      body: body as never,
-      attributes,
-      timestamp: new Date(),
-    });
+    try {
+      this.#loggerProvider.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION).emit({
+        eventName: name,
+        body: body as never,
+        attributes,
+        timestamp: new Date(),
+      });
+    } catch {
+      // Instrumentation must never alter Runtime state or readiness.
+    }
   }
 
   emitEnvelope(envelope: ProviderOpsEnvelope): void {
@@ -219,31 +233,51 @@ export class ProviderTelemetry {
     kind: ProviderMetricKind = "counter",
   ): void {
     if (!this.#started || this.#meterProvider === undefined) return;
-    const key = `${kind}:${name}`;
-    let instrument = this.#metricInstruments.get(key);
-    if (instrument === undefined) {
-      const meter = this.#meterProvider.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
-      if (kind === "counter") instrument = meter.createCounter(name);
-      else if (kind === "histogram") instrument = meter.createHistogram(name);
-      else {
-        const gauge = meter.createObservableGauge(name);
-        let currentValue = 0;
-        let currentAttributes: Attributes = {};
-        gauge.addCallback((observation) => observation.observe(currentValue, currentAttributes));
-        instrument = {
-          set: (nextValue, nextAttributes = {}) => {
-            currentValue = nextValue;
-            currentAttributes = nextAttributes;
-          },
-        };
+    try {
+      const key = `${kind}:${name}`;
+      let instrument = this.#metricInstruments.get(key);
+      if (instrument === undefined) {
+        const meter = this.#meterProvider.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
+        if (kind === "counter") instrument = meter.createCounter(name);
+        else if (kind === "histogram") instrument = meter.createHistogram(name);
+        else {
+          const gauge = meter.createObservableGauge(name);
+          let currentValue = 0;
+          let currentAttributes: Attributes = {};
+          gauge.addCallback((observation) => observation.observe(currentValue, currentAttributes));
+          instrument = {
+            set: (nextValue, nextAttributes = {}) => {
+              currentValue = nextValue;
+              currentAttributes = nextAttributes;
+            },
+          };
+        }
+        this.#metricInstruments.set(key, instrument);
       }
-      this.#metricInstruments.set(key, instrument);
+      const boundedAttributes = boundedMetricAttributes(attributes);
+      if (kind === "counter") instrument.add?.(value, boundedAttributes);
+      else if (kind === "histogram") instrument.record?.(value, boundedAttributes);
+      else instrument.set?.(value, boundedAttributes);
+    } catch {
+      // Instrumentation must never alter Runtime state or readiness.
     }
-    const boundedAttributes = boundedMetricAttributes(attributes);
-    if (kind === "counter") instrument.add?.(value, boundedAttributes);
-    else if (kind === "histogram") instrument.record?.(value, boundedAttributes);
-    else instrument.set?.(value, boundedAttributes);
   }
+}
+
+function batchOptions(options: ProviderTelemetryBatchOptions | undefined) {
+  const maxQueueSize = options?.maxQueueSize ?? 2_048;
+  return {
+    maxQueueSize,
+    maxExportBatchSize: Math.min(options?.maxExportBatchSize ?? 512, maxQueueSize),
+    scheduledDelayMillis: 5_000,
+    exportTimeoutMillis: 10_000,
+    ...(options?.scheduledDelayMillis === undefined
+      ? {}
+      : { scheduledDelayMillis: options.scheduledDelayMillis }),
+    ...(options?.exportTimeoutMillis === undefined
+      ? {}
+      : { exportTimeoutMillis: options.exportTimeoutMillis }),
+  };
 }
 
 function boundedMetricAttributes(attributes: Attributes): Attributes {

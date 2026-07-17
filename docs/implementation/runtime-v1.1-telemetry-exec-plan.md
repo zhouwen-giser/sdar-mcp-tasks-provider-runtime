@@ -34,8 +34,8 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | H4      | Adapter RPC spans                                           | success/error/no-payload tests          | complete    |
 | H5      | scheduler/recovery/TTL events                               | component event tests                   | complete    |
 | H6      | low-cardinality OTel metrics                                | value/cardinality/label tests           | complete    |
-| H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | in progress |
-| H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | pending     |
+| H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | complete    |
+| H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | in progress |
 | H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | pending     |
 | Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | pending     |
 | Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | pending     |
@@ -67,6 +67,7 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | 2026-07-18 | H4 contract alignment and real gRPC context tests (4)             | PASS   |
 | 2026-07-18 | H5 scheduler/recovery/TTL PostgreSQL component tests (112)        | PASS   |
 | 2026-07-18 | H6 OTel metric catalog/value/cardinality tests (7 focused)        | PASS   |
+| 2026-07-18 | H7 exporter timeout/queue overflow isolation tests (8 focused)    | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.
