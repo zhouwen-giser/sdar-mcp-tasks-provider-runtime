@@ -101,6 +101,37 @@ describe("Runtime startup and fault recovery", () => {
     });
   });
 
+  it("does not execute control commands while recovering pending normal Commands", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "recovery-pending-update", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected recovery task");
+    const taskId = String(created.task.taskId);
+
+    const before = controlSideEffects;
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    const pendingUpdate = await pool.query<{ count: string }>(
+      `SELECT count(*) AS count FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE' AND state='PENDING'`,
+      [taskId],
+    );
+    expect(pendingUpdate.rows[0]?.count).toBe("1");
+
+    const scan = await new RecoveryManager(engine, new TaskRepository(pool)).scan();
+
+    expect(scan.tasksReconciled).toBeGreaterThanOrEqual(1);
+    expect(controlSideEffects - before).toBe(0);
+    const stillPending = await pool.query<{ state: string }>(
+      `SELECT state FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE'
+       ORDER BY command_sequence DESC LIMIT 1`,
+      [taskId],
+    );
+    expect(stillPending.rows[0]?.state).toBe("PENDING");
+  });
+
   it("dispatches a recovered cancel command without repeating the Adapter side effect", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
