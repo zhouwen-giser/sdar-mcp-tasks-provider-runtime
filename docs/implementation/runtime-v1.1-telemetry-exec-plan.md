@@ -36,8 +36,8 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | H6      | low-cardinality OTel metrics                                | value/cardinality/label tests           | complete    |
 | H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | complete    |
 | H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | complete    |
-| H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | in progress |
-| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | pending     |
+| H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | complete    |
+| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | in progress |
 | Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | pending     |
 
 ## Design decisions
@@ -50,7 +50,9 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
   Failed or rolled-back transactions produce no event.
 - Trace/event/metric calls are non-throwing at the business boundary and use bounded batch
   processors with explicit timeouts and drop accounting.
-- H9 remains optional. If implemented, it stays outside default compose and production images.
+- H9 is intentionally not implemented for v1.1. CI uses in-memory, timeout, and queue-pressure
+  exporters instead of adding a Collector/ClickHouse dev stack. This keeps default compose,
+  production images, Runtime dependencies, and network paths free of ClickHouse and SDAR Core.
 
 ## Verification ledger
 
@@ -69,6 +71,7 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | 2026-07-18 | H6 OTel metric catalog/value/cardinality tests (7 focused)        | PASS   |
 | 2026-07-18 | H7 exporter timeout/queue overflow isolation tests (8 focused)    | PASS   |
 | 2026-07-18 | H8 sanitizer/export privacy tests (10 focused)                    | PASS   |
+| 2026-07-18 | H9 repository boundary scan: no telemetry-dev/ClickHouse runtime  | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.
