@@ -17,6 +17,7 @@ export interface TtlCleanerOptions {
     outcome: "renewed" | "expired" | "purged" | "blocked" | "error",
     amount?: number,
   ) => void;
+  onEvent?: (event: "renew" | "expire" | "purge" | "blocked", amount: number) => void;
 }
 
 export class TtlCleaner {
@@ -24,6 +25,7 @@ export class TtlCleaner {
   readonly #purgeGraceMs: number;
   readonly #recoveryLeaseMs: number;
   readonly #onMetric: TtlCleanerOptions["onMetric"];
+  readonly #onEvent: TtlCleanerOptions["onEvent"];
 
   constructor(
     readonly repository: TaskRepository,
@@ -42,6 +44,7 @@ export class TtlCleaner {
       throw new RangeError("RECOVERY_LEASE_MS_INVALID");
     }
     this.#onMetric = options.onMetric;
+    this.#onEvent = options.onEvent;
   }
 
   async tick(now = new Date()): Promise<TtlCleanerTickResult> {
@@ -184,6 +187,10 @@ export class TtlCleaner {
       if (result.expired > 0) this.#onMetric?.("expired", result.expired);
       if (result.purged > 0) this.#onMetric?.("purged", result.purged);
       if (result.blocked > 0) this.#onMetric?.("blocked", result.blocked);
+      this.#emit("renew", result.renewed);
+      this.#emit("expire", result.expired);
+      this.#emit("purge", result.purged);
+      this.#emit("blocked", result.blocked);
       return result;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -191,6 +198,15 @@ export class TtlCleaner {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  #emit(event: "renew" | "expire" | "purge" | "blocked", amount: number): void {
+    if (amount < 1) return;
+    try {
+      this.#onEvent?.(event, amount);
+    } catch {
+      // Operational telemetry must never alter TTL lifecycle outcomes.
     }
   }
 

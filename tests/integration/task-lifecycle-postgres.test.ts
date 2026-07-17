@@ -552,12 +552,16 @@ describe("durable task lifecycle", () => {
       clock,
     );
     const repository = new TaskRepository(pool);
+    const schedulerEvents: [string, number][] = [];
     const firstWorker = new DurableScheduler(
       engine.manifest,
       gateway,
       repository,
       clock,
       "worker-1",
+      undefined,
+      undefined,
+      { onEvent: (event, amount) => schedulerEvents.push([event, amount]) },
     );
     const secondWorker = new DurableScheduler(
       engine.manifest,
@@ -565,6 +569,9 @@ describe("durable task lifecycle", () => {
       new TaskRepository(pool),
       clock,
       "worker-2",
+      undefined,
+      undefined,
+      { onEvent: (event, amount) => schedulerEvents.push([event, amount]) },
     );
     const before = sideEffectCount;
     const created = await scheduledEngine.callOperation(
@@ -593,6 +600,11 @@ describe("durable task lifecycle", () => {
     const claims = await Promise.all([firstWorker.tick(), secondWorker.tick()]);
     expect(claims.reduce((sum, tick) => sum + tick.started, 0)).toBe(1);
     expect(sideEffectCount - before).toBe(1);
+    expect(schedulerEvents).toEqual([
+      ["scheduled", 1],
+      ["claimed", 1],
+      ["started", 1],
+    ]);
     const task = await scheduledEngine.getTask(String(created.task.taskId), authorization);
     expect(task.status).toBe("completed");
   });
@@ -3547,10 +3559,13 @@ describe("durable task lifecycle", () => {
     await pool.query("UPDATE provider_task SET handle_expires_at='2000-01-01' WHERE task_id=$1", [
       taskId,
     ]);
+    const ttlEvents: [string, number][] = [];
     const result = await new TtlCleaner(new TaskRepository(pool), {
       purgeGraceMs: 60_000,
+      onEvent: (event, amount) => ttlEvents.push([event, amount]),
     }).tick(new Date("2000-01-02T00:00:00Z"));
     expect(result.renewed).toBeGreaterThanOrEqual(1);
+    expect(ttlEvents).toContainEqual(["renew", result.renewed]);
     const retained = await new TaskRepository(pool).getById(taskId);
     expect(retained).toMatchObject({ internalState: "RUNNING", expiredAt: null });
     expect(retained?.handleExpiresAt?.getTime()).toBeGreaterThan(
@@ -3621,13 +3636,20 @@ describe("durable task lifecycle", () => {
        VALUES ($1,99,'UPDATE',$2,'EXHAUSTED','{}'::jsonb)`,
       [taskId, "f".repeat(64)],
     );
-    const first = new TtlCleaner(new TaskRepository(pool), { purgeGraceMs: 60_000 });
-    const second = new TtlCleaner(new TaskRepository(pool), { purgeGraceMs: 60_000 });
+    const ttlEvents: [string, number][] = [];
+    const cleanerOptions = {
+      purgeGraceMs: 60_000,
+      onEvent: (event: "renew" | "expire" | "purge" | "blocked", amount: number) =>
+        ttlEvents.push([event, amount]),
+    };
+    const first = new TtlCleaner(new TaskRepository(pool), cleanerOptions);
+    const second = new TtlCleaner(new TaskRepository(pool), cleanerOptions);
     const expired = await Promise.all([
       first.tick(new Date("2000-01-02T00:00:00Z")),
       second.tick(new Date("2000-01-02T00:00:00Z")),
     ]);
     expect(expired.reduce((sum, result) => sum + result.expired, 0)).toBe(1);
+    expect(ttlEvents).toContainEqual(["expire", 1]);
     const logicallyExpired = await new TaskRepository(pool).getById(taskId);
     expect(logicallyExpired?.expiredAt).not.toBeNull();
     expect(logicallyExpired?.purgeAfter?.getTime()).toBeGreaterThan(
@@ -3647,11 +3669,21 @@ describe("durable task lifecycle", () => {
       "UPDATE outbox_event SET published_at=clock_timestamp() WHERE aggregate_id=$1",
       [taskId],
     );
+    await pool.query(
+      `INSERT INTO runtime_lease(lease_key,owner_id,fencing_token,expires_at)
+       VALUES ($1,'other-cleaner',1,clock_timestamp() + interval '1 hour')`,
+      [`sdar-recovery:${taskId}`],
+    );
+    const leaseBlocked = await first.tick(new Date("2000-01-03T00:00:00Z"));
+    expect(leaseBlocked.blocked).toBe(1);
+    expect(ttlEvents).toContainEqual(["blocked", 1]);
+    await pool.query("DELETE FROM runtime_lease WHERE lease_key=$1", [`sdar-recovery:${taskId}`]);
     const purged = await Promise.all([
       first.tick(new Date("2000-01-03T00:00:00Z")),
       second.tick(new Date("2000-01-03T00:00:00Z")),
     ]);
     expect(purged.reduce((sum, result) => sum + result.purged, 0)).toBe(1);
+    expect(ttlEvents).toContainEqual(["purge", 1]);
     const residue = await pool.query<{ count: string }>(
       `SELECT (
          (SELECT count(*) FROM provider_task WHERE task_id=$1) +
