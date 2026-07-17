@@ -1749,6 +1749,28 @@ export class TaskRepository {
     }
   }
 
+  async findCommandByRequestHash(
+    taskId: string,
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+    requestHash: string,
+  ): Promise<CommandResolution | null> {
+    const result = await this.pool.query<PendingCommandRecordRow>(
+      `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
+              claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+              last_error_message, claim_until
+       FROM task_command
+       WHERE task_id=$1 AND command_type=$2 AND request_hash=$3
+       ORDER BY command_sequence DESC LIMIT 1`,
+      [taskId, commandType, requestHash],
+    );
+    if (result.rows[0] === undefined) return null;
+    return {
+      ...mapCommandResolution(result.rows[0]),
+      duplicate: true,
+      disposition: "existing",
+    };
+  }
+
   async supersedeNormalCommandsForSafeStop(
     taskId: string,
     includeClaimed = false,

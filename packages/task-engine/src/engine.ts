@@ -681,11 +681,13 @@ export class TaskEngine {
     }
     const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
+    const allAnswers: { key: string; hash: string; value: unknown }[] = [];
     const pending: { key: string; hash: string; value: unknown }[] = [];
     for (const [key, value] of Object.entries(answers)) {
       const request = requests.find((candidate) => candidate.key === key);
       if (request === undefined) throw new InvalidParamsError("UNKNOWN_INPUT_REQUEST_KEY");
       const hash = createHash("sha256").update(canonicalize(value)).digest("hex");
+      allAnswers.push({ key, hash, value });
       if (request.status === "ANSWERED") {
         if (request.answerHash !== hash) throw new InvalidParamsError("INPUT_ANSWER_CONFLICT");
         continue;
@@ -695,8 +697,17 @@ export class TaskEngine {
       }
       pending.push({ key, hash, value });
     }
-    if (pending.length === 0) return {};
-    const requestHash = createHash("sha256").update(canonicalize(pending)).digest("hex");
+    if (pending.length === 0) {
+      const normalizedAnswers = [...allAnswers].sort((left, right) => left.key.localeCompare(right.key));
+      const requestHash = createHash("sha256").update(canonicalize(normalizedAnswers)).digest("hex");
+      const command = await this.#repository.findCommandByRequestHash(taskId, "UPDATE", requestHash);
+      if (command !== null) {
+        return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
+      }
+      return this.#taskSnapshot(taskId, authorization);
+    }
+    const normalizedAnswers = [...allAnswers].sort((left, right) => left.key.localeCompare(right.key));
+    const requestHash = createHash("sha256").update(canonicalize(normalizedAnswers)).digest("hex");
     const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
       answers,
     });
@@ -760,6 +771,18 @@ export class TaskEngine {
       },
     };
     return taskResult;
+  }
+
+  async #taskSnapshot(
+    taskId: string,
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, unknown>> {
+    const [task, inputRequests, observations] = await Promise.all([
+      this.#repository.getAuthorized(taskId, authorization),
+      this.#repository.listInputRequests(taskId),
+      this.#repository.listObservations(taskId),
+    ]);
+    return detailedTask(task, inputRequests, observations) as Record<string, Record<string, unknown> | null>;
   }
 
   async #resolveExistingCommand(

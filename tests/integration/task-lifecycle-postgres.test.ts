@@ -1671,17 +1671,13 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.updateTask(taskId, { approval: true }, authorization);
-    await pool.query(
-      `UPDATE task_command
-         SET state='ACKNOWLEDGED',
-             adapter_ack=$2::jsonb,
-             last_error_code=NULL,
-             last_error_message=NULL,
-             claim_owner=NULL,
-             claim_until=NULL
-       WHERE task_id=$1 AND command_type='UPDATE' AND command_sequence=1`,
-      [taskId, JSON.stringify({ reasonCode: "INPUT_ACCEPTED", message: "Input accepted." })],
-    );
+    await new DurableCommandDispatcher(
+      gateway,
+      new TaskRepository(pool),
+      undefined,
+      "ack-update-dup-dispatcher",
+    ).tick();
+    const beforeDuplicate = controlSideEffectCount;
 
     const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
     expectCommandReceipt(duplicate, {
@@ -1692,7 +1688,8 @@ describe("durable task lifecycle", () => {
       durablyAccepted: true,
     });
     expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
-    expect(controlSideEffectCount).toBe(before);
+    expect(controlSideEffectCount).toBe(beforeDuplicate);
+    expect(controlSideEffectCount - before).toBe(1);
   });
 
   it("rejected_duplicate_returns_original_rejection", async () => {
@@ -1706,18 +1703,40 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.updateTask(taskId, { approval: true }, authorization);
-    await pool.query(
-      `UPDATE task_command
-         SET state='REJECTED',
-             adapter_ack=$2::jsonb,
-             last_error_code='INPUT_REJECTED',
-             last_error_message='Input rejected.',
-             claim_owner=NULL,
-             claim_until=NULL
-       WHERE task_id=$1 AND command_type='UPDATE' AND command_sequence=1`,
-      [taskId, JSON.stringify({ reasonCode: "INPUT_REJECTED", message: "Input rejected." })],
+    const originalUpdateExecution = (
+      gateway as unknown as {
+        updateExecution: GrpcAdapterGateway["updateExecution"];
+      }
+    ).updateExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "updateExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId) {
+          return originalUpdateExecution(
+            ...(args as Parameters<GrpcAdapterGateway["updateExecution"]>),
+          );
+        }
+        return {
+          accepted: false,
+          reasonCode: "INPUT_REJECTED",
+          message: "Input rejected.",
+          commandSequence: identity.commandSequence ?? 0,
+          identity,
+        };
+      },
+      async () => {
+        await new DurableCommandDispatcher(
+          gateway,
+          new TaskRepository(pool),
+          undefined,
+          "rejected-update-dup-dispatcher",
+        ).tick();
+      },
     );
 
+    const beforeDuplicate = controlSideEffectCount;
     const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
     expect(duplicate).toMatchObject({
       isError: true,
@@ -1727,7 +1746,8 @@ describe("durable task lifecycle", () => {
       },
     });
     expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
-    expect(controlSideEffectCount).toBe(before);
+    expect(controlSideEffectCount).toBe(beforeDuplicate);
+    expect(controlSideEffectCount - before).toBe(1);
   });
 
   it("exhausted_duplicate_returns_original_failure", async () => {
@@ -1739,33 +1759,216 @@ describe("durable task lifecycle", () => {
     if (created.kind !== "task") throw new Error("Expected input task");
     const taskId = String(created.task.taskId);
     const before = controlSideEffectCount;
-
+    const repository = new TaskRepository(pool);
+    const release = createDeferred<void>();
+    const originalUpdateExecution = (
+      gateway as unknown as {
+        updateExecution: GrpcAdapterGateway["updateExecution"];
+      }
+    ).updateExecution;
     await engine.updateTask(taskId, { approval: true }, authorization);
-    await pool.query(
-      `UPDATE task_command
-         SET state='EXHAUSTED',
-             adapter_ack=$2::jsonb,
-             last_error_code='INPUT_EXHAUSTED',
-             last_error_message='Input failed after retries.',
-             claim_owner=NULL,
-             claim_until=NULL
-       WHERE task_id=$1 AND command_type='UPDATE' AND command_sequence=1`,
-      [
-        taskId,
-        JSON.stringify({ reasonCode: "INPUT_EXHAUSTED", message: "Input failed after retries." }),
-      ],
+    await withTemporaryGatewayMethod(
+      gateway,
+      "updateExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId) {
+          return originalUpdateExecution(
+            ...(args as Parameters<GrpcAdapterGateway["updateExecution"]>),
+          );
+        }
+        await release.promise;
+        return {
+          accepted: false,
+          reasonCode: "TRANSIENT_UNAVAILABLE",
+          message: "Temporary issue while applying input.",
+          commandSequence: identity.commandSequence ?? 0,
+          identity,
+        };
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "exhausted-update-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "UPDATE");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
     );
 
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "exhausted-update-dispatcher-followup",
+    ).tick();
+    const baseline = controlSideEffectCount;
     const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
     expect(duplicate).toMatchObject({
       isError: true,
       structuredContent: {
         outcome: "command_exhausted",
-        reasonCode: "INPUT_EXHAUSTED",
+        reasonCode: "SUPERSEDED_BY_SAFE_STOP",
       },
     });
     expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
-    expect(controlSideEffectCount).toBe(before);
+    expect(await commandAttempts(taskId, "CANCEL")).toBe("1");
+    const duplicateAgain = await engine.updateTask(taskId, { approval: true }, authorization);
+    expect(duplicateAgain).toMatchObject({
+      isError: true,
+      structuredContent: {
+        outcome: "command_exhausted",
+        reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+      },
+    });
+    expect(controlSideEffectCount).toBe(baseline);
+    expect(controlSideEffectCount - before).toBe(2);
+  });
+
+  it("input_update_invariants_are_reflected_in_database_state", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-invariant-db", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "invariant-update-dispatcher",
+    ).tick();
+    expect(controlSideEffectCount - before).toBe(1);
+
+    const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
+    expectCommandReceipt(duplicate, {
+      commandType: "UPDATE",
+      commandState: "ACKNOWLEDGED",
+      duplicate: true,
+      durablyAccepted: true,
+    });
+
+    const openInputs = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_input_request
+       WHERE task_id=$1 AND status='OPEN'`,
+      [taskId],
+    );
+    expect(openInputs.rows[0]?.count).toBe("0");
+
+    const acknowledgedCount = await pool.query<{ count: string; request_hash: string }>(
+      `SELECT count(*)::text AS count, MIN(request_hash) AS request_hash
+       FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE' AND state='ACKNOWLEDGED'`,
+      [taskId],
+    );
+    const requestHash = acknowledgedCount.rows[0]?.request_hash;
+    if (requestHash === undefined) throw new Error("Expected acknowledged command request hash");
+    const sameHashCount = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE' AND request_hash=$2`,
+      [taskId, requestHash],
+    );
+    expect(acknowledgedCount.rows[0]?.count).toBe("1");
+    expect(sameHashCount.rows[0]?.count).toBe("1");
+
+    const activeNormal = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_command
+       WHERE task_id=$1 AND command_type IN ('UPDATE','PAUSE','RESUME')
+         AND state IN ('PENDING','RETRY_WAIT')`,
+      [taskId],
+    );
+    expect(activeNormal.rows[0]?.count).toBe("0");
+
+    const claimedNormal = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_command
+       WHERE task_id=$1 AND command_type IN ('UPDATE','PAUSE','RESUME')
+         AND state='CLAIMED'`,
+      [taskId],
+    );
+    expect(Number(claimedNormal.rows[0]?.count ?? "0")).toBeLessThanOrEqual(1);
+
+    const cancelCount = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_command WHERE task_id=$1 AND command_type='CANCEL'`,
+      [taskId],
+    );
+    expect(Number(cancelCount.rows[0]?.count ?? "0")).toBeLessThanOrEqual(1);
+  });
+
+  it("stopping_task_does_not_create_new_normal_commands", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-stop-no-normal-commands", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "stop-invariant-update-dispatcher",
+    ).tick();
+    expect(controlSideEffectCount - before).toBe(1);
+
+    await engine.cancelTask(taskId, authorization);
+    const inStop = await repository.getById(taskId);
+    expect(inStop).toMatchObject({
+      cancelRequested: true,
+      stopReason: "USER_REQUESTED",
+      internalState: "STOPPING",
+    });
+
+    const beforePauseAttempts = await commandAttempts(taskId, "PAUSE");
+    const beforeResumeAttempts = await commandAttempts(taskId, "RESUME");
+    const beforeCancelAttempts = await commandAttempts(taskId, "CANCEL");
+    try {
+      await engine.controlTask(taskId, "PAUSE", authorization);
+      throw new Error("Expected COMMAND_IN_PROGRESS while stopping");
+    } catch (error) {
+      expect((error as { blockingCommandType?: string }).blockingCommandType).toBe("CANCEL");
+      expect((error as { reasonCode?: string }).reasonCode).toBe("COMMAND_IN_PROGRESS");
+    }
+    try {
+      await engine.controlTask(taskId, "RESUME", authorization);
+      throw new Error("Expected COMMAND_IN_PROGRESS while stopping");
+    } catch (error) {
+      expect((error as { blockingCommandType?: string }).blockingCommandType).toBe("CANCEL");
+      expect((error as { reasonCode?: string }).reasonCode).toBe("COMMAND_IN_PROGRESS");
+    }
+
+    expect(await commandAttempts(taskId, "PAUSE")).toBe(beforePauseAttempts);
+    expect(await commandAttempts(taskId, "RESUME")).toBe(beforeResumeAttempts);
+    expect(await commandAttempts(taskId, "CANCEL")).toBe(beforeCancelAttempts);
+
+    const activeNormal = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_command
+       WHERE task_id=$1 AND command_type IN ('UPDATE','PAUSE','RESUME')
+         AND state IN ('PENDING','RETRY_WAIT')`,
+      [taskId],
+    );
+    expect(activeNormal.rows[0]?.count).toBe("0");
+
+    const claimedNormal = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM task_command
+       WHERE task_id=$1 AND command_type IN ('UPDATE','PAUSE','RESUME')
+         AND state='CLAIMED'`,
+      [taskId],
+    );
+    expect(Number(claimedNormal.rows[0]?.count ?? "0")).toBeLessThanOrEqual(1);
   });
 
   it("pending_update_then_cancel_creates_cancel", async () => {
