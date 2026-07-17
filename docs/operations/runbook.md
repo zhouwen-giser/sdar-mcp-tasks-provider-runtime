@@ -22,6 +22,10 @@ rate limiting, and unexpected terminal-failed growth. Correlate structured logs
 by `providerId`, `taskId`, `operationName`, execution mode and correlation id;
 arguments, credentials and bearer tokens are intentionally absent/redacted.
 
+An Outbox publisher readiness failure means committed lifecycle events remain pending. Restore
+the webhook or intentionally select the internal sink; do not bypass unpublished rows to force
+TTL purge.
+
 ## Routine operations
 
 - Back up PostgreSQL using the platform's physical or verified logical backup;

@@ -30,6 +30,9 @@
     "SCHEDULER_CONCURRENCY": "8",
     "ALLOW_WEAK_LEASE_CONFIGURATION": "false",
     "ADAPTER_MANIFEST_POLL_MS": "60000",
+    "OUTBOX_SINK": "internal_noop",
+    "OUTBOX_POLL_MS": "1000",
+    "OUTBOX_BATCH_SIZE": "100",
     "RECOVERY_POLL_MS": "5000"
   }
 }

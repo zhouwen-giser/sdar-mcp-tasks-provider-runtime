@@ -46,6 +46,19 @@ describe("H4 production fail-closed configuration", () => {
       ALLOW_WEAK_LEASE_CONFIGURATION: false,
     });
   });
+
+  it("requires a configured webhook and HTTPS in production", () => {
+    expect(() => loadRuntimeConfig({ OUTBOX_SINK: "webhook" })).toThrow(
+      "webhook Outbox requires OUTBOX_WEBHOOK_URL",
+    );
+    expect(() =>
+      loadRuntimeConfig({
+        ...secureProduction(),
+        OUTBOX_SINK: "webhook",
+        OUTBOX_WEBHOOK_URL: "http://events.example.test/outbox",
+      }),
+    ).toThrow("production Outbox webhook requires HTTPS");
+  });
 });
 
 function secureProduction(): NodeJS.ProcessEnv {

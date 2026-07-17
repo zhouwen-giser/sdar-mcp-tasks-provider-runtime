@@ -16,6 +16,8 @@ describe("Runtime configuration", () => {
     expect(config.ADAPTER_MANIFEST_POLL_MS).toBe(60_000);
     expect(config.COMMAND_DISPATCH_CONCURRENCY).toBe(8);
     expect(config.SCHEDULER_CONCURRENCY).toBe(8);
+    expect(config.OUTBOX_SINK).toBe("internal_noop");
+    expect(config.OUTBOX_BATCH_SIZE).toBe(100);
   });
 
   it("rejects invalid ports and timeouts", () => {

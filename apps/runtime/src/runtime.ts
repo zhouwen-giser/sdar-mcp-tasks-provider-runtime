@@ -15,15 +15,19 @@ import { OperationRegistry } from "../../../packages/operation-registry/src/inde
 import {
   OperationSnapshotRepository,
   IdempotencyRepository,
+  OutboxRepository,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
 import {
   DurableCommandDispatcher,
   DurableScheduler,
+  InternalNoopOutboxSink,
+  OutboxPublisher,
   RecoveryManager,
   TaskEngine,
   TtlCleaner,
+  WebhookOutboxSink,
 } from "../../../packages/task-engine/src/index.js";
 import type { RuntimeConfig } from "./config.js";
 import { BoundedRateLimiter } from "./rate-limiter.js";
@@ -43,6 +47,7 @@ export interface RuntimeDependencies {
   scheduler: "starting" | "ready" | "failed";
   commandDispatcher: "starting" | "ready" | "failed";
   ttlCleaner: "starting" | "ready" | "failed";
+  outboxPublisher: "starting" | "ready" | "failed";
 }
 
 export interface RuntimeApplication {
@@ -74,6 +79,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     scheduler: "starting",
     commandDispatcher: "starting",
     ttlCleaner: "starting",
+    outboxPublisher: "starting",
   };
   let manifest: ProviderManifest | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
@@ -83,12 +89,14 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let ttlCleanerTimer: NodeJS.Timeout | undefined;
   let adapterHealthTimer: NodeJS.Timeout | undefined;
   let adapterManifestTimer: NodeJS.Timeout | undefined;
+  let outboxPublisherTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
   let ttlCleanerTicking = false;
   let adapterHealthTicking = false;
   let adapterManifestTicking = false;
+  let outboxPublisherTicking = false;
   let adapterHealthFailures = 0;
   const rateLimiter = new BoundedRateLimiter(
     config.RATE_LIMIT_MAX,
@@ -169,6 +177,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (ttlCleanerTimer !== undefined) clearInterval(ttlCleanerTimer);
     if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
     if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
+    if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
     gateway.close();
     await pool.end();
   });
@@ -242,6 +251,16 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
       });
+      const outboxPublisher = new OutboxPublisher(
+        new OutboxRepository(pool),
+        config.OUTBOX_SINK === "webhook"
+          ? new WebhookOutboxSink(
+              new URL(requiredOutboxWebhookUrl(config)),
+              config.OUTBOX_WEBHOOK_TIMEOUT_MS,
+            )
+          : new InternalNoopOutboxSink(),
+        config.OUTBOX_BATCH_SIZE,
+      );
       const recovery = new RecoveryManager(taskEngine, taskRepository, (error, taskId) => {
         logger.warn(
           { err: error, taskId, providerId: validated.providerId },
@@ -261,6 +280,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       dependencies.commandDispatcher = "ready";
       await ttlCleaner.tick();
       dependencies.ttlCleaner = "ready";
+      await outboxPublisher.tick();
+      dependencies.outboxPublisher = "ready";
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
         schedulerTicking = true;
@@ -312,6 +333,23 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.TTL_CLEANER_POLL_MS);
       ttlCleanerTimer.unref();
+      outboxPublisherTimer = setInterval(() => {
+        if (outboxPublisherTicking) return;
+        outboxPublisherTicking = true;
+        void outboxPublisher
+          .tick()
+          .then(() => {
+            dependencies.outboxPublisher = "ready";
+          })
+          .catch((error: unknown) => {
+            dependencies.outboxPublisher = "failed";
+            logger.error({ err: error }, "Outbox publisher tick failed");
+          })
+          .finally(() => {
+            outboxPublisherTicking = false;
+          });
+      }, config.OUTBOX_POLL_MS);
+      outboxPublisherTimer.unref();
       recoveryTimer = setInterval(() => {
         if (recoveryTicking) return;
         recoveryTicking = true;
@@ -389,6 +427,11 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   }
 
   return { app, gateway, pool, dependencies, initialize };
+}
+
+function requiredOutboxWebhookUrl(config: RuntimeConfig): string {
+  if (config.OUTBOX_WEBHOOK_URL === undefined) throw new Error("OUTBOX_WEBHOOK_URL_REQUIRED");
+  return config.OUTBOX_WEBHOOK_URL;
 }
 
 function authenticationOptions(config: RuntimeConfig): AuthenticationOptions {

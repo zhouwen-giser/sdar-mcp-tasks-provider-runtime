@@ -85,6 +85,10 @@ export class TtlCleaner {
       const purgeDue = await client.query<{ task_id: string }>(
         `SELECT task_id FROM provider_task
          WHERE expired_at IS NOT NULL AND purge_after <= $1
+           AND NOT EXISTS (
+             SELECT 1 FROM outbox_event
+             WHERE aggregate_id=provider_task.task_id AND published_at IS NULL
+           )
          ORDER BY purge_after, task_id
          FOR UPDATE SKIP LOCKED LIMIT $2`,
         [now, this.#batchSize],

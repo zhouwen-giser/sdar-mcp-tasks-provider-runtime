@@ -40,7 +40,7 @@ attempt or fixed terminal reason). The payload contains a stable Task reference 
 state, MCP status, substate, status message, observation revision and Adapter revision, plus
 transition-specific fields. Consumers can detect duplicates and fetch the authoritative
 DetailedTask; outbox delivery failure never prevents `tasks/get` from reading committed state.
-This release persists and exposes the outbox boundary but does not claim MCP task-notification
+rc.2 persists and exposes the outbox boundary but does not claim MCP task-notification
 delivery support.
 
 ## Migration
@@ -49,6 +49,14 @@ Migration 009 is append-only. For rc.1 rows it initializes `observation_revision
 highest stored observation, classifies known Runtime-created observations, and records the old
 revision as `adapter_revision` for historical Adapter Snapshot observations. Existing outbox
 rows receive their immutable event UUID as a collision-free compatibility event key.
+
+### rc.3 publisher lifecycle
+
+Runtime now owns a bounded `OutboxPublisher` worker. The internal no-op sink acknowledges events
+for deployments that intentionally need no external delivery; the webhook sink acknowledges only
+after a successful HTTP response. Failed batches increment delivery attempts and remain pending.
+TTL purge excludes every Task with unpublished Outbox rows, so publication completes before
+physical deletion.
 
 ## Consequences
 

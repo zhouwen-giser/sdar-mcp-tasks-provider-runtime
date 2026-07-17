@@ -42,6 +42,11 @@ authentication.
 | `TTL_CLEANER_POLL_MS`              | `60000`               | Logical-expiry and purge worker interval                   |
 | `TTL_PURGE_GRACE_MS`               | `86400000`            | Expiry-to-purge delay, range 1 second-7 days               |
 | `TTL_CLEANER_BATCH_SIZE`           | `128`                 | Maximum rows claimed per cleaner stage and tick            |
+| `OUTBOX_SINK`                      | `internal_noop`       | `internal_noop` or `webhook`                               |
+| `OUTBOX_WEBHOOK_URL`               | unset                 | Required for webhook; HTTPS required in production         |
+| `OUTBOX_POLL_MS`                   | `1000`                | Publisher interval                                         |
+| `OUTBOX_BATCH_SIZE`                | `100`                 | Maximum events per publication batch                       |
+| `OUTBOX_WEBHOOK_TIMEOUT_MS`        | `5000`                | Webhook request timeout                                    |
 
 `development` authentication is limited to local Compose. `trusted_headers` requires an
 authenticating proxy that strips client-supplied `x-sdar-subject` and `x-sdar-tenant` headers;

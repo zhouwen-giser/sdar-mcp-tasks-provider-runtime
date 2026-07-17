@@ -44,6 +44,11 @@ const EnvironmentSchema = z
     TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
     TTL_PURGE_GRACE_MS: z.coerce.number().int().min(1_000).max(604_800_000).default(86_400_000),
     TTL_CLEANER_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(128),
+    OUTBOX_SINK: z.enum(["internal_noop", "webhook"]).default("internal_noop"),
+    OUTBOX_WEBHOOK_URL: z.url().optional(),
+    OUTBOX_POLL_MS: z.coerce.number().int().min(100).max(300_000).default(1_000),
+    OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(100),
+    OUTBOX_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5_000),
   })
   .superRefine((value, context) => {
     if (
@@ -70,6 +75,16 @@ const EnvironmentSchema = z
           message: "production forbids weak lease configuration",
         });
       }
+    }
+    if (value.OUTBOX_SINK === "webhook" && value.OUTBOX_WEBHOOK_URL === undefined) {
+      context.addIssue({ code: "custom", message: "webhook Outbox requires OUTBOX_WEBHOOK_URL" });
+    }
+    if (
+      value.RUNTIME_ENV === "production" &&
+      value.OUTBOX_WEBHOOK_URL !== undefined &&
+      !value.OUTBOX_WEBHOOK_URL.startsWith("https://")
+    ) {
+      context.addIssue({ code: "custom", message: "production Outbox webhook requires HTTPS" });
     }
   });
 
