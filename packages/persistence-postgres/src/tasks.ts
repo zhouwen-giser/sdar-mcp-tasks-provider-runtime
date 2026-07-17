@@ -1999,16 +1999,17 @@ export class TaskRepository {
         if (row === undefined) throw new Error("TASK_CONFIRMATION_NOT_RETURNED");
         return fromRow(row);
       }
+      const stateTransition = mergeStopState(existing, transition);
       const applied = await transitionTask(client, {
         taskId,
         expectedVersion: existing.version,
         update: {
-          internalState: transition.internalState,
-          mcpStatus: transition.mcpStatus,
-          substate: transition.substate,
-          statusMessage: transition.statusMessage,
-          result: transition.result,
-          error: transition.error,
+          internalState: stateTransition.internalState,
+          mcpStatus: stateTransition.mcpStatus,
+          substate: stateTransition.substate,
+          statusMessage: stateTransition.statusMessage,
+          result: stateTransition.result,
+          error: stateTransition.error,
           adapterRevision,
           ...(transitionHasStarted(transition) && existing.actualStartedAt === null
             ? { actualStartedAt: new Date() }
@@ -2044,6 +2045,24 @@ export class TaskRepository {
       client.release();
     }
   }
+}
+
+export function mergeStopState(
+  existing: TaskRecord,
+  adapterTransition: SnapshotTransition,
+): SnapshotTransition {
+  if ((!existing.cancelRequested && existing.stopReason === null) || adapterTransition.terminal) {
+    return adapterTransition;
+  }
+  return {
+    ...adapterTransition,
+    internalState: existing.internalState,
+    mcpStatus: existing.mcpStatus,
+    substate: existing.substate,
+    statusMessage: existing.statusMessage ?? adapterTransition.statusMessage,
+    result: existing.result,
+    error: existing.error,
+  };
 }
 
 async function transitionTask(

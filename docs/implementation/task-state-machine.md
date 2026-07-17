@@ -22,3 +22,7 @@ Runtime-owned observation revision; they never reuse or synthesize an Adapter re
 request first persists `STOPPING` and a durable command. Ack is not terminal proof: user cancel,
 deadline and missed-start compensation publish their terminal mapping only from an authoritative
 later Snapshot, or publish `SAFE_STOP_UNCONFIRMED` technical failure where policy requires it.
+While stop intent is durable (`cancelRequested` or `stopReason`), a later non-terminal Adapter
+snapshot updates its revision, observation and confirmation time but cannot replace the stored
+Runtime/MCP state. Therefore STOPPING may advance only to a terminal state; it cannot regress to
+RUNNING, PAUSED or another working state.
