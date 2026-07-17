@@ -809,7 +809,7 @@ export class TaskEngine {
         break;
       case "ACKNOWLEDGED":
         if (command.commandType === "CANCEL") {
-          this.#commandInProgressError(command, commandType);
+          this.#blockingCommandError(command, commandType);
         }
         return this.#taskWithCommandReceipt(taskId, authorization, command);
       case "REJECTED":
@@ -840,8 +840,34 @@ export class TaskEngine {
     const retryAfterMs = this.#commandRetryAfterMs(command.nextAttemptAt ?? command.claimUntil);
     throw new CommandInProgressError({
       commandSequence: command.sequence,
-      commandType,
+      commandType: command.commandType,
       requestedCommandType: commandType,
+      blockingCommandType: command.commandType,
+      commandState: command.state,
+      retryAfterMs,
+    });
+  }
+
+  #blockingCommandError(
+    command: CommandResolution,
+    requestedCommandType: "UPDATE" | "PAUSE" | "RESUME",
+  ): never {
+    if (
+      command.state !== "PENDING" &&
+      command.state !== "CLAIMED" &&
+      command.state !== "RETRY_WAIT" &&
+      !(command.commandType === "CANCEL" && command.state === "ACKNOWLEDGED")
+    ) {
+      throw new Error("COMMAND_NOT_BLOCKING");
+    }
+    const retryAfterMs =
+      command.state === "ACKNOWLEDGED"
+        ? 0
+        : this.#commandRetryAfterMs(command.nextAttemptAt ?? command.claimUntil);
+    throw new CommandInProgressError({
+      commandSequence: command.sequence,
+      commandType: command.commandType,
+      requestedCommandType,
       blockingCommandType: command.commandType,
       commandState: command.state,
       retryAfterMs,
