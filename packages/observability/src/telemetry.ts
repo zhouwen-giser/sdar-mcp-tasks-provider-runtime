@@ -36,6 +36,12 @@ export interface ProviderTelemetryOptions {
 
 export type ProviderMetricKind = "counter" | "histogram";
 
+export interface AdapterRpcTelemetryContext {
+  taskId?: string;
+  externalExecutionId?: string;
+  commandSequence?: number;
+}
+
 interface ProviderMetricInstrument {
   add?: (value: number, attributes?: Attributes) => void;
   record?: (value: number, attributes?: Attributes) => void;
@@ -115,18 +121,34 @@ export class ProviderTelemetry {
     });
   }
 
-  adapterRpc(method: string, outcome: "success" | "error", durationMs: number): void {
+  adapterRpc(
+    method: string,
+    outcome: "success" | "error",
+    durationMs: number,
+    context: AdapterRpcTelemetryContext = {},
+  ): void {
     if (!this.#started || this.#tracerProvider === undefined) return;
     try {
       const endTime = Date.now();
       const span = this.#tracerProvider
         .getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION)
-        .startSpan(`adapter.${method}`, {
+        .startSpan("adapter.rpc", {
           attributes: {
+            "adapter.provider": this.#options.resource.providerId,
             "rpc.system": "grpc",
             "rpc.method": method,
-            "sdar.rpc.outcome": outcome,
-            "sdar.rpc.duration_ms": durationMs,
+            ...(context.taskId === undefined || context.taskId.length === 0
+              ? {}
+              : { taskId: context.taskId }),
+            ...(context.externalExecutionId === undefined ||
+            context.externalExecutionId.length === 0
+              ? {}
+              : { externalExecutionId: context.externalExecutionId }),
+            ...(context.commandSequence === undefined
+              ? {}
+              : { commandSequence: context.commandSequence }),
+            duration: durationMs,
+            status: outcome,
           },
           startTime: new Date(endTime - Math.max(0, durationMs)),
         });

@@ -66,7 +66,18 @@ export interface AdapterGatewayOptions {
   providerId: string;
   credentials?: grpc.ChannelCredentials;
   timeoutMs?: number;
-  onRpc?: (method: string, outcome: "success" | "error", durationMs: number) => void;
+  onRpc?: (
+    method: string,
+    outcome: "success" | "error",
+    durationMs: number,
+    context: AdapterRpcContext,
+  ) => void;
+}
+
+export interface AdapterRpcContext {
+  taskId?: string;
+  externalExecutionId?: string;
+  commandSequence?: number;
 }
 
 export interface StartOperationOptions {
@@ -109,14 +120,18 @@ export class GrpcAdapterGateway {
     externalExecutionId = "",
     options: StartOperationOptions = {},
   ): Promise<ExecutionSnapshot> {
-    return this.#unary<ExecutionSnapshot>("getExecution", {
-      metadata: this.#metadata(options.correlationId),
-      taskId,
-      externalExecutionId,
-      executionContext: {
-        ...this.#executionContext(options),
+    return this.#unary<ExecutionSnapshot>(
+      "getExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        taskId,
+        externalExecutionId,
+        executionContext: {
+          ...this.#executionContext(options),
+        },
       },
-    });
+      rpcContext(taskId, externalExecutionId),
+    );
   }
 
   checkAvailability(
@@ -152,14 +167,18 @@ export class GrpcAdapterGateway {
     argumentHash: string,
     options: StartOperationOptions = {},
   ): Promise<ReconcileExecutionResponse> {
-    return this.#unary<ReconcileExecutionResponse>("reconcileExecution", {
-      metadata: this.#metadata(options.correlationId),
-      taskId,
-      operationName,
-      argumentHash,
-      executionContext: this.#executionContext(options),
-      externalExecutionId: options.externalExecutionId ?? "",
-    });
+    return this.#unary<ReconcileExecutionResponse>(
+      "reconcileExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        taskId,
+        operationName,
+        argumentHash,
+        executionContext: this.#executionContext(options),
+        externalExecutionId: options.externalExecutionId ?? "",
+      },
+      rpcContext(taskId, options.externalExecutionId),
+    );
   }
 
   requestCancel(
@@ -170,18 +189,22 @@ export class GrpcAdapterGateway {
     commandSequence: number,
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
-    return this.#unary<CommandAck>("requestCancel", {
-      metadata: this.#metadata(options.correlationId),
-      identity: {
-        taskId,
-        externalExecutionId: options.externalExecutionId ?? "",
-        operationName,
-        argumentHash,
-        executionContext: this.#executionContext(options),
-        commandSequence,
+    return this.#unary<CommandAck>(
+      "requestCancel",
+      {
+        metadata: this.#metadata(options.correlationId),
+        identity: {
+          taskId,
+          externalExecutionId: options.externalExecutionId ?? "",
+          operationName,
+          argumentHash,
+          executionContext: this.#executionContext(options),
+          commandSequence,
+        },
+        reason,
       },
-      reason,
-    });
+      rpcContext(taskId, options.externalExecutionId, commandSequence),
+    );
   }
 
   updateExecution(
@@ -194,19 +217,23 @@ export class GrpcAdapterGateway {
     inputs: { key: string; value: unknown; answerHash: string }[],
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
-    return this.#unary<CommandAck>("updateExecution", {
-      metadata: this.#metadata(options.correlationId),
-      identity: {
-        ...identity,
-        externalExecutionId: options.externalExecutionId ?? "",
-        executionContext: this.#executionContext(options),
+    return this.#unary<CommandAck>(
+      "updateExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        identity: {
+          ...identity,
+          externalExecutionId: options.externalExecutionId ?? "",
+          executionContext: this.#executionContext(options),
+        },
+        inputs: inputs.map((input) => ({
+          inputRequestKey: input.key,
+          value: jsonToProtoValue(input.value),
+          answerHash: input.answerHash,
+        })),
       },
-      inputs: inputs.map((input) => ({
-        inputRequestKey: input.key,
-        value: jsonToProtoValue(input.value),
-        answerHash: input.answerHash,
-      })),
-    });
+      rpcContext(identity.taskId, options.externalExecutionId, identity.commandSequence),
+    );
   }
 
   pauseExecution(
@@ -218,15 +245,19 @@ export class GrpcAdapterGateway {
     },
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
-    return this.#unary<CommandAck>("pauseExecution", {
-      metadata: this.#metadata(options.correlationId),
-      identity: {
-        ...identity,
-        externalExecutionId: options.externalExecutionId ?? "",
-        executionContext: this.#executionContext(options),
+    return this.#unary<CommandAck>(
+      "pauseExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        identity: {
+          ...identity,
+          externalExecutionId: options.externalExecutionId ?? "",
+          executionContext: this.#executionContext(options),
+        },
+        reasonCode: "CLIENT_REQUESTED",
       },
-      reasonCode: "CLIENT_REQUESTED",
-    });
+      rpcContext(identity.taskId, options.externalExecutionId, identity.commandSequence),
+    );
   }
 
   resumeExecution(
@@ -238,15 +269,19 @@ export class GrpcAdapterGateway {
     },
     options: StartOperationOptions = {},
   ): Promise<CommandAck> {
-    return this.#unary<CommandAck>("resumeExecution", {
-      metadata: this.#metadata(options.correlationId),
-      identity: {
-        ...identity,
-        externalExecutionId: options.externalExecutionId ?? "",
-        executionContext: this.#executionContext(options),
+    return this.#unary<CommandAck>(
+      "resumeExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        identity: {
+          ...identity,
+          externalExecutionId: options.externalExecutionId ?? "",
+          executionContext: this.#executionContext(options),
+        },
+        reasonCode: "CLIENT_REQUESTED",
       },
-      reasonCode: "CLIENT_REQUESTED",
-    });
+      rpcContext(identity.taskId, options.externalExecutionId, identity.commandSequence),
+    );
   }
 
   startOperation(
@@ -256,17 +291,21 @@ export class GrpcAdapterGateway {
   ): Promise<StartOperationResponse> {
     const taskId = options.taskId ?? randomUUID();
     const canonicalArguments = JSON.stringify(argumentsValue, Object.keys(argumentsValue).sort());
-    return this.#unary<StartOperationResponse>("startOperation", {
-      metadata: this.#metadata(options.correlationId),
-      taskId,
-      operationName,
-      arguments: jsonToProtoStruct(argumentsValue),
-      timing: options.timing ?? { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
-      executionContext: this.#executionContext(options),
-      argumentHash:
-        options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
-      invocationAttempt: options.invocationAttempt ?? 1,
-    });
+    return this.#unary<StartOperationResponse>(
+      "startOperation",
+      {
+        metadata: this.#metadata(options.correlationId),
+        taskId,
+        operationName,
+        arguments: jsonToProtoStruct(argumentsValue),
+        timing: options.timing ?? { start: { mode: "IMMEDIATE", startToleranceMs: "0" } },
+        executionContext: this.#executionContext(options),
+        argumentHash:
+          options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
+        invocationAttempt: options.invocationAttempt ?? 1,
+      },
+      rpcContext(taskId, options.externalExecutionId),
+    );
   }
 
   close(): void {
@@ -302,19 +341,20 @@ export class GrpcAdapterGateway {
       | "pauseExecution"
       | "resumeExecution",
     request: unknown,
+    context: AdapterRpcContext = {},
   ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
     const startedAt = performance.now();
     return new Promise<T>((resolve, reject) => {
       const callback: grpc.requestCallback<T> = (error, value) => {
         if (error !== null) {
-          this.#onRpc?.(method, "error", performance.now() - startedAt);
+          this.#onRpc?.(method, "error", performance.now() - startedAt, context);
           reject(error);
         } else if (value === undefined) {
-          this.#onRpc?.(method, "error", performance.now() - startedAt);
+          this.#onRpc?.(method, "error", performance.now() - startedAt, context);
           reject(new Error(`Adapter ${method} returned no value`));
         } else {
-          this.#onRpc?.(method, "success", performance.now() - startedAt);
+          this.#onRpc?.(method, "success", performance.now() - startedAt, context);
           resolve(value);
         }
       };
@@ -359,4 +399,18 @@ export class GrpcAdapterGateway {
       }
     });
   }
+}
+
+function rpcContext(
+  taskId: string,
+  externalExecutionId?: string | null,
+  commandSequence?: number,
+): AdapterRpcContext {
+  return {
+    taskId,
+    ...(externalExecutionId === undefined || externalExecutionId === null
+      ? {}
+      : { externalExecutionId }),
+    ...(commandSequence === undefined ? {} : { commandSequence }),
+  };
 }

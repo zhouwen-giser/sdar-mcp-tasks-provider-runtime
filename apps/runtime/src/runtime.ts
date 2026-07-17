@@ -85,9 +85,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     providerId: config.PROVIDER_ID,
     credentials: adapterCredentials(config),
     timeoutMs: config.ADAPTER_RPC_TIMEOUT_MS,
-    onRpc: (method, outcome, durationMs) => {
+    onRpc: (method, outcome, durationMs, context) => {
       metrics.increment("sdar_adapter_rpc_total", { method, outcome });
-      telemetry?.adapterRpc(method, outcome, durationMs);
+      telemetry?.adapterRpc(method, outcome, durationMs, context);
     },
   });
   const dependencies: RuntimeDependencies = {

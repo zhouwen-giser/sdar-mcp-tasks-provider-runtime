@@ -23,17 +23,25 @@ describe("Adapter RPC spans", () => {
       });
       telemetry.start();
 
-      telemetry.adapterRpc("startOperation", outcome, 12.5);
+      telemetry.adapterRpc("startOperation", outcome, 12.5, {
+        taskId: "task-1",
+        externalExecutionId: "execution-1",
+        commandSequence: 7,
+      });
       await telemetry.shutdown();
 
       const span = exporter.getFinishedSpans()[0];
       expect(span).toMatchObject({
-        name: "adapter.startOperation",
+        name: "adapter.rpc",
         attributes: {
+          "adapter.provider": "telemetry-provider",
           "rpc.system": "grpc",
           "rpc.method": "startOperation",
-          "sdar.rpc.outcome": outcome,
-          "sdar.rpc.duration_ms": 12.5,
+          taskId: "task-1",
+          externalExecutionId: "execution-1",
+          commandSequence: 7,
+          duration: 12.5,
+          status: outcome,
         },
       });
       expect(JSON.stringify(span?.attributes)).not.toMatch(
