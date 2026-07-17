@@ -1,0 +1,63 @@
+# Runtime v1.1 Provider Ops Telemetry ExecPlan
+
+Status: in progress
+
+Base: verified rc.3 release head `24cd4e2550f4e0c7e3862d1ed871455d66e47327`
+
+Target: `v1.1.0` on `feature/runtime-v1.1-telemetry`
+
+## Scope and invariants
+
+This release adds Provider Ops Telemetry through OpenTelemetry without changing Task lifecycle,
+command, scheduling, recovery, safe-stop, Observation, Outbox, readiness, or persistence
+semantics. Runtime exports only to OTLP. It does not depend on or connect to ClickHouse or SDAR
+Core. Existing Prometheus text output remains supported.
+
+Telemetry is best effort and fail-open relative to business behavior. Export failure, timeout,
+queue saturation, serialization failure, and shutdown failure must not fail a Runtime operation
+or change readiness. Audit events are derived from committed facts; API handlers must not invent
+Task lifecycle events.
+
+Raw arguments, input values, Adapter payloads, authorization material, passwords, tokens, JWTs,
+cookies, and secrets are forbidden. Stable hashes and bounded identifiers explicitly listed by
+the envelope contract are allowed. Metric attributes must be bounded and must never include
+Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or correlation IDs.
+
+## Delivery phases
+
+| Phase   | Deliverable                                                 | Required evidence                       | Status      |
+| ------- | ----------------------------------------------------------- | --------------------------------------- | ----------- |
+| H0      | OTel SDK foundation, resource, lifecycle                    | init/resource/shutdown tests            | complete    |
+| H1      | stable Provider Ops envelope, UUIDv5 ID, RFC 8785 hash      | deterministic ID/hash tests             | in progress |
+| H2      | committed Task lifecycle audit events                       | commit/rollback integration tests       | pending     |
+| H3      | command dispatch events                                     | state/duplicate/retry/supersede tests   | pending     |
+| H4      | Adapter RPC spans                                           | success/error/no-payload tests          | pending     |
+| H5      | scheduler/recovery/TTL events                               | component event tests                   | pending     |
+| H6      | low-cardinality OTel metrics                                | value/cardinality/label tests           | pending     |
+| H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | pending     |
+| H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | pending     |
+| H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | pending     |
+| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | pending     |
+| Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | pending     |
+
+## Design decisions
+
+- `ProviderOpsEnvelope` is the stable product schema. OTel logs are a transport mapping only.
+- `recordId` is UUIDv5 over record type plus stable aggregate/event/revision identity.
+- `recordHash` is SHA-256 over RFC 8785 canonical JSON excluding delivery metadata such as
+  `emittedAt`, exporter retry count, and collector timestamps.
+- Task audit events are created from persistence transition results after transaction commit.
+  Failed or rolled-back transactions produce no event.
+- Trace/event/metric calls are non-throwing at the business boundary and use bounded batch
+  processors with explicit timeouts and drop accounting.
+- H9 remains optional. If implemented, it stays outside default compose and production images.
+
+## Verification ledger
+
+| Date       | Command                                        | Result |
+| ---------- | ---------------------------------------------- | ------ |
+| 2026-07-17 | rc.3 `pnpm verify:rc3` before branch creation  | PASS   |
+| 2026-07-18 | H0 format, typecheck, lint and unit (33 tests) | PASS   |
+
+This plan is updated as implementation and evidence evolve. A phase is complete only after its
+tests pass and its commit is created.
