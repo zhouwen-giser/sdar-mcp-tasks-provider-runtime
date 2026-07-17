@@ -13,12 +13,16 @@ describe("Runtime configuration", () => {
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);
     expect(config.ADAPTER_HEALTH_FAILURE_THRESHOLD).toBe(2);
+    expect(config.COMMAND_DISPATCH_CONCURRENCY).toBe(8);
+    expect(config.SCHEDULER_CONCURRENCY).toBe(8);
   });
 
   it("rejects invalid ports and timeouts", () => {
     expect(() => loadRuntimeConfig({ PORT: "70000" })).toThrow();
     expect(() => loadRuntimeConfig({ ADAPTER_RPC_TIMEOUT_MS: "0" })).toThrow();
     expect(() => loadRuntimeConfig({ ADAPTER_ENDPOINT: "file:///tmp/adapter.sock" })).toThrow();
+    expect(() => loadRuntimeConfig({ COMMAND_DISPATCH_CONCURRENCY: "0" })).toThrow();
+    expect(() => loadRuntimeConfig({ SCHEDULER_CONCURRENCY: "129" })).toThrow();
   });
 
   it("requires complete mTLS and JWT secret configuration", () => {

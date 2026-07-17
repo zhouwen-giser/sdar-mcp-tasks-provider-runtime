@@ -9,6 +9,12 @@ import { isTerminalState, systemClock } from "../../domain/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { PendingCommandRecord, TaskRepository } from "../../persistence-postgres/src/index.js";
 import { validatedSnapshotTransition } from "./result-contract.js";
+import { withLeaseHeartbeat } from "./lease-heartbeat.js";
+
+export interface CommandDispatcherOptions {
+  concurrency?: number;
+  leaseMilliseconds?: number;
+}
 
 export interface CommandDispatcherTickResult {
   claimed: number;
@@ -31,13 +37,21 @@ export class DurableCommandDispatcher {
     readonly operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
       repository.pool,
     ),
+    readonly options: CommandDispatcherOptions = {},
   ) {
     this.workerId = workerId;
   }
 
   async tick(): Promise<CommandDispatcherTickResult> {
     const now = this.clock.now();
-    const commands = await this.repository.claimDueCancelCommands(now, this.workerId);
+    const concurrency = this.options.concurrency ?? 8;
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? 30_000;
+    const commands = await this.repository.claimDueCancelCommands(
+      now,
+      this.workerId,
+      leaseMilliseconds,
+      concurrency,
+    );
     const result: CommandDispatcherTickResult = {
       claimed: commands.length,
       acknowledged: 0,
@@ -46,22 +60,33 @@ export class DurableCommandDispatcher {
       exhausted: 0,
       terminal: 0,
     };
-    for (const command of commands) {
-      const task = await this.repository.getById(command.taskId);
-      if (task === null || isTerminalState(task.internalState)) {
-        await this.repository.failSafeStopUnconfirmed(
-          command,
-          "Stop command closed because the Task was already terminal.",
-        );
-        result.terminal += 1;
-        continue;
-      }
-      try {
-        const operation = (
-          await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
-        ).operation;
-        if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
-        const ack = await this.gateway.requestCancel(
+    await Promise.all(commands.map((command) => this.executeClaimed(command, result)));
+    return result;
+  }
+
+  private async executeClaimed(
+    command: PendingCommandRecord,
+    result: CommandDispatcherTickResult,
+  ): Promise<void> {
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? 30_000;
+    const renew = () => this.repository.renewCommandClaim(command, leaseMilliseconds);
+    await renew();
+    const task = await this.repository.getById(command.taskId);
+    if (task === null || isTerminalState(task.internalState)) {
+      await this.repository.failSafeStopUnconfirmed(
+        command,
+        "Stop command closed because the Task was already terminal.",
+      );
+      result.terminal += 1;
+      return;
+    }
+    try {
+      const operation = (
+        await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
+      ).operation;
+      if (!operation.capabilities.cancel) throw new Error("CANCEL_NOT_SUPPORTED");
+      const ack = await withLeaseHeartbeat(renew, leaseMilliseconds, () =>
+        this.gateway.requestCancel(
           task.taskId,
           operation.name,
           task.argumentHash,
@@ -77,105 +102,101 @@ export class DurableCommandDispatcher {
             simulationId: task.simulationId,
             externalExecutionId: task.externalExecutionId,
           },
-        );
-        validateCommandAckIdentity(ack, {
-          taskId: task.taskId,
-          externalExecutionId: task.externalExecutionId,
-          operationName: operation.name,
-          argumentHash: task.argumentHash,
-          authorizationContextHash: task.authorizationContextHash,
-          executionMode: task.executionMode,
-          simulationId: task.simulationId,
-          commandSequence: command.commandSequence,
-        });
-        if (ack.accepted) {
-          await this.repository.acknowledgeClaimedCommand(
-            command,
-            ack as unknown as Record<string, unknown>,
-          );
-          result.acknowledged += 1;
-          continue;
-        }
-        if (isRetryableAck(ack.reasonCode)) {
-          await this.retry(command, ack.reasonCode || "ADAPTER_RETRYABLE_REJECTION", ack.message);
-          result.retried += 1;
-          continue;
-        }
-        if (command.stopReason !== "USER_REQUESTED") {
-          await this.repository.failSafeStopUnconfirmed(
-            command,
-            ack.message || "Adapter permanently rejected the required safe stop.",
-          );
-          result.exhausted += 1;
-          continue;
-        }
-        const reconciled = await this.gateway.reconcileExecution(
-          task.taskId,
-          operation.name,
-          task.argumentHash,
-          {
-            authorizationContextHash: task.authorizationContextHash,
-            executionMode: task.executionMode,
-            simulationId: task.simulationId,
-            externalExecutionId: task.externalExecutionId,
-          },
-        );
-        if (reconciled.status !== "FOUND" || reconciled.snapshot === undefined) {
-          await this.retry(
-            command,
-            reconciled.reasonCode || "RECONCILE_UNAVAILABLE",
-            reconciled.message || "Unable to reconcile rejected cancellation.",
-          );
-          result.retried += 1;
-          continue;
-        }
-        const snapshot = reconciled.snapshot;
-        if (reconciled.externalExecutionId !== snapshot.externalExecutionId) {
-          throw new Error("ADAPTER_RECONCILE_IDENTITY_MISMATCH");
-        }
-        validateAdapterSnapshotIdentity(snapshot, {
-          taskId: task.taskId,
-          externalExecutionId: task.externalExecutionId,
-          operationName: operation.name,
-          argumentHash: task.argumentHash,
-          authorizationContextHash: task.authorizationContextHash,
-          executionMode: task.executionMode,
-          simulationId: task.simulationId,
-        });
-        await this.repository.rejectUserCancel(
+        ),
+      );
+      validateCommandAckIdentity(ack, {
+        taskId: task.taskId,
+        externalExecutionId: task.externalExecutionId,
+        operationName: operation.name,
+        argumentHash: task.argumentHash,
+        authorizationContextHash: task.authorizationContextHash,
+        executionMode: task.executionMode,
+        simulationId: task.simulationId,
+        commandSequence: command.commandSequence,
+      });
+      if (ack.accepted) {
+        await this.repository.acknowledgeClaimedCommand(
           command,
-          Number(snapshot.revision),
-          validatedSnapshotTransition(operation, snapshot),
           ack as unknown as Record<string, unknown>,
         );
-        result.rejected += 1;
-      } catch (error) {
-        if (isIdentityError(error)) {
-          await this.repository.recordIdentityConflict(
-            task.taskId,
-            error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
-          );
-        }
-        if (
-          command.stopReason !== "USER_REQUESTED" &&
-          command.attemptCount >= this.maxSafeStopAttempts
-        ) {
-          await this.repository.failSafeStopUnconfirmed(
-            command,
-            error instanceof Error ? error.message : "Safe stop could not be confirmed.",
-          );
-          result.exhausted += 1;
-        } else {
-          await this.retry(
-            command,
-            "ADAPTER_TRANSIENT_ERROR",
-            error instanceof Error ? error.message : "Adapter command failed.",
-          );
-          result.retried += 1;
-        }
+        result.acknowledged += 1;
+        return;
+      }
+      if (isRetryableAck(ack.reasonCode)) {
+        await this.retry(command, ack.reasonCode || "ADAPTER_RETRYABLE_REJECTION", ack.message);
+        result.retried += 1;
+        return;
+      }
+      if (command.stopReason !== "USER_REQUESTED") {
+        await this.repository.failSafeStopUnconfirmed(
+          command,
+          ack.message || "Adapter permanently rejected the required safe stop.",
+        );
+        result.exhausted += 1;
+        return;
+      }
+      const reconciled = await withLeaseHeartbeat(renew, leaseMilliseconds, () =>
+        this.gateway.reconcileExecution(task.taskId, operation.name, task.argumentHash, {
+          authorizationContextHash: task.authorizationContextHash,
+          executionMode: task.executionMode,
+          simulationId: task.simulationId,
+          externalExecutionId: task.externalExecutionId,
+        }),
+      );
+      if (reconciled.status !== "FOUND" || reconciled.snapshot === undefined) {
+        await this.retry(
+          command,
+          reconciled.reasonCode || "RECONCILE_UNAVAILABLE",
+          reconciled.message || "Unable to reconcile rejected cancellation.",
+        );
+        result.retried += 1;
+        return;
+      }
+      const snapshot = reconciled.snapshot;
+      if (reconciled.externalExecutionId !== snapshot.externalExecutionId) {
+        throw new Error("ADAPTER_RECONCILE_IDENTITY_MISMATCH");
+      }
+      validateAdapterSnapshotIdentity(snapshot, {
+        taskId: task.taskId,
+        externalExecutionId: task.externalExecutionId,
+        operationName: operation.name,
+        argumentHash: task.argumentHash,
+        authorizationContextHash: task.authorizationContextHash,
+        executionMode: task.executionMode,
+        simulationId: task.simulationId,
+      });
+      await this.repository.rejectUserCancel(
+        command,
+        Number(snapshot.revision),
+        validatedSnapshotTransition(operation, snapshot),
+        ack as unknown as Record<string, unknown>,
+      );
+      result.rejected += 1;
+    } catch (error) {
+      if (isIdentityError(error)) {
+        await this.repository.recordIdentityConflict(
+          task.taskId,
+          error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
+        );
+      }
+      if (
+        command.stopReason !== "USER_REQUESTED" &&
+        command.attemptCount >= this.maxSafeStopAttempts
+      ) {
+        await this.repository.failSafeStopUnconfirmed(
+          command,
+          error instanceof Error ? error.message : "Safe stop could not be confirmed.",
+        );
+        result.exhausted += 1;
+      } else {
+        await this.retry(
+          command,
+          "ADAPTER_TRANSIENT_ERROR",
+          error instanceof Error ? error.message : "Adapter command failed.",
+        );
+        result.retried += 1;
       }
     }
-    return result;
   }
 
   private async retry(

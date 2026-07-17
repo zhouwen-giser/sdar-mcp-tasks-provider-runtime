@@ -33,6 +33,8 @@ authentication.
 | `ADAPTER_HEALTH_POLL_MS`           | `5000`                | Continuous identity-checked Describe probe interval        |
 | `ADAPTER_HEALTH_FAILURE_THRESHOLD` | `2`                   | Consecutive failed probes before Adapter becomes not-ready |
 | `SCHEDULER_POLL_MS`                | `1000`                | Durable due/deadline/watchdog worker interval              |
+| `COMMAND_DISPATCH_CONCURRENCY`     | `8`                   | Per-replica command claims executed concurrently           |
+| `SCHEDULER_CONCURRENCY`            | `8`                   | Per-replica scheduled-start claims executed concurrently   |
 | `RECOVERY_POLL_MS`                 | `5000`                | Nonterminal Reconcile interval                             |
 | `TTL_CLEANER_POLL_MS`              | `60000`               | Logical-expiry and purge worker interval                   |
 | `TTL_PURGE_GRACE_MS`               | `86400000`            | Expiry-to-purge delay, range 1 second-7 days               |
@@ -47,4 +49,5 @@ The in-process rate limiter is bounded but applies per replica. Configure the in
 for a production-wide source or tenant limit. Keep `IDEMPOTENCY_LEASE_MS` greater than the
 Adapter RPC timeout and within the upstream HTTP timeout budget. Claim/finalize and Task
 publication use short database transactions; no checked-out PoolClient may span an Adapter RPC
-or be re-borrowed after commit.
+or be re-borrowed after commit. Command and scheduler claims are limited to their configured
+concurrency and renewed while an Adapter RPC is in flight.

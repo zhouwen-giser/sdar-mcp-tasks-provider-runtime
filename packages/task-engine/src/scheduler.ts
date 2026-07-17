@@ -10,6 +10,12 @@ import type { ValidatedManifest, ValidatedOperation } from "../../operation-regi
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { TaskRepository } from "../../persistence-postgres/src/index.js";
 import { validatedSnapshotTransition } from "./result-contract.js";
+import { withLeaseHeartbeat } from "./lease-heartbeat.js";
+
+export interface SchedulerOptions {
+  concurrency?: number;
+  leaseMilliseconds?: number;
+}
 
 export interface SchedulerTickResult {
   started: number;
@@ -32,6 +38,7 @@ export class DurableScheduler {
     readonly operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
       repository.pool,
     ),
+    readonly options: SchedulerOptions = {},
   ) {
     this.workerId = workerId;
   }
@@ -49,11 +56,23 @@ export class DurableScheduler {
       reconciled: 0,
     };
 
-    const uncertain = await this.repository.claimExpiredScheduledStarts(now, this.workerId);
-    for (const task of uncertain) await this.reconcileUncertainStart(task, result);
+    const concurrency = this.options.concurrency ?? 8;
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? 30_000;
+    const uncertain = await this.repository.claimExpiredScheduledStarts(
+      now,
+      this.workerId,
+      concurrency,
+      leaseMilliseconds,
+    );
+    await Promise.all(uncertain.map((task) => this.reconcileUncertainStart(task, result)));
 
-    const due = await this.repository.claimDueScheduled(now, this.workerId);
-    for (const task of due) await this.startClaimedTask(task, result);
+    const due = await this.repository.claimDueScheduled(
+      now,
+      this.workerId,
+      concurrency,
+      leaseMilliseconds,
+    );
+    await Promise.all(due.map((task) => this.startClaimedTask(task, result)));
 
     const expired = await this.repository.claimExpiredDeadlines(this.clock.now());
     result.deadlineStops += expired.length;
@@ -66,15 +85,18 @@ export class DurableScheduler {
   ): Promise<void> {
     const owner = requiredClaimOwner(task);
     const now = this.clock.now();
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? 30_000;
+    const renew = () => this.repository.renewScheduleClaim(task.taskId, owner, leaseMilliseconds);
+    await renew();
     try {
       const operation = (
         await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
       ).operation;
-      const response = await this.gateway.reconcileExecution(
-        task.taskId,
-        operation.name,
-        task.argumentHash,
-        { ...executionOptions(task), externalExecutionId: task.externalExecutionId },
+      const response = await withLeaseHeartbeat(renew, leaseMilliseconds, () =>
+        this.gateway.reconcileExecution(task.taskId, operation.name, task.argumentHash, {
+          ...executionOptions(task),
+          externalExecutionId: task.externalExecutionId,
+        }),
       );
       const completedAt = this.clock.now();
       if (response.status === "TRANSIENT_UNAVAILABLE") {
@@ -146,6 +168,9 @@ export class DurableScheduler {
   private async startClaimedTask(task: TaskRecord, result: SchedulerTickResult): Promise<void> {
     const owner = requiredClaimOwner(task);
     const now = this.clock.now();
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? 30_000;
+    const renew = () => this.repository.renewScheduleClaim(task.taskId, owner, leaseMilliseconds);
+    await renew();
     if (startWindowClosed(task, now)) {
       await this.repository.completeStartWindowMissed(task.taskId, now, owner);
       result.missed += 1;
@@ -166,13 +191,15 @@ export class DurableScheduler {
       return;
     }
     try {
-      const response = await this.gateway.startOperation(task.operationName, task.arguments, {
-        taskId: task.taskId,
-        argumentHash: task.argumentHash,
-        ...executionOptions(task),
-        invocationAttempt: task.invocationAttempt,
-        timing: adapterTiming(task.timing as unknown as TaskExecutionTiming),
-      });
+      const response = await withLeaseHeartbeat(renew, leaseMilliseconds, () =>
+        this.gateway.startOperation(task.operationName, task.arguments, {
+          taskId: task.taskId,
+          argumentHash: task.argumentHash,
+          ...executionOptions(task),
+          invocationAttempt: task.invocationAttempt,
+          timing: adapterTiming(task.timing as unknown as TaskExecutionTiming),
+        }),
+      );
       const completedAt = this.clock.now();
       if (response.rejected !== undefined || response.result === "rejected") {
         const rejected = response.rejected;

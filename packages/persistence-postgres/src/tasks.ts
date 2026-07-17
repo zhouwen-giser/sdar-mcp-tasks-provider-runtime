@@ -608,6 +608,20 @@ export class TaskRepository {
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
   }
 
+  async renewCommandClaim(
+    command: PendingCommandRecord,
+    leaseMilliseconds = 30_000,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE task_command
+       SET claim_until=clock_timestamp() + ($4::text || ' milliseconds')::interval,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+      [command.taskId, command.commandSequence, command.claimOwner, leaseMilliseconds],
+    );
+    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+  }
+
   async noteRecovery(taskId: string): Promise<void> {
     const client = await this.pool.connect();
     try {
@@ -739,7 +753,12 @@ export class TaskRepository {
     }
   }
 
-  async claimDueScheduled(now: Date, ownerId: string, limit = 32): Promise<TaskRecord[]> {
+  async claimDueScheduled(
+    now: Date,
+    ownerId: string,
+    limit = 32,
+    leaseMilliseconds = 30_000,
+  ): Promise<TaskRecord[]> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -762,7 +781,7 @@ export class TaskRepository {
             internalState: "STARTING",
             statusMessage: "Claimed for scheduled start.",
             scheduleClaimOwner: ownerId,
-            scheduleClaimUntil: new Date(now.getTime() + 30_000),
+            scheduleClaimUntil: new Date(now.getTime() + leaseMilliseconds),
             invocationAttempt: attempt,
             nextStartAttemptAt: null,
           },
@@ -840,7 +859,12 @@ export class TaskRepository {
     }
   }
 
-  async claimExpiredScheduledStarts(now: Date, ownerId: string, limit = 32): Promise<TaskRecord[]> {
+  async claimExpiredScheduledStarts(
+    now: Date,
+    ownerId: string,
+    limit = 32,
+    leaseMilliseconds = 30_000,
+  ): Promise<TaskRecord[]> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
@@ -859,7 +883,7 @@ export class TaskRepository {
           expectedVersion: Number(row.version),
           update: {
             scheduleClaimOwner: ownerId,
-            scheduleClaimUntil: new Date(now.getTime() + 30_000),
+            scheduleClaimUntil: new Date(now.getTime() + leaseMilliseconds),
             statusMessage: "Reconciling an uncertain scheduled start.",
           },
           observation: {
@@ -884,6 +908,21 @@ export class TaskRepository {
     } finally {
       client.release();
     }
+  }
+
+  async renewScheduleClaim(
+    taskId: string,
+    claimOwner: string,
+    leaseMilliseconds = 30_000,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE provider_task
+       SET schedule_claim_until=clock_timestamp() + ($3::text || ' milliseconds')::interval,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='STARTING' AND schedule_claim_owner=$2`,
+      [taskId, claimOwner, leaseMilliseconds],
+    );
+    if (result.rowCount !== 1) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
   }
 
   async acceptScheduled(

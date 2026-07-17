@@ -210,8 +210,24 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
       const taskRepository = new TaskRepository(pool);
-      const scheduler = new DurableScheduler(validated, gateway, taskRepository);
-      const commandDispatcher = new DurableCommandDispatcher(gateway, taskRepository);
+      const scheduler = new DurableScheduler(
+        validated,
+        gateway,
+        taskRepository,
+        undefined,
+        undefined,
+        undefined,
+        { concurrency: config.SCHEDULER_CONCURRENCY },
+      );
+      const commandDispatcher = new DurableCommandDispatcher(
+        gateway,
+        taskRepository,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        { concurrency: config.COMMAND_DISPATCH_CONCURRENCY },
+      );
       const ttlCleaner = new TtlCleaner(taskRepository, {
         batchSize: config.TTL_CLEANER_BATCH_SIZE,
         purgeGraceMs: config.TTL_PURGE_GRACE_MS,
