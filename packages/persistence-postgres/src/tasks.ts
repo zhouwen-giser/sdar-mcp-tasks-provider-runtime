@@ -82,6 +82,12 @@ export interface ObservationRecord {
   payload: Record<string, unknown>;
 }
 
+export interface ObservationPage {
+  observations: ObservationRecord[];
+  nextCursor: number | null;
+  hasMore: boolean;
+}
+
 export interface DeadlineStopRecord {
   task: TaskRecord;
   commandSequence: number;
@@ -1553,7 +1559,30 @@ export class TaskRepository {
     }));
   }
 
-  async listObservations(taskId: string): Promise<ObservationRecord[]> {
+  async listObservations(
+    taskId: string,
+    beforeRevision?: number,
+    limit = 100,
+  ): Promise<ObservationRecord[]> {
+    return (await this.listObservationPage(taskId, beforeRevision, limit)).observations
+      .slice()
+      .reverse();
+  }
+
+  async listObservationPage(
+    taskId: string,
+    beforeRevision?: number,
+    limit = 100,
+  ): Promise<ObservationPage> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("OBSERVATION_PAGE_SIZE_INVALID");
+    }
+    if (
+      beforeRevision !== undefined &&
+      (!Number.isSafeInteger(beforeRevision) || beforeRevision < 1)
+    ) {
+      throw new RangeError("OBSERVATION_CURSOR_INVALID");
+    }
     const result = await this.pool.query<{
       revision: string;
       type: string;
@@ -1568,10 +1597,14 @@ export class TaskRepository {
     }>(
       `SELECT revision, type, occurred_at, reason_code, message, substate, progress,
               source, adapter_revision, payload
-       FROM task_observation WHERE task_id=$1 ORDER BY revision`,
-      [taskId],
+        FROM task_observation
+        WHERE task_id=$1 AND ($2::bigint IS NULL OR revision < $2)
+        ORDER BY revision DESC LIMIT $3`,
+      [taskId, beforeRevision ?? null, limit + 1],
     );
-    return result.rows.map((row) => ({
+    const hasMore = result.rows.length > limit;
+    const rows = result.rows.slice(0, limit);
+    const observations = rows.map((row) => ({
       revision: Number(row.revision),
       type: row.type,
       occurredAt: row.occurred_at,
@@ -1583,6 +1616,11 @@ export class TaskRepository {
       adapterRevision: row.adapter_revision === null ? null : Number(row.adapter_revision),
       payload: row.payload,
     }));
+    return {
+      observations,
+      nextCursor: hasMore ? (observations.at(-1)?.revision ?? null) : null,
+      hasMore,
+    };
   }
 
   async beginCancel(

@@ -36,6 +36,7 @@ import type { ValidatedManifest, ValidatedOperation } from "../../operation-regi
 import type {
   AdmissionIntentRecord,
   IdempotencyRepository,
+  ObservationPage,
   PendingCommandRecord,
   ResolvedTaskOperation,
   StoredInvocation,
@@ -494,7 +495,7 @@ export class TaskEngine {
       task: detailedTask(
         task,
         await this.#repository.listInputRequests(task.taskId),
-        await this.#repository.listObservations(task.taskId),
+        await this.#repository.listObservationPage(task.taskId),
       ),
     };
   }
@@ -552,7 +553,7 @@ export class TaskEngine {
         return detailedTask(
           task,
           await this.#repository.listInputRequests(task.taskId),
-          await this.#repository.listObservations(task.taskId),
+          await this.#repository.listObservationPage(task.taskId),
           {
             snapshotFreshness: "stale",
             degradedReasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
@@ -563,8 +564,26 @@ export class TaskEngine {
     return detailedTask(
       task,
       await this.#repository.listInputRequests(task.taskId),
-      await this.#repository.listObservations(task.taskId),
+      await this.#repository.listObservationPage(task.taskId),
     );
+  }
+
+  async getTaskObservations(
+    taskId: string,
+    authorization: AuthorizationContext,
+    cursor?: number,
+    limit = 100,
+  ): Promise<Record<string, unknown>> {
+    await this.#repository.getAuthorized(taskId, authorization);
+    const page = await this.#repository.listObservationPage(taskId, cursor, limit);
+    return {
+      taskId,
+      observations: wireObservations(page.observations),
+      _meta: {
+        observationCursor: page.nextCursor === null ? null : String(page.nextCursor),
+        hasMore: page.hasMore,
+      },
+    };
   }
 
   async recoverAdmission(
@@ -945,18 +964,7 @@ function detailedTask(
     required: boolean;
     status: "OPEN" | "ANSWERED";
   }[] = [],
-  observations: {
-    revision: number;
-    type: string;
-    occurredAt: Date;
-    reasonCode: string | null;
-    message: string | null;
-    substate: string | null;
-    progress: Record<string, unknown> | null;
-    source: "runtime" | "adapter";
-    adapterRevision: number | null;
-    payload: Record<string, unknown>;
-  }[] = [],
+  observationPage: ObservationPage = { observations: [], nextCursor: null, hasMore: false },
   readStatus: {
     snapshotFreshness: "fresh" | "stale";
     degradedReasonCode?: string;
@@ -1005,23 +1013,32 @@ function detailedTask(
           nextStartAttemptAt: task.nextStartAttemptAt?.toISOString() ?? null,
           deadlineAt: task.deadlineAt?.toISOString() ?? null,
         },
-        observations: observations.map((observation) => ({
-          revision: observation.revision,
-          type: observation.type,
-          occurredAt: observation.occurredAt.toISOString(),
-          ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
-          ...(observation.message === null ? {} : { message: observation.message }),
-          ...(observation.substate === null ? {} : { substate: observation.substate }),
-          ...(observation.progress === null ? {} : { progress: observation.progress }),
-          source: observation.source,
-          ...(observation.adapterRevision === null
-            ? {}
-            : { adapterRevision: observation.adapterRevision }),
-          ...observation.payload,
-        })),
+        observations: wireObservations(observationPage.observations),
+        observationCursor:
+          observationPage.nextCursor === null ? null : String(observationPage.nextCursor),
+        hasMore: observationPage.hasMore,
       },
     },
   };
+}
+
+function wireObservations(
+  observations: ObservationPage["observations"],
+): Record<string, unknown>[] {
+  return observations.map((observation) => ({
+    revision: observation.revision,
+    type: observation.type,
+    occurredAt: observation.occurredAt.toISOString(),
+    ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
+    ...(observation.message === null ? {} : { message: observation.message }),
+    ...(observation.substate === null ? {} : { substate: observation.substate }),
+    ...(observation.progress === null ? {} : { progress: observation.progress }),
+    source: observation.source,
+    ...(observation.adapterRevision === null
+      ? {}
+      : { adapterRevision: observation.adapterRevision }),
+    ...observation.payload,
+  }));
 }
 
 function isTransientAdapterReadError(error: unknown): boolean {

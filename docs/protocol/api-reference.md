@@ -52,6 +52,11 @@ instead of changing it to failed. `_meta["io.sdar/taskExecution"]` then contains
 non-monotonic/invalid Snapshot and other Adapter contract failures are never converted to stale
 success.
 
+`tasks/get` includes at most 100 newest observations. Its
+`_meta["io.sdar/taskExecution"]` object reports `observationCursor` and `hasMore`.
+Call `tasks/observations` with `{ taskId, cursor?, limit? }` to read older pages; `limit` is
+bounded to 1-100 and the returned cursor is opaque to clients.
+
 ## Adapter gRPC v1
 
 | RPC                                  | Requirement | Contract                                              |
