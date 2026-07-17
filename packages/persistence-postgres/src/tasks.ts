@@ -125,6 +125,8 @@ interface TaskTransitionUpdate {
   nextStartAttemptAt?: Date | null;
   invocationAttempt?: number;
   recoveryAttempts?: number;
+  nextRecoveryAt?: Date;
+  recoveryFailureCount?: number;
   lastReconciledAt?: Date | null;
 }
 
@@ -184,6 +186,8 @@ interface TaskRow {
   next_command_sequence: string;
   timing: Record<string, unknown>;
   recovery_attempts: number;
+  next_recovery_at: Date;
+  recovery_failure_count: number;
   last_reconciled_at: Date | null;
 }
 
@@ -487,7 +491,8 @@ export class TaskRepository {
     const result = await this.pool.query<TaskRow>(
       `SELECT * FROM provider_task
        WHERE internal_state NOT LIKE 'TERMINAL_%' AND internal_state <> 'SCHEDULED'
-       ORDER BY updated_at, task_id LIMIT $1`,
+         AND next_recovery_at <= clock_timestamp()
+       ORDER BY next_recovery_at, last_reconciled_at NULLS FIRST, task_id LIMIT $1`,
       [limit],
     );
     return result.rows.map(fromRow);
@@ -647,7 +652,12 @@ export class TaskRepository {
       await transitionTask(client, {
         taskId,
         expectedVersion: Number(row.version),
-        update: { recoveryAttempts: attempt, lastReconciledAt: now },
+        update: {
+          recoveryAttempts: attempt,
+          lastReconciledAt: now,
+          nextRecoveryAt: now,
+          recoveryFailureCount: 0,
+        },
         observation: {
           type: "task.recovery",
           occurredAt: now,
@@ -667,6 +677,22 @@ export class TaskRepository {
     } finally {
       client.release();
     }
+  }
+
+  async noteRecoveryFailure(taskId: string, failedAt = new Date()): Promise<void> {
+    const result = await this.pool.query<{ recovery_failure_count: number }>(
+      `UPDATE provider_task
+       SET recovery_failure_count=recovery_failure_count+1,
+           next_recovery_at=$2 + (
+             LEAST(300000, 1000 * power(2, LEAST(recovery_failure_count, 8))) +
+             mod(hashtext(task_id::text)::bigint + 2147483648, 251)
+           ) * interval '1 millisecond',
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
+       RETURNING recovery_failure_count`,
+      [taskId, failedAt],
+    );
+    if (result.rowCount === 0) return;
   }
 
   async recordIdentityConflict(taskId: string, detail: string): Promise<void> {
@@ -2173,6 +2199,10 @@ async function transitionTask(
   }
   if (update.invocationAttempt !== undefined) add("invocation_attempt", update.invocationAttempt);
   if (update.recoveryAttempts !== undefined) add("recovery_attempts", update.recoveryAttempts);
+  if (update.nextRecoveryAt !== undefined) add("next_recovery_at", update.nextRecoveryAt);
+  if (update.recoveryFailureCount !== undefined) {
+    add("recovery_failure_count", update.recoveryFailureCount);
+  }
   if (update.lastReconciledAt !== undefined) add("last_reconciled_at", update.lastReconciledAt);
   const resultingState = update.internalState ?? existing.internal_state;
   const ttlMs = existing.ttl_ms === null ? null : Number(existing.ttl_ms);
@@ -2557,6 +2587,8 @@ function fromRow(row: TaskRow): TaskRecord {
     stopReason: row.stop_reason,
     timing: row.timing,
     recoveryAttempts: row.recovery_attempts,
+    nextRecoveryAt: row.next_recovery_at,
+    recoveryFailureCount: row.recovery_failure_count,
     lastReconciledAt: row.last_reconciled_at,
   };
 }

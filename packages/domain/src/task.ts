@@ -66,6 +66,8 @@ export interface TaskRecord {
   stopReason: string | null;
   timing: Record<string, unknown>;
   recoveryAttempts: number;
+  nextRecoveryAt: Date;
+  recoveryFailureCount: number;
   lastReconciledAt: Date | null;
 }
 

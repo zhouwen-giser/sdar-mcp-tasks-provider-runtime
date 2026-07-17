@@ -22,6 +22,11 @@ state, a failed caller expires its lease, and a crashed caller is taken over aft
 with Reconcile before any safe retry. Source-IP rate state has an explicit per-replica key bound;
 global production limiting remains the ingress/gateway responsibility.
 
+Recovery candidates carry `nextRecoveryAt` and a consecutive failure count. Success resets the
+count and moves the Task behind older due work; transient or thrown failures use persisted
+exponential backoff with stable jitter. This prevents one old failure from occupying every
+bounded scan while retaining eventual retries.
+
 Task publication, scheduler acceptance and start-window compensation also reuse their checked-out
 client for post-commit visibility reads. They never retain a client and request a second one;
 pool-max-one regression and slow-Adapter capacity gates enforce this connection boundary.
