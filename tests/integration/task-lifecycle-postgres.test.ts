@@ -1399,7 +1399,7 @@ describe("durable task lifecycle", () => {
       undefined,
       "retryable-pause-dispatcher-followup",
     ).tick();
-    expect(controlSideEffectCount - before).toBe(1);
+    expect(controlSideEffectCount - before).toBe(2);
     const finalCancel = await pool.query<{ state: string }>(
       `SELECT state FROM task_command WHERE task_id=$1 AND command_type='CANCEL'`,
       [taskId],
