@@ -44,6 +44,12 @@ const EnvironmentSchema = z
     RECOVERY_POLL_MS: z.coerce.number().int().min(500).max(300_000).default(5_000),
     TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
     TTL_PURGE_GRACE_MS: z.coerce.number().int().min(1_000).max(604_800_000).default(86_400_000),
+    OUTBOX_PUBLISHED_RETENTION_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(7_776_000_000)
+      .default(86_400_000),
     TTL_CLEANER_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(128),
   })
   .superRefine((value, context) => {
@@ -58,7 +64,7 @@ const EnvironmentSchema = z
     if (value.AUTH_MODE === "jwt_hs256" && value.JWT_HS256_SECRET === undefined) {
       context.addIssue({ code: "custom", message: "jwt_hs256 requires JWT_HS256_SECRET" });
     }
-    if (value.INTERNAL_ENDPOINTS_ENABLED === true && value.INTERNAL_ADMIN_TOKEN === undefined) {
+    if (value.INTERNAL_ENDPOINTS_ENABLED && value.INTERNAL_ADMIN_TOKEN === undefined) {
       context.addIssue({
         code: "custom",
         message: "INTERNAL_ENDPOINTS_ENABLED requires INTERNAL_ADMIN_TOKEN",
@@ -74,32 +80,44 @@ export type RuntimeConfig = z.infer<typeof EnvironmentSchema> & {
 export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env): RuntimeConfig {
   const value = EnvironmentSchema.parse(environment);
   const commandClaimLeaseMinimum =
-    2 * value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+    2 * value.ADAPTER_RPC_TIMEOUT_MS +
+    value.DB_PUBLICATION_BUDGET_MS +
+    value.LEASE_SAFETY_MARGIN_MS;
   const scheduleClaimLeaseMinimum =
     value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
   const recoveryLeaseMinimum =
     value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
   const idempotencyLeaseMinimum =
-    2 * value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+    2 * value.ADAPTER_RPC_TIMEOUT_MS +
+    value.DB_PUBLICATION_BUDGET_MS +
+    value.LEASE_SAFETY_MARGIN_MS;
   const violations: string[] = [];
   if (value.COMMAND_CLAIM_LEASE_MS < commandClaimLeaseMinimum) {
     violations.push(
-      `COMMAND_CLAIM_LEASE_MS must be >= ${commandClaimLeaseMinimum} for current timeout and budget`,
+      "COMMAND_CLAIM_LEASE_MS must be >= " +
+        String(commandClaimLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (value.SCHEDULE_CLAIM_LEASE_MS < scheduleClaimLeaseMinimum) {
     violations.push(
-      `SCHEDULE_CLAIM_LEASE_MS must be >= ${scheduleClaimLeaseMinimum} for current timeout and budget`,
+      "SCHEDULE_CLAIM_LEASE_MS must be >= " +
+        String(scheduleClaimLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (value.RECOVERY_LEASE_MS < recoveryLeaseMinimum) {
     violations.push(
-      `RECOVERY_LEASE_MS must be >= ${recoveryLeaseMinimum} for current timeout and budget`,
+      "RECOVERY_LEASE_MS must be >= " +
+        String(recoveryLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (value.IDEMPOTENCY_LEASE_MS < idempotencyLeaseMinimum) {
     violations.push(
-      `IDEMPOTENCY_LEASE_MS must be >= ${idempotencyLeaseMinimum} for current timeout and budget`,
+      "IDEMPOTENCY_LEASE_MS must be >= " +
+        String(idempotencyLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (violations.length > 0) {

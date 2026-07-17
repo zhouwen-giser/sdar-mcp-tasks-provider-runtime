@@ -1,6 +1,6 @@
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadRuntimeConfig } from "../../apps/runtime/src/config.js";
 import { createRuntime } from "../../apps/runtime/src/runtime.js";
 import {
@@ -70,6 +70,13 @@ beforeAll(async () => {
   );
 });
 
+beforeEach(async () => {
+  await pool.query(`TRUNCATE TABLE
+    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_observation, provider_task, admission_intent
+    RESTART IDENTITY CASCADE`);
+});
+
 afterAll(async () => {
   gateway.close();
   await shutdown(adapter);
@@ -99,6 +106,37 @@ describe("Runtime startup and fault recovery", () => {
     expect(await engine.getTask(String(recovered.rows[0]?.task_id), authorization)).toMatchObject({
       status: "completed",
     });
+  });
+
+  it("does not execute control commands while recovering pending normal Commands", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "recovery-pending-update", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected recovery task");
+    const taskId = String(created.task.taskId);
+
+    const before = controlSideEffects;
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    const pendingUpdate = await pool.query<{ count: string }>(
+      `SELECT count(*) AS count FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE' AND state='PENDING'`,
+      [taskId],
+    );
+    expect(pendingUpdate.rows[0]?.count).toBe("1");
+
+    const scan = await new RecoveryManager(engine, new TaskRepository(pool)).scan();
+
+    expect(scan.tasksReconciled).toBeGreaterThanOrEqual(1);
+    expect(controlSideEffects - before).toBe(0);
+    const stillPending = await pool.query<{ state: string }>(
+      `SELECT state FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE'
+       ORDER BY command_sequence DESC LIMIT 1`,
+      [taskId],
+    );
+    expect(stillPending.rows[0]?.state).toBe("PENDING");
   });
 
   it("dispatches a recovered cancel command without repeating the Adapter side effect", async () => {
@@ -285,6 +323,7 @@ describe("Runtime startup and fault recovery", () => {
     const snapshotsV2 = await new OperationSnapshotRepository(pool).saveManifest(manifestV2);
     const restarted = new TaskEngine(manifestV2, snapshotsV2, gateway, new TaskRepository(pool));
     await restarted.updateTask(taskId, { approval: true }, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     expect(await restarted.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
     const newOperation = manifestV2.operations.find(
       (operation) => operation.name === "durable_task",

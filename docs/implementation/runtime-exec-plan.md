@@ -141,20 +141,21 @@ success and first-writer user/deadline outcomes. GitHub Actions run
 
 ### R7 — hardening
 
-- Scan/reconcile every nonterminal class at startup and serialize per task.
+- Scan/reconcile uncertain Admissions and nonterminal Tasks at startup and serialize per task.
 - Add retry/circuit policies that retain known facts through transient failures.
 - Implement trusted/JWT identity, task ownership and execution-mode isolation,
   mTLS client configuration, rate/size/depth limits, and redaction.
 - Expose readiness dependencies, metrics, trace correlation, and fault evidence.
 
 Implementation: complete and CI verified. Startup and periodic RecoveryManager scans use
-per-task PostgreSQL advisory locks, replay pending command sequences, recover
-response-lost admission, and make confirmed NOT_FOUND explicit. Runtime ready
-waits for migrations, validated Manifest/Adapter connectivity and the initial
-scan. Development/trusted-header/JWT authentication, full context isolation,
-mTLS credentials, body/rate/JSON limits, redacted correlation logs and
-Prometheus metrics are wired. GitHub Actions run `29498655990` passed recovery,
-security, real PostgreSQL and Compose gates.
+per-task PostgreSQL advisory locks to reconcile uncertain Admissions and nonterminal
+Tasks; Recovery does not execute persisted Commands. The Durable Command Dispatcher
+exclusively claims and executes Commands, including those whose prior claim lease expired.
+Runtime ready waits for migrations, validated Manifest/Adapter connectivity and the initial
+scan. Development/trusted-header/JWT authentication, full context isolation, mTLS
+credentials, body/rate/JSON limits, redacted correlation logs and Prometheus metrics
+are wired. GitHub Actions run `29498655990` passed recovery, security, real PostgreSQL
+and Compose gates.
 
 ### R8 — cross-language conformance
 

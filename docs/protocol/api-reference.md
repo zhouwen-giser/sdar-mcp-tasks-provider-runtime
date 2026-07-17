@@ -12,8 +12,11 @@
 
 `/mcp` supports MCP initialization and `tools/list`, `tools/call`,
 `tasks/get`, `tasks/result`, and `tasks/cancel`, plus Profile methods
-`io.sdar/taskExecution/checkAvailability`, `tasks/update`, `tasks/pause`, and
-`tasks/resume` when applicable. Tool definitions and capability metadata come
+`io.sdar/taskExecution/checkAvailability`, `tasks/update`,
+`io.sdar/taskExecution/tasks/pause`, and `io.sdar/taskExecution/tasks/resume` when applicable.
+`tasks/update` returns the current Task Snapshot plus
+`_meta.io.sdar/taskExecution.receipt` indicating Runtime durable acceptance.
+Tool definitions and capability metadata come
 from the startup Manifest snapshot. Authentication is described in the
 configuration reference.
 

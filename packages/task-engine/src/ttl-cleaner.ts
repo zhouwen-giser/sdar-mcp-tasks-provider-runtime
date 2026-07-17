@@ -13,7 +13,10 @@ export interface TtlCleanerOptions {
   batchSize?: number;
   purgeGraceMs?: number;
   recoveryLeaseMs?: number;
-  onMetric?: (outcome: "renewed" | "expired" | "purged" | "blocked" | "error", amount?: number) => void;
+  onMetric?: (
+    outcome: "renewed" | "expired" | "purged" | "blocked" | "error",
+    amount?: number,
+  ) => void;
 }
 
 export class TtlCleaner {
@@ -127,15 +130,9 @@ export class TtlCleaner {
           continue;
         }
         try {
-          await client.query(
-            "DELETE FROM task_input_request WHERE task_id=$1",
-            [row.task_id],
-          );
+          await client.query("DELETE FROM task_input_request WHERE task_id=$1", [row.task_id]);
           await client.query("DELETE FROM idempotency_record WHERE task_id=$1", [row.task_id]);
-          await client.query(
-            "DELETE FROM task_command WHERE task_id=$1",
-            [row.task_id],
-          );
+          await client.query("DELETE FROM task_command WHERE task_id=$1", [row.task_id]);
           await client.query("DELETE FROM admission_intent WHERE task_id=$1", [row.task_id]);
           await client.query("DELETE FROM provider_task WHERE task_id=$1", [row.task_id]);
           purged += 1;
@@ -179,7 +176,7 @@ export class TtlCleaner {
        RETURNING owner_id`,
       [leaseKey, ownerId, this.#recoveryLeaseMs],
     );
-    return claimed.rowCount === 1 ? claimed.rows[0]?.owner_id ?? null : null;
+    return claimed.rowCount === 1 ? (claimed.rows[0]?.owner_id ?? null) : null;
   }
 
   async #releaseRecoveryLease(client: PoolClient, taskId: string, ownerId: string): Promise<void> {

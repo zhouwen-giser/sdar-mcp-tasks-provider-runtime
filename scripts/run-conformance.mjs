@@ -103,7 +103,19 @@ try {
       report.scopes.runtimeProfile.status !== "partial" ||
       report.scopes.resourceSpecificSafety.status !== "not_claimed"
     ) {
-      throw new Error(`${report.adapterLanguage} conformance scope/count guard failed`);
+      throw new Error(
+        `${report.adapterLanguage} conformance scope/count guard failed: ${JSON.stringify({
+          caseCount,
+          adapterProtocol: report.scopes.adapterProtocol.status,
+          runtimeProfile: report.scopes.runtimeProfile.status,
+          resourceSpecificSafety: report.scopes.resourceSpecificSafety.status,
+          failedTests: report.groups.flatMap((group) =>
+            group.tests
+              .filter((test) => test.status === "failed")
+              .map((test) => ({ group: group.id, name: test.name, error: test.error })),
+          ),
+        })}`,
+      );
     }
     writeFileSync(
       resolve(reportsDirectory, `${report.adapterLanguage}.json`),

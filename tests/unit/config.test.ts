@@ -13,6 +13,7 @@ describe("Runtime configuration", () => {
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);
     expect(config.ADAPTER_HEALTH_FAILURE_THRESHOLD).toBe(2);
+    expect(config.OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
   });
 
   it("rejects invalid ports and timeouts", () => {
@@ -36,5 +37,18 @@ describe("Runtime configuration", () => {
         ADAPTER_TLS_KEY_PATH: "/run/secrets/client-key.pem",
       }).ADAPTER_TLS_MODE,
     ).toBe("required");
+  });
+
+  it("validates outbox published retention bounds", () => {
+    expect(loadRuntimeConfig({}).OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
+    expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "59999" })).toThrow();
+    expect(
+      loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "60000" }).OUTBOX_PUBLISHED_RETENTION_MS,
+    ).toBe(60_000);
+    expect(
+      loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000000" })
+        .OUTBOX_PUBLISHED_RETENTION_MS,
+    ).toBe(7_776_000_000);
+    expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000001" })).toThrow();
   });
 });
