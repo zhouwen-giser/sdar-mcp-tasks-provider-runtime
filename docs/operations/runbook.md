@@ -5,8 +5,14 @@
 Startup applies checksum-protected migrations, validates Adapter Manifest and
 provider identity, persists operation snapshots, performs the first recovery
 scan, and only then listens. `/health/live` proves the event loop can respond;
-`/health/ready` additionally reports `database`, `adapter`, and `recovery`.
+`/health/ready` additionally reports `database`, `adapter`, `recovery`, `scheduler`,
+`commandDispatcher`, and `ttlCleaner` independently.
 Remove a replica from traffic on any non-ready dependency.
+
+Adapter readiness is a continuous identity-checked probe, not a startup latch. An Adapter outage
+must change only `adapter` to failed while a successful PostgreSQL probe keeps `database` ready;
+recovery is automatic after a valid probe. Scheduler/dispatcher/cleaner failures retain their
+own component label. Liveness remains 200 during ordinary dependency outages.
 
 Use `/metrics` for Prometheus scraping. Alert on sustained readiness failure,
 growth in `sdar_outbox_pending`, Adapter RPC error outcomes, recovery errors,
@@ -25,6 +31,12 @@ arguments, credentials and bearer tokens are intentionally absent/redacted.
   with PostgreSQL row/advisory locks, so replicas may overlap safely.
 - Drain HTTP traffic before termination. A process exit does not lose durable
   tasks; another replica or restarted process scans them.
+- Streamable HTTP is stateless: do not configure sticky sessions, expect an
+  `Mcp-Session-Id`, or depend on GET/DELETE/resumable notifications in rc.2.
+- Before rc.2 rollout, run `pnpm verify:rc2`, Buf breaking against `v1.0.0-rc.1`, and the
+  three-image Compose build. Archive conformance, capacity, SBOM and image JSON as evidence.
+- Size `DATABASE_POOL_MAX` for replicas and probes. The capacity gate proves a max-one pool can
+  make SQL progress during a slow Adapter RPC; rising pool waiters still require investigation.
 
 ## Incident procedures
 

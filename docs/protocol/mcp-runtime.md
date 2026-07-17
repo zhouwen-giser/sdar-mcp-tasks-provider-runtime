@@ -2,11 +2,29 @@
 
 The Streamable HTTP endpoint is `POST /mcp`. It uses the official TypeScript MCP SDK while every SDK import remains inside `packages/mcp-protocol`.
 
+The endpoint is explicitly stateless under SDK 1.29.0: every POST creates an independent Server
+and transport, no MCP session id or resumable event store is issued, and GET/DELETE session
+lifecycle plus Task status notifications are not advertised. Durable Task ids, PostgreSQL state
+and `tasks/get`/`tasks/result` polling provide continuity across requests and replicas.
+
 At startup Runtime calls Adapter DescribeProvider, validates and hashes the Manifest, persists immutable operation snapshots, and builds one Tool per operation. Resource instances remain Tool arguments and never expand the catalog.
 
 Initialization declares Tools and both task extensions. Profile booleans are derived from Runtime support and loaded operation capabilities. Every Tool publishes `_meta["io.sdar/taskExecution"]` with execution mode and supported scheduling, elapsed-time, observation, input, cancellation and idempotency features.
 
 Synchronous StartOperation completes as an ordinary Tool result. `task_required` always publishes a durable SEP-2663 Task after Adapter acceptance. `task_capable` returns an ordinary result when its initial Snapshot is terminal and otherwise follows the same durable publication path. Rejection becomes `CallToolResult.isError=true` with `admission_rejected` and never creates a Task.
+
+Operation Registry retains both compiled validators. Raw Adapter output is checked before every
+synchronous, inline, asynchronous-success or partial publication and is subject to byte, depth
+and node limits. Schema-invalid output is converted to a stable Adapter-contract technical
+failure; Runtime never republishes it as success. Business/partial results use the standardized
+`isError=true` envelope, while successful `structuredContent` remains the Adapter output defined
+by the operation schema.
+
+The MCP boundary maps the domain error hierarchy once. Invalid requests, hidden Tasks, expiry
+and capability failures use JSON-RPC Invalid Params with stable reason data. Pre-publication
+technical failures use JSON-RPC Internal Error; post-publication technical failures are stored as
+Task `failed/error`. The locked SDK's top-level Task fields are `ttl` and `pollInterval`; Profile
+aliases exist only under `_meta["io.sdar/taskExecution"]` as `ttlMs` and `pollIntervalMs`.
 
 `tasks/get` binds taskId to the trusted authorization-context hash, execution mode, and simulation identity. Nonterminal reads perform the safe Adapter `GetExecution` RPC, apply only a greater observation revision, and atomically update task/outbox/observation data. Once a terminal state is stored, later Adapter observations cannot reverse it. Business failure and partial completion remain MCP `completed` with structured outcome data; only technical failure uses MCP `failed`.
 
@@ -25,3 +43,8 @@ Runtime startup does not become ready until migrations, Manifest validation, Ada
 Authentication is pluggable: explicit development identity, trusted proxy headers, or signed HS256 JWT with expiry/issuer/audience checks. Authorization context, execution mode, and simulation identity are part of every Task query/control predicate and Adapter execution context. Production Adapter transport supports mutual TLS from configured CA/client certificate/private key files; plaintext is an explicit development mode. HTTP body size, JSON byte/depth/node complexity, availability batch, key, TTL, timing, and schema bounds are enforced before side effects. Adapter endpoints are fixed startup configuration and cannot be selected by Tool arguments.
 
 The low-level official SDK Server is intentional because Adapter input/output documents are validated JSON Schema Draft 2020-12, whereas the high-level registration API accepts application-owned Zod schemas. SDK types do not enter domain, registry or persistence packages.
+
+The availability batch bound is 1-128 checks. The rc.2 publication path commits intent, Task,
+first Runtime Observation and Outbox event before returning a Task. Post-commit visibility uses
+the same checked-out PostgreSQL client and releases it before returning; a one-connection pool
+therefore cannot deadlock or span an Adapter RPC.

@@ -13,6 +13,7 @@ export interface MockAdapterOptions {
   onStartSideEffect?: (taskId: string) => void;
   onControlSideEffect?: (taskId: string, command: string) => void;
   statePath?: string;
+  startResponseDelayMs?: number;
 }
 
 interface MockExecution {
@@ -88,6 +89,17 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               description: "The resource is disabled.",
             };
           }
+          if (argumentsValue.scenario === "unknown") {
+            return {
+              requestId: check.requestId,
+              operationName: check.operationName,
+              availability: "UNKNOWN",
+              riskLevel: "MEDIUM",
+              reasonCode: "RESOURCE_STATE_UNKNOWN",
+              description: "The reference resource state is unknown.",
+              validUntil: timestamp(validUntil),
+            };
+          }
           return {
             requestId: check.requestId,
             operationName: check.operationName,
@@ -152,7 +164,15 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               required: ["resourceId"],
               additionalProperties: false,
             }),
-            outputSchema: jsonToProtoStruct({ type: "object" }),
+            outputSchema: jsonToProtoStruct({
+              type: "object",
+              properties: {
+                resourceId: { type: "string" },
+                completed: { type: "boolean" },
+              },
+              required: ["resourceId", "completed"],
+              additionalProperties: false,
+            }),
             capabilities: {
               availability: true,
               scheduling: true,
@@ -176,12 +196,23 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
               type: "object",
               properties: {
                 resourceId: { type: "string" },
-                scenario: { type: "string", enum: ["terminal", "running"] },
+                scenario: {
+                  type: "string",
+                  enum: ["terminal", "terminal_invalid_output", "running"],
+                },
               },
               required: ["resourceId", "scenario"],
               additionalProperties: false,
             }),
-            outputSchema: jsonToProtoStruct({ type: "object" }),
+            outputSchema: jsonToProtoStruct({
+              type: "object",
+              properties: {
+                resourceId: { type: "string" },
+                completed: { type: "boolean" },
+              },
+              required: ["resourceId", "completed"],
+              additionalProperties: false,
+            }),
             capabilities: {
               availability: true,
               scheduling: false,
@@ -512,6 +543,17 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         return;
       }
       const result = protoStructToJson(call.request.arguments);
+      if (
+        call.request.operationName === "echo_sync" &&
+        result.message === "__technical_failure__"
+      ) {
+        callback(
+          Object.assign(new Error("injected synchronous technical failure"), {
+            code: grpc.status.INTERNAL,
+          }),
+        );
+        return;
+      }
       const invocationAttempt = Number(call.request.invocationAttempt ?? 1);
       if (
         (result.scenario === "scheduled_retry_once" && invocationAttempt === 1) ||
@@ -540,7 +582,10 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       }
       const now = new Date();
       options.onStartSideEffect?.(taskId);
-      if (call.request.operationName === "flex_task" && result.scenario === "terminal") {
+      if (
+        call.request.operationName === "flex_task" &&
+        (result.scenario === "terminal" || result.scenario === "terminal_invalid_output")
+      ) {
         const externalExecutionId = `inline-${taskId}`;
         const terminalSnapshot = {
           taskId,
@@ -552,7 +597,11 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           revision: "1",
           reasonCode: "SUCCESS",
           message: "Task-capable operation completed inline.",
-          result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
+          result: jsonToProtoStruct(
+            result.scenario === "terminal_invalid_output"
+              ? { resourceId: 42, completed: "yes" }
+              : { resourceId: result.resourceId, completed: true },
+          ),
           observedAt: timestamp(now),
         };
         executions.set(taskId, {
@@ -616,6 +665,36 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           message: "Reference task completed.",
           result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
         };
+        if (result.scenario === "output_invalid") {
+          terminalSnapshot.result = jsonToProtoStruct({ resourceId: 42, completed: "yes" });
+        } else if (result.scenario === "partial_valid") {
+          Object.assign(initialSnapshot, {
+            state: "PARTIALLY_COMPLETED",
+            reasonCode: "PARTIAL_RESULT",
+            message: "Reference task partially completed.",
+            result: jsonToProtoStruct({ resourceId: result.resourceId, completed: false }),
+          });
+        } else if (result.scenario === "partial_invalid") {
+          Object.assign(initialSnapshot, {
+            state: "PARTIALLY_COMPLETED",
+            reasonCode: "PARTIAL_RESULT",
+            message: "Reference task returned an invalid partial payload.",
+            result: jsonToProtoStruct({ resourceId: 42, completed: "no" }),
+          });
+        } else if (result.scenario === "business_failure") {
+          Object.assign(initialSnapshot, {
+            state: "BUSINESS_FAILED",
+            reasonCode: "BUSINESS_RULE_REJECTED",
+            message: "Reference business rule rejected the operation.",
+            result: jsonToProtoStruct({ detail: "business rejection" }),
+          });
+        } else if (result.scenario === "technical_failure") {
+          Object.assign(initialSnapshot, {
+            state: "TECHNICAL_FAILED",
+            reasonCode: "ADAPTER_EXECUTION_FAILED",
+            message: "Reference Adapter reported a technical failure.",
+          });
+        }
         executions.set(taskId, {
           externalExecutionId,
           operationName: call.request.operationName ?? "",
@@ -638,7 +717,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           );
           return;
         }
-        callback(null, {
+        const acceptedResponse = {
           accepted: {
             externalExecutionId:
               result.scenario === "start_external_identity_mismatch"
@@ -650,7 +729,12 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
                 : initialSnapshot,
           },
           result: "accepted",
-        });
+        };
+        if (result.scenario === "slow_start" && (options.startResponseDelayMs ?? 0) > 0) {
+          setTimeout(() => callback(null, acceptedResponse), options.startResponseDelayMs);
+        } else {
+          callback(null, acceptedResponse);
+        }
         return;
       }
       const externalExecutionId = `sync-${taskId}`;
@@ -664,7 +748,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         revision: "1",
         reasonCode: "SUCCESS",
         message: "Synchronous echo completed.",
-        result: jsonToProtoStruct(result),
+        result: jsonToProtoStruct(
+          result.message === "__invalid_output__" ? { message: 42 } : result,
+        ),
         observedAt: timestamp(now),
       };
       executions.set(taskId, {

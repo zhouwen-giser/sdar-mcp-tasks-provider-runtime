@@ -8,6 +8,7 @@ import logging
 import os
 import tempfile
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,12 @@ def json_struct(value: dict[str, Any]) -> Struct:
 def now_timestamp() -> Timestamp:
     value = Timestamp()
     value.GetCurrentTime()
+    return value
+
+
+def future_timestamp(seconds: int) -> Timestamp:
+    value = Timestamp()
+    value.FromDatetime(datetime.now(timezone.utc) + timedelta(seconds=seconds))
     return value
 
 
@@ -89,6 +96,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
     async def CheckAvailability(self, request, context):  # noqa: N802
         del context
         checked_at = now_timestamp()
+        valid_until = future_timestamp(10)
         results = []
         for check in request.checks:
             arguments = MessageToDict(check.arguments) if check.HasField("arguments") else {}
@@ -102,6 +110,11 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 availability = adapter_pb2.DISABLED
                 reason = "RESOURCE_DISABLED"
                 description = "The resource is disabled."
+            elif scenario == "unknown":
+                availability = adapter_pb2.UNKNOWN
+                reason = "RESOURCE_STATE_UNKNOWN"
+                description = "The reference resource state is unknown."
+                risk = adapter_pb2.MEDIUM
             elif scenario == "restricted":
                 availability = adapter_pb2.RESTRICTED
                 reason = "PREEMPTIBLE_TASK_ACTIVE"
@@ -117,8 +130,21 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     reason_code=reason,
                     description=description,
                     possible_effects=effects,
-                    valid_until=checked_at,
-                    earliest_start_time=checked_at,
+                    valid_until=valid_until,
+                    **(
+                        {
+                            "earliest_start_time": valid_until,
+                            "next_available_windows": [
+                                adapter_pb2.AvailableWindow(
+                                    start_time=valid_until,
+                                    end_time=future_timestamp(70),
+                                )
+                            ],
+                            "estimated_delay_ms": 10000,
+                        }
+                        if scenario == "restricted"
+                        else {}
+                    ),
                 )
             )
         return adapter_pb2.CheckAvailabilityResponse(
@@ -143,14 +169,45 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 )
             )
 
+        invocation_attempt = request.invocation_attempt or 1
+        if (
+            arguments.get("scenario") == "scheduled_retry_once" and invocation_attempt == 1
+        ) or arguments.get("scenario") == "scheduled_retry_always":
+            return adapter_pb2.StartOperationResponse(
+                rejected=adapter_pb2.AdmissionRejected(
+                    reason_code="START_CAPACITY_RETRY",
+                    message="Reference Adapter requests a bounded scheduled retry.",
+                    retryable=True,
+                )
+            )
+        if arguments.get("scenario") == "scheduled_permanent_reject":
+            return adapter_pb2.StartOperationResponse(
+                rejected=adapter_pb2.AdmissionRejected(
+                    reason_code="START_NOT_PERMITTED",
+                    message="Reference Adapter permanently rejected scheduled admission.",
+                    retryable=False,
+                )
+            )
+
         task_id = request.task_id
         external_id = f"python-{task_id}"
         if request.operation_name == "echo_sync":
+            if arguments.get("message") == "__technical_failure__":
+                await context.abort(grpc.StatusCode.INTERNAL, "injected synchronous technical failure")
+            output = {"message": 42} if arguments.get("message") == "__invalid_output__" else arguments
             snapshot = self._snapshot_dict(
-                task_id, external_id, "SUCCEEDED", 1, "SUCCESS", "Echo completed.", arguments, binding
+                task_id, external_id, "SUCCEEDED", 1, "SUCCESS", "Echo completed.", output, binding
             )
             execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
-        elif request.operation_name == "flex_task" and arguments.get("scenario") == "terminal":
+        elif request.operation_name == "flex_task" and arguments.get("scenario") in {
+            "terminal",
+            "terminal_invalid_output",
+        }:
+            output = (
+                {"resourceId": 42, "completed": "yes"}
+                if arguments.get("scenario") == "terminal_invalid_output"
+                else {"resourceId": arguments.get("resourceId"), "completed": True}
+            )
             snapshot = self._snapshot_dict(
                 task_id,
                 external_id,
@@ -158,7 +215,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 1,
                 "SUCCESS",
                 "Task-capable operation completed inline.",
-                {"resourceId": arguments.get("resourceId"), "completed": True},
+                output,
                 binding,
             )
             execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
@@ -193,6 +250,35 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 {"resourceId": arguments.get("resourceId"), "completed": True},
                 binding,
             )
+            if arguments.get("scenario") == "output_invalid":
+                terminal["result"] = {"resourceId": 42, "completed": "yes"}
+            elif arguments.get("scenario") == "partial_valid":
+                snapshot.update(
+                    state="PARTIALLY_COMPLETED",
+                    reason_code="PARTIAL_RESULT",
+                    message="Reference task partially completed.",
+                    result={"resourceId": arguments.get("resourceId"), "completed": False},
+                )
+            elif arguments.get("scenario") == "partial_invalid":
+                snapshot.update(
+                    state="PARTIALLY_COMPLETED",
+                    reason_code="PARTIAL_RESULT",
+                    message="Reference task returned an invalid partial payload.",
+                    result={"resourceId": 42, "completed": "no"},
+                )
+            elif arguments.get("scenario") == "business_failure":
+                snapshot.update(
+                    state="BUSINESS_FAILED",
+                    reason_code="BUSINESS_RULE_REJECTED",
+                    message="Reference business rule rejected the operation.",
+                    result={"detail": "business rejection"},
+                )
+            elif arguments.get("scenario") == "technical_failure":
+                snapshot.update(
+                    state="TECHNICAL_FAILED",
+                    reason_code="ADAPTER_EXECUTION_FAILED",
+                    message="Reference Adapter reported a technical failure.",
+                )
             execution = self._execution(binding, external_id, snapshot, terminal, arguments)
             execution["waiting_for_input"] = input_required
             execution["input_round"] = 1 if arguments.get("scenario") == "multi_round_input" else 0
@@ -254,6 +340,27 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         existing = execution["command_acks"].get(key)
         if existing is not None:
             return adapter_pb2.CommandAck(**existing)
+        execution["cancel_attempts"] = execution.get("cancel_attempts", 0) + 1
+        scenario = execution["arguments"].get("scenario")
+        if scenario == "cancel_permanent_reject":
+            self.store.set(request.identity.task_id, execution)
+            return self._ack(
+                False,
+                "CANCEL_NOT_PERMITTED",
+                "Reference execution rejected user cancellation.",
+                request,
+            )
+        if scenario == "cancel_retryable_reject" and execution["cancel_attempts"] == 1:
+            self.store.set(request.identity.task_id, execution)
+            return self._ack(
+                False,
+                "TRANSIENT_UNAVAILABLE",
+                "Reference execution requests a retry.",
+                request,
+            )
+        if scenario == "cancel_transport_failure":
+            self.store.set(request.identity.task_id, execution)
+            await context.abort(grpc.StatusCode.UNAVAILABLE, "injected cancel transport failure")
         if execution["arguments"].get("scenario") == "natural_completion":
             execution["snapshot"] = execution["terminal_snapshot"]
         else:
@@ -270,6 +377,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             )
             execution["terminal_snapshot"] = execution["snapshot"]
         ack = self._ack_dict(True, "STOP_ACCEPTED", "Safe stop accepted.", request)
+        if scenario == "command_sequence_mismatch":
+            ack["command_sequence"] = int(request.identity.command_sequence) + 1
         execution["command_acks"][key] = ack
         self.store.set(request.identity.task_id, execution)
         if execution["arguments"].get("scenario") == "cancel_response_loss":
@@ -487,7 +596,14 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     "additionalProperties": False,
                 }
             ),
-            output_schema=json_struct({"type": "object"}),
+            output_schema=json_struct(
+                {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"],
+                    "additionalProperties": False,
+                }
+            ),
             capabilities=adapter_pb2.OperationCapabilities(availability=True, idempotency=True),
             resource_binding=adapter_pb2.ResourceBinding(mode=adapter_pb2.ResourceBinding.NONE),
         )
@@ -509,7 +625,17 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     "additionalProperties": False,
                 }
             ),
-            output_schema=json_struct({"type": "object"}),
+            output_schema=json_struct(
+                {
+                    "type": "object",
+                    "properties": {
+                        "resourceId": {"type": "string"},
+                        "completed": {"type": "boolean"},
+                    },
+                    "required": ["resourceId", "completed"],
+                    "additionalProperties": False,
+                }
+            ),
             capabilities=adapter_pb2.OperationCapabilities(
                 availability=True,
                 scheduling=True,
@@ -537,13 +663,26 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     "type": "object",
                     "properties": {
                         "resourceId": {"type": "string"},
-                        "scenario": {"type": "string", "enum": ["terminal", "running"]},
+                        "scenario": {
+                            "type": "string",
+                            "enum": ["terminal", "terminal_invalid_output", "running"],
+                        },
                     },
                     "required": ["resourceId", "scenario"],
                     "additionalProperties": False,
                 }
             ),
-            output_schema=json_struct({"type": "object"}),
+            output_schema=json_struct(
+                {
+                    "type": "object",
+                    "properties": {
+                        "resourceId": {"type": "string"},
+                        "completed": {"type": "boolean"},
+                    },
+                    "required": ["resourceId", "completed"],
+                    "additionalProperties": False,
+                }
+            ),
             capabilities=adapter_pb2.OperationCapabilities(
                 availability=True, idempotency=True, observations=True
             ),

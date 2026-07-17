@@ -6,9 +6,13 @@ import process from "node:process";
 
 const outputPath = resolve("reports/sbom/runtime-v1.cdx.json");
 const checking = process.argv.includes("--check");
+const pnpmEntry = process.env.npm_execpath;
+if (!pnpmEntry) {
+  throw new Error("Run this script through pnpm so npm_execpath identifies the package manager");
+}
 
 const listed = JSON.parse(
-  execFileSync("pnpm", ["list", "--prod", "--json", "--depth", "Infinity"], {
+  execFileSync(process.execPath, [pnpmEntry, "list", "--prod", "--json", "--depth", "Infinity"], {
     encoding: "utf8",
   }),
 );
@@ -29,7 +33,8 @@ function collect(dependencies = {}) {
 }
 
 for (const project of listed) collect(project.dependencies);
-const lockHash = createHash("sha256").update(readFileSync("pnpm-lock.yaml")).digest("hex");
+const normalizedLock = readFileSync("pnpm-lock.yaml", "utf8").replaceAll("\r\n", "\n");
+const lockHash = createHash("sha256").update(normalizedLock).digest("hex");
 const document = {
   $schema: "http://cyclonedx.org/schema/bom-1.6.schema.json",
   bomFormat: "CycloneDX",
@@ -39,7 +44,7 @@ const document = {
     component: {
       type: "application",
       name: "sdar-mcp-tasks-provider-runtime",
-      version: "1.0.0-rc.1",
+      version: "1.0.0-rc.2",
     },
     properties: [{ name: "sdar:pnpm-lock-sha256", value: lockHash }],
   },

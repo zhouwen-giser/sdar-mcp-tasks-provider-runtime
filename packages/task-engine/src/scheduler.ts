@@ -5,10 +5,11 @@ import {
 } from "../../adapter-protocol/src/index.js";
 import type { ExecutionSnapshot, GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { Clock, TaskExecutionTiming, TaskRecord } from "../../domain/src/index.js";
-import { mapAdapterSnapshot, systemClock } from "../../domain/src/index.js";
-import type { ValidatedManifest } from "../../operation-registry/src/index.js";
+import { systemClock } from "../../domain/src/index.js";
+import type { ValidatedManifest, ValidatedOperation } from "../../operation-registry/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { TaskRepository } from "../../persistence-postgres/src/index.js";
+import { validatedSnapshotTransition } from "./result-contract.js";
 
 export interface SchedulerTickResult {
   started: number;
@@ -116,7 +117,7 @@ export class DurableScheduler {
       await this.acceptStart(
         task,
         owner,
-        operation.name,
+        operation,
         response.externalExecutionId || response.snapshot.externalExecutionId,
         response.snapshot,
         response as unknown as Record<string, unknown>,
@@ -204,7 +205,7 @@ export class DurableScheduler {
       await this.acceptStart(
         task,
         owner,
-        operation.name,
+        operation,
         accepted.externalExecutionId,
         accepted.initialSnapshot,
         response as unknown as Record<string, unknown>,
@@ -234,7 +235,7 @@ export class DurableScheduler {
   private async acceptStart(
     task: TaskRecord,
     owner: string,
-    operationName: string,
+    operation: ValidatedOperation,
     externalExecutionId: string,
     snapshot: ExecutionSnapshot,
     adapterResponse: Record<string, unknown>,
@@ -246,7 +247,7 @@ export class DurableScheduler {
     validateAdapterSnapshotIdentity(snapshot, {
       taskId: task.taskId,
       externalExecutionId,
-      operationName,
+      operationName: operation.name,
       argumentHash: task.argumentHash,
       authorizationContextHash: task.authorizationContextHash,
       executionMode: task.executionMode,
@@ -257,13 +258,7 @@ export class DurableScheduler {
       owner,
       externalExecutionId,
       Number(snapshot.revision),
-      mapAdapterSnapshot({
-        state: snapshot.state,
-        reasonCode: snapshot.reasonCode,
-        message: snapshot.message,
-        retryable: snapshot.retryable,
-        result: protoStructToJson(snapshot.result),
-      }),
+      validatedSnapshotTransition(operation, snapshot),
       adapterResponse,
       (snapshot.inputRequests ?? []).map((input) => ({
         key: input.key,

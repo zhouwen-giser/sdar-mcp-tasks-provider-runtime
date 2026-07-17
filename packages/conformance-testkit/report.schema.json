@@ -8,6 +8,7 @@
     "providerId",
     "generatedAt",
     "status",
+    "scopes",
     "groups"
   ],
   "properties": {
@@ -16,6 +17,16 @@
     "providerId": { "type": "string", "minLength": 1 },
     "generatedAt": { "type": "string", "format": "date-time" },
     "status": { "enum": ["passed", "failed"] },
+    "scopes": {
+      "type": "object",
+      "required": ["runtimeProfile", "adapterProtocol", "resourceSpecificSafety"],
+      "properties": {
+        "runtimeProfile": { "$ref": "#/$defs/scope" },
+        "adapterProtocol": { "$ref": "#/$defs/scope" },
+        "resourceSpecificSafety": { "$ref": "#/$defs/scope" }
+      },
+      "additionalProperties": false
+    },
     "groups": {
       "type": "array",
       "minItems": 5,
@@ -44,6 +55,17 @@
         },
         "additionalProperties": false
       }
+    }
+  },
+  "$defs": {
+    "scope": {
+      "type": "object",
+      "required": ["status", "basis"],
+      "properties": {
+        "status": { "enum": ["passed", "failed", "partial", "not_claimed"] },
+        "basis": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

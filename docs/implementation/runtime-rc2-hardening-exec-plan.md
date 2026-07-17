@@ -4,7 +4,7 @@ Status: active
 Branch: `feature/mcp-tasks-provider-runtime-v1`  
 Immutable baseline: annotated tag `v1.0.0-rc.1` -> `51d68926ba1bc9e935438e750582693aea3ecf4d`  
 Target: annotated tag `v1.0.0-rc.2`  
-Last updated: 2026-07-16 (H3 closure)
+Last updated: 2026-07-17 (H6 implementation verification)
 
 ## Objective and invariants
 
@@ -53,9 +53,9 @@ Every H phase follows this loop:
 | H3    | unified transition, Runtime observation revision and Outbox                   | T-014..T-016 plus lifecycle/control regressions               | complete |
 | H4    | immutable Snapshot resolution and Adapter identity validation                 | T-017..T-022; Manifest v1->v2 recovery                        | complete |
 | H5    | TTL expiry/purge and degraded reliable reads                                  | T-023..T-028; multi-instance cleaner                          | complete |
-| H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | pending  |
-| H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | pending  |
-| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | pending  |
+| H6    | typed MCP errors, result schema and ttl/poll compatibility                    | T-031..T-040 over real MCP wire                               | complete |
+| H7    | health, bounded rate limit, idempotency pool, image and HTTP mode             | T-041..T-046; capacity and image proof                        | complete |
+| H8    | rc.1 forward migration, recovery ordering, expanded dual-language conformance | T-047..T-049 and T-001..T-046 regression                      | complete |
 | H9    | docs, full release gate, PR #1, final report and immutable tag                | T-050, all checks green, report-containing tag commit         | pending  |
 
 ## Planned schema evolution
@@ -132,3 +132,49 @@ The tag is never moved.
 - 2026-07-17 H5 closure: implementation `6360af8` passed push runtime `29520205271`, PR
   runtime `29520212409`, quality `29520211902` and Compose `29520211382`, including full
   `pnpm verify`, Buf lint/breaking and dual-language Adapter conformance.
+- 2026-07-17 H6 implementation: centralized typed Runtime-to-MCP error mapping, retained
+  immutable output validators, raw success/validated partial result publication and official
+  `ttl`/`pollInterval` plus namespaced SDAR aliases. Official-client and raw Streamable HTTP
+  T-031..T-040 pass 10/10; the full PostgreSQL integration suite passes 54/54. Remote
+  implementation Head verification remains required before H6 closure.
+- 2026-07-17 H6 upstream event: PR #3 was merged at `2d5faa1` after H5 closure. Its tree equals
+  H5 Head `e7500d1`, so the target branch fast-forwarded to the merge commit without conflict or
+  content change before the H6 implementation commit. A new continuation PR is required for
+  H6-H9 PR-context checks.
+- 2026-07-17 H6 closure: implementation `787648a` passed push runtime `29539952514`, PR
+  runtime `29539965808`, PR quality `29539965866` and PR Compose `29539965781`. These include
+  full `pnpm verify`, Buf lint/breaking, dual-language existing conformance and Compose; expanded
+  conformance remains assigned to H8.
+- 2026-07-17 H7 implementation: migration 012 replaces the idempotency session lock with short
+  claim/finalize transactions and a durable lease; continuous component-specific readiness,
+  bounded rate state, explicit SDK stateless transport and a pruned/frozen production image
+  implement T-041..T-046. Local evidence passed: unit 27, contract 4, guards 6, integration 57
+  (including an actual 001-011 rc.1 data upgrade), recovery 8, security 6, E2E 4, dual-language
+  then-current 10-case grouped conformance baseline, capacity, SBOM/deployment and the
+  reproducible image audit. GitHub Linux
+  measured 327,026,557 bytes (350 MB ceiling); Docker Desktop reports 97,150,847 bytes for the
+  same filesystem/config shape because its containerd size semantics differ.
+  Remote Linux CI remains required before closure; the local Windows grpc-tools binary cannot
+  execute (`0xc0000135`), while the Linux Docker build regenerated protobuf and passed.
+- 2026-07-17 H7 closure: `5c03ce6` plus image baseline repair `3d885be` passed push runtime
+  `29541564999`, PR runtime `29541566647`, PR Compose `29541566656` and PR quality
+  `29541566648`. Both runtime runs executed complete `pnpm verify`; H7 is closed and H8 starts
+  from the report-containing Head after its checks complete.
+- 2026-07-17 H8 implementation: T-047 now starts from published rc.1 migrations 001-006 with
+  admission/task/schedule/terminal/command/observation/outbox/idempotency fixtures, then proves
+  007-012 backfills, idempotence and Recovery -> Dispatcher -> Scheduler continuation. T-048 and
+  T-049 run 17 identical cases per Adapter and schema-guard three scopes: Adapter protocol
+  passed, Runtime Profile partial and resource-specific safety not claimed.
+- 2026-07-17 H8 closure: implementation `e1041a9` passed push runtime `29542809447`, PR runtime
+  `29542810998`, PR Compose `29542811050` and PR quality `29542811006`. Local regression counts
+  are unit 27, contract 4, rc.2 guards 6, integration 59, recovery 8, security 6 and E2E 4; both
+  Adapters passed all 17 expanded cases. H8 closes without claiming real-resource safety or a
+  complete standalone Runtime Profile.
+- 2026-07-17 H9 implementation: release versions and deployment image move to rc.2;
+  `verify:rc2` adds the six regression guards and CI compares Buf directly to the immutable rc.1
+  tag. The expanded isolated-schema capacity gate exposed a real pool-max-one post-commit
+  deadlock in four Task repository paths. All now reuse the checked-out client for visibility;
+  the new lifecycle regression passes and integration grows to 60 tests. Local release evidence
+  passes formatting/lint/type, audit/SBOM/deployment, unit 27, contract 4, guards 6, integration
+  60, recovery 8, security 6, E2E 4, Adapter conformance 17/17 per language, expanded capacity,
+  reproducible image, three-image Compose and Docker-hosted Buf lint/breaking.

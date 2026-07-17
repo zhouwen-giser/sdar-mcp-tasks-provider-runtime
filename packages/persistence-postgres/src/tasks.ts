@@ -6,7 +6,11 @@ import type {
   TaskExecutionTiming,
   TaskRecord,
 } from "../../domain/src/index.js";
-import { isTerminalState, TaskExpiredError } from "../../domain/src/index.js";
+import {
+  isTerminalState,
+  TaskExpiredError,
+  TaskNotFoundOrUnauthorizedError,
+} from "../../domain/src/index.js";
 
 export interface AdmissionIntentInput {
   taskId: string;
@@ -292,10 +296,17 @@ export class TaskRepository {
            argument_hash, external_execution_id, internal_state, mcp_status,
            substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, actual_started_at,
-           invocation_attempt, observation_revision)
+           invocation_attempt, observation_revision, terminal_at, handle_expires_at,
+           last_confirmed_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
                  $16::jsonb,$17,$18,$19,$20::jsonb,$21,$22,$23,
-                 $24,$25,1)`,
+                 $24,$25,1,
+                 CASE WHEN $11 LIKE 'TERMINAL_%' THEN clock_timestamp() ELSE NULL END,
+                 CASE
+                   WHEN $19::bigint IS NULL AND $11 NOT LIKE 'TERMINAL_%' THEN NULL
+                   ELSE clock_timestamp() + (COALESCE($19::bigint,86400000) * interval '1 millisecond')
+                 END,
+                 clock_timestamp())`,
         [
           input.taskId,
           input.providerId,
@@ -324,13 +335,6 @@ export class TaskRepository {
           1,
         ],
       );
-      await initializeTaskRetention(
-        client,
-        input.taskId,
-        input.transition.internalState,
-        input.acceptedAt,
-        input.ttlMs,
-      );
       await insertObservation(client, input.taskId, 1, input.transition, {
         source: "adapter",
         adapterRevision: input.adapterRevision,
@@ -351,7 +355,7 @@ export class TaskRepository {
         [input.taskId],
       );
       await client.query("COMMIT");
-      const task = await this.getById(input.taskId);
+      const task = await selectTaskById(client, input.taskId);
       if (task === null) throw new Error("TASK_NOT_VISIBLE_AFTER_COMMIT");
       return task;
     } catch (error) {
@@ -423,7 +427,7 @@ export class TaskRepository {
         [input.taskId],
       );
       await client.query("COMMIT");
-      const task = await this.getById(input.taskId);
+      const task = await selectTaskById(client, input.taskId);
       if (task === null) throw new Error("SCHEDULED_TASK_NOT_VISIBLE_AFTER_COMMIT");
       return task;
     } catch (error) {
@@ -446,7 +450,7 @@ export class TaskRepository {
       [taskId, authorization.hash, authorization.executionMode, authorization.simulationId],
     );
     const row = result.rows[0];
-    if (row === undefined) throw new Error("TASK_NOT_FOUND");
+    if (row === undefined) throw new TaskNotFoundOrUnauthorizedError();
     const task = fromRow(row);
     if (task.expiredAt !== null || row.handle_expired) {
       throw new TaskExpiredError();
@@ -455,10 +459,7 @@ export class TaskRepository {
   }
 
   async getById(taskId: string): Promise<TaskRecord | null> {
-    const result = await this.pool.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
-      taskId,
-    ]);
-    return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
+    return selectTaskById(this.pool, taskId);
   }
 
   async listAdmissionsForRecovery(limit = 128): Promise<AdmissionIntentRecord[]> {
@@ -950,7 +951,7 @@ export class TaskRepository {
         [taskId, JSON.stringify(adapterResponse)],
       );
       await client.query("COMMIT");
-      const visible = await this.getById(taskId);
+      const visible = await selectTaskById(client, taskId);
       if (visible === null) throw new Error("SCHEDULED_TASK_NOT_VISIBLE_AFTER_COMMIT");
       return visible;
     } catch (error) {
@@ -1205,7 +1206,7 @@ export class TaskRepository {
       }
       await persistStartWindowStop(client, taskId, requestedAt);
       await client.query("COMMIT");
-      const updated = await this.getById(taskId);
+      const updated = await selectTaskById(client, taskId);
       if (updated === null) throw new Error("TASK_NOT_FOUND");
       return updated;
     } catch (error) {
@@ -2252,6 +2253,16 @@ function reasonCodeFromTransition(transition: SnapshotTransition): string | null
 
 function jsonOrNull(value: Record<string, unknown> | null): string | null {
   return value === null ? null : JSON.stringify(value);
+}
+
+async function selectTaskById(
+  queryable: Pool | PoolClient,
+  taskId: string,
+): Promise<TaskRecord | null> {
+  const result = await queryable.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
+    taskId,
+  ]);
+  return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
 }
 
 function fromRow(row: TaskRow): TaskRecord {

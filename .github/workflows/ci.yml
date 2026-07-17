@@ -43,15 +43,10 @@ jobs:
         with:
           version: 1.57.2
       - run: pnpm install --frozen-lockfile
-      - run: pnpm verify
+      - run: pnpm verify:rc2
       - run: buf lint proto
-      - name: Check Protobuf compatibility
-        run: |
-          if git cat-file -e origin/main:proto/buf.yaml 2>/dev/null; then
-            buf breaking proto --against '.git#branch=origin/main,subdir=proto'
-          else
-            echo "No Protobuf baseline on origin/main; lint/generation are the R1 baseline."
-          fi
+      - name: Check Protobuf compatibility against rc.1
+        run: buf breaking proto --against '.git#tag=v1.0.0-rc.1,subdir=proto'
       - if: always()
         uses: actions/upload-artifact@v4
         with:

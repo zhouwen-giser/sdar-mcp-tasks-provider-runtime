@@ -2,9 +2,10 @@ import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { delimiter, resolve } from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
+import Ajv2020 from "ajv/dist/2020.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for conformance");
@@ -13,6 +14,14 @@ const root = process.cwd();
 const temporary = mkdtempSync(resolve(tmpdir(), "sdar-conformance-"));
 const reportsDirectory = resolve(root, "reports/conformance");
 mkdirSync(reportsDirectory, { recursive: true });
+const validateReport = new Ajv2020({
+  strict: true,
+  formats: { "date-time": true },
+}).compile(
+  JSON.parse(
+    readFileSync(resolve(root, "packages/conformance-testkit/report.schema.json"), "utf8"),
+  ),
+);
 
 const { GrpcAdapterGateway } = await import("../dist/packages/adapter-protocol/src/index.js");
 const { runConformance, seedAndVerifyAdapterBinding, verifyAdapterBinding } =
@@ -50,6 +59,7 @@ try {
       endpoint: typescriptEndpoint,
       providerId: "conformance-typescript",
       databaseUrl,
+      restartBindingVerified: true,
     }),
   );
   await shutdownGrpcServer(typescriptServer);
@@ -76,10 +86,25 @@ try {
       endpoint: pythonEndpoint,
       providerId: "conformance-python",
       databaseUrl,
+      restartBindingVerified: true,
     }),
   );
 
   for (const report of reports) {
+    if (!validateReport(report)) {
+      throw new Error(
+        `Invalid ${report.adapterLanguage} conformance report: ${JSON.stringify(validateReport.errors)}`,
+      );
+    }
+    const caseCount = report.groups.reduce((total, group) => total + group.tests.length, 0);
+    if (
+      caseCount < 17 ||
+      report.scopes.adapterProtocol.status !== "passed" ||
+      report.scopes.runtimeProfile.status !== "partial" ||
+      report.scopes.resourceSpecificSafety.status !== "not_claimed"
+    ) {
+      throw new Error(`${report.adapterLanguage} conformance scope/count guard failed`);
+    }
     writeFileSync(
       resolve(reportsDirectory, `${report.adapterLanguage}.json`),
       `${JSON.stringify(report, null, 2)}\n`,
@@ -102,7 +127,7 @@ try {
     );
   }
   process.stdout.write(
-    `P0-P4 conformance PASS (${reports.map((report) => report.adapterLanguage).join(", ")})\n`,
+    `Expanded Adapter conformance PASS; Runtime Profile scope is partial and resource safety is not claimed (${reports.map((report) => report.adapterLanguage).join(", ")})\n`,
   );
 } finally {
   if (typescriptServer) await shutdownGrpcServer(typescriptServer);
@@ -111,14 +136,15 @@ try {
 }
 
 function preparePython(directory) {
-  const python = "python3";
+  const python =
+    process.env.SDAR_CONFORMANCE_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
   const sitePackages = resolve(directory, "site-packages");
   const example = resolve(root, "examples/mock-adapter-python");
   const generated = resolve(example, "generated");
   const protoDirectory = resolve(root, "proto/io/sdar/mcp/tasks/adapter/v1");
   const environment = {
     ...process.env,
-    PYTHONPATH: [sitePackages, process.env.PYTHONPATH].filter(Boolean).join(":"),
+    PYTHONPATH: [sitePackages, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
   };
   execFileSync(
     python,
