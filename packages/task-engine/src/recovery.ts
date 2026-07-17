@@ -7,7 +7,6 @@ import type { TaskEngine } from "./engine.js";
 export interface RecoveryScanResult {
   admissionsRecovered: number;
   tasksReconciled: number;
-  commandsReplayed: number;
   notFound: number;
   deferred: number;
   lockSkipped: number;
@@ -25,7 +24,6 @@ export class RecoveryManager {
     const result: RecoveryScanResult = {
       admissionsRecovered: 0,
       tasksReconciled: 0,
-      commandsReplayed: 0,
       notFound: 0,
       deferred: 0,
       lockSkipped: 0,

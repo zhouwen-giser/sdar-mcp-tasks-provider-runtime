@@ -253,6 +253,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         config.COMMAND_CLAIM_LEASE_MS,
       );
       const outboxCleaner = new OutboxCleaner(taskRepository, {
+        publishedRetentionMs: config.OUTBOX_PUBLISHED_RETENTION_MS,
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_outbox_cleaner_total", { outcome }, amount),
       });

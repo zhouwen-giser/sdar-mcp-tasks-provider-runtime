@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -28,6 +29,7 @@ import {
 } from "../../packages/persistence-postgres/src/index.js";
 import {
   DurableCommandDispatcher,
+  OutboxCleaner,
   DurableScheduler,
   TaskEngine,
   TtlCleaner,
@@ -1047,7 +1049,14 @@ describe("durable task lifecycle", () => {
       "UNKNOWN_INPUT_REQUEST_KEY",
     );
     expect(controlSideEffectCount).toBe(before);
-    await engine.updateTask(taskId, { approval: true }, authorization);
+    const firstUpdate = await engine.updateTask(taskId, { approval: true }, authorization);
+    expectCommandReceipt(firstUpdate, {
+      commandType: "UPDATE",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     await engine.updateTask(taskId, { approval: true }, authorization);
     expect(controlSideEffectCount - before).toBe(1);
     const completed = await engine.getTask(taskId, authorization);
@@ -1055,6 +1064,495 @@ describe("durable task lifecycle", () => {
     await expect(engine.updateTask(taskId, { approval: false }, authorization)).rejects.toThrow(
       "INPUT_ANSWER_CONFLICT",
     );
+  });
+
+  it("first_update_returns_pending_receipt_without_error", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-first-update-receipt", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    const firstUpdate = await engine.updateTask(taskId, { approval: true }, authorization);
+    expectCommandReceipt(firstUpdate, {
+      commandSequence: 1,
+      commandType: "UPDATE",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("duplicate_pending_update_returns_command_in_progress", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-pending-duplicate", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await expect(engine.updateTask(taskId, { approval: true }, authorization)).rejects.toMatchObject({
+      commandSequence: 1,
+      commandType: "UPDATE",
+      commandState: "PENDING",
+      retryAfterMs: expect.any(Number),
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("first_pause_returns_pending_receipt_without_error", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-first-pause-receipt" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    const firstPause = await engine.controlTask(taskId, "PAUSE", authorization);
+    expectCommandReceipt(firstPause, {
+      commandSequence: 1,
+      commandType: "PAUSE",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+    expect(await commandAttempts(taskId, "PAUSE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("duplicate_claimed_pause_returns_command_in_progress", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-pause-claimed-duplicate" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.controlTask(taskId, "PAUSE", authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='CLAIMED', claim_owner='runtime-1', claim_until=clock_timestamp()+interval '30s'
+       WHERE task_id=$1 AND command_type='PAUSE' AND command_sequence=1`,
+      [taskId],
+    );
+    await expect(engine.controlTask(taskId, "PAUSE", authorization)).rejects.toMatchObject({
+      reasonCode: "COMMAND_IN_PROGRESS",
+      commandSequence: 1,
+      commandType: "PAUSE",
+      commandState: "CLAIMED",
+      retryAfterMs: expect.any(Number),
+    });
+    expect(await commandAttempts(taskId, "PAUSE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("first_resume_returns_pending_receipt_without_error", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-first-resume-receipt" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    const firstResume = await engine.controlTask(taskId, "RESUME", authorization);
+    expectCommandReceipt(firstResume, {
+      commandSequence: 1,
+      commandType: "RESUME",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+    expect(await commandAttempts(taskId, "RESUME")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("duplicate_retry_wait_resume_returns_command_in_progress", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-resume-retry-wait-duplicate" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.controlTask(taskId, "RESUME", authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='RETRY_WAIT', next_attempt_at=clock_timestamp()+interval '1 second',
+             claim_owner=NULL, claim_until=NULL
+       WHERE task_id=$1 AND command_type='RESUME' AND command_sequence=1`,
+      [taskId],
+    );
+    await expect(engine.controlTask(taskId, "RESUME", authorization)).rejects.toMatchObject({
+      reasonCode: "COMMAND_IN_PROGRESS",
+      commandSequence: 1,
+      commandType: "RESUME",
+      commandState: "RETRY_WAIT",
+      retryAfterMs: expect.any(Number),
+    });
+    expect(await commandAttempts(taskId, "RESUME")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("acknowledged_duplicate_returns_original_success", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-acknowledged", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='ACKNOWLEDGED',
+             adapter_ack=$2::jsonb,
+             last_error_code=NULL,
+             last_error_message=NULL,
+             claim_owner=NULL,
+             claim_until=NULL
+       WHERE task_id=$1 AND command_type='UPDATE' AND command_sequence=1`,
+      [taskId, JSON.stringify({ reasonCode: "INPUT_ACCEPTED", message: "Input accepted." })],
+    );
+
+    const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
+    expectCommandReceipt(duplicate, {
+      commandSequence: 1,
+      commandType: "UPDATE",
+      commandState: "ACKNOWLEDGED",
+      duplicate: true,
+      durablyAccepted: true,
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("rejected_duplicate_returns_original_rejection", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-rejected", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='REJECTED',
+             adapter_ack=$2::jsonb,
+             last_error_code='INPUT_REJECTED',
+             last_error_message='Input rejected.',
+             claim_owner=NULL,
+             claim_until=NULL
+       WHERE task_id=$1 AND command_type='UPDATE' AND command_sequence=1`,
+      [taskId, JSON.stringify({ reasonCode: "INPUT_REJECTED", message: "Input rejected." })],
+    );
+
+    const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
+    expect(duplicate).toMatchObject({
+      isError: true,
+      structuredContent: {
+        outcome: "command_rejected",
+        reasonCode: "INPUT_REJECTED",
+      },
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("exhausted_duplicate_returns_original_failure", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-exhausted", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='EXHAUSTED',
+             adapter_ack=$2::jsonb,
+             last_error_code='INPUT_EXHAUSTED',
+             last_error_message='Input failed after retries.',
+             claim_owner=NULL,
+             claim_until=NULL
+       WHERE task_id=$1 AND command_type='UPDATE' AND command_sequence=1`,
+      [taskId, JSON.stringify({ reasonCode: "INPUT_EXHAUSTED", message: "Input failed after retries." })],
+    );
+
+    const duplicate = await engine.updateTask(taskId, { approval: true }, authorization);
+    expect(duplicate).toMatchObject({
+      isError: true,
+      structuredContent: {
+        outcome: "command_exhausted",
+        reasonCode: "INPUT_EXHAUSTED",
+      },
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("outbox_retention_defaults_to_24_hours", async () => {
+    const repository = new TaskRepository(pool);
+    const cleaner = new OutboxCleaner(repository);
+    const now = new Date("2026-07-17T00:00:00Z");
+    const recent = randomUUID();
+    const stale = randomUUID();
+    const aggregate = randomUUID();
+    await pool.query(
+      `INSERT INTO outbox_event
+         (event_id, event_key, aggregate_id, event_type, payload, published_at)
+       VALUES
+         ($1,$1,$3,'task.completed',$4::jsonb,$5::timestamptz),
+         ($2,$2,$3,'task.completed',$6::jsonb,$7::timestamptz)`,
+      [
+        recent,
+        stale,
+        aggregate,
+        JSON.stringify({ type: "recent" }),
+        new Date(now.getTime() - 1_000 * 60 * 60 * 12),
+        JSON.stringify({ type: "stale" }),
+        new Date(now.getTime() - 24 * 60 * 60 * 1000 - 1),
+      ],
+    );
+
+    const result = await cleaner.tick(now);
+    expect(result.removed).toBe(1);
+    const remaining = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM outbox_event WHERE event_id = ANY($1::uuid[])",
+      [[recent, stale]],
+    );
+    expect(remaining.rows[0]).toMatchObject({ count: "1" });
+  });
+
+  it("outbox_retention_config_is_passed_to_cleaner", async () => {
+    const repository = new TaskRepository(pool);
+    const cleaner = new OutboxCleaner(repository, { publishedRetentionMs: 5000 });
+    const now = new Date("2026-07-17T00:00:00Z");
+    const aggregate = randomUUID();
+    const retained = randomUUID();
+    const deleted = randomUUID();
+    await pool.query(
+      `INSERT INTO outbox_event
+         (event_id, event_key, aggregate_id, event_type, payload, published_at)
+       VALUES
+         ($1,$1,$3,'task.completed',$4::jsonb,$5::timestamptz),
+         ($2,$2,$3,'task.completed',$6::jsonb,$7::timestamptz)`,
+      [
+        retained,
+        deleted,
+        aggregate,
+        JSON.stringify({ type: "retained" }),
+        new Date(now.getTime() - 4_000),
+        JSON.stringify({ type: "deleted" }),
+        new Date(now.getTime() - 6_000),
+      ],
+    );
+    const result = await cleaner.tick(now);
+    expect(result.removed).toBe(1);
+    const remaining = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM outbox_event WHERE event_id = ANY($1::uuid[])",
+      [[retained, deleted]],
+    );
+    expect(remaining.rows[0]).toMatchObject({ count: "1" });
+  });
+
+  it("published_outbox_not_deleted_before_configured_retention", async () => {
+    const repository = new TaskRepository(pool);
+    const cleaner = new OutboxCleaner(repository, { publishedRetentionMs: 5_000 });
+    const now = new Date("2026-07-17T00:00:00Z");
+    const aggregate = randomUUID();
+    const eventId = randomUUID();
+    await pool.query(
+      `INSERT INTO outbox_event
+         (event_id, event_key, aggregate_id, event_type, payload, published_at)
+       VALUES
+         ($1,$1,$2,'task.completed',$3::jsonb,$4::timestamptz)`,
+      [
+        eventId,
+        aggregate,
+        JSON.stringify({ type: "still-valid" }),
+        new Date(now.getTime() - 4_000),
+      ],
+    );
+    const result = await cleaner.tick(now);
+    expect(result.removed).toBe(0);
+    const remaining = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM outbox_event WHERE event_id=$1::uuid",
+      [eventId],
+    );
+    expect(remaining.rows[0]).toMatchObject({ count: "1" });
+  });
+
+  it("published_outbox_deleted_after_configured_retention", async () => {
+    const repository = new TaskRepository(pool);
+    const cleaner = new OutboxCleaner(repository, { publishedRetentionMs: 2_000 });
+    const now = new Date("2026-07-17T00:00:00Z");
+    const aggregate = randomUUID();
+    const eventId = randomUUID();
+    await pool.query(
+      `INSERT INTO outbox_event
+         (event_id, event_key, aggregate_id, event_type, payload, published_at)
+       VALUES
+         ($1,$1,$2,'task.completed',$3::jsonb,$4::timestamptz)`,
+      [
+        eventId,
+        aggregate,
+        JSON.stringify({ type: "expired" }),
+        new Date(now.getTime() - 3_000),
+      ],
+    );
+    const result = await cleaner.tick(now);
+    expect(result.removed).toBe(1);
+    const remaining = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM outbox_event WHERE event_id=$1::uuid",
+      [eventId],
+    );
+    expect(remaining.rows[0]).toMatchObject({ count: "0" });
+  });
+
+  it("three_runtime_replicas_create_one_command", async () => {
+    const commandTypes = ["UPDATE", "PAUSE", "RESUME"] as const;
+    for (const commandType of commandTypes) {
+      const created = await engine.callOperation(
+        requiredOperation("durable_task"),
+        {
+          resourceId: `resource-replicas-command-${commandType.toLowerCase()}`,
+          ...(commandType === "UPDATE" ? { scenario: "input_required" } : {}),
+        },
+        authorization,
+      );
+      if (created.kind !== "task") throw new Error(`Expected ${commandType} task`);
+      const taskId = String(created.task.taskId);
+      const replicas = [
+        engine,
+        new TaskEngine(
+          engine.manifest,
+          engine.operationSnapshotIds,
+          gateway,
+          new TaskRepository(pool),
+          new IdempotencyRepository(pool),
+        ),
+        new TaskEngine(
+          engine.manifest,
+          engine.operationSnapshotIds,
+          gateway,
+          new TaskRepository(pool),
+          new IdempotencyRepository(pool),
+        ),
+      ];
+      if (commandType === "UPDATE") {
+        await Promise.all([
+          replicas[0].updateTask(taskId, { approval: true }, authorization),
+          replicas[1].updateTask(taskId, { approval: true }, authorization),
+          replicas[2].updateTask(taskId, { approval: true }, authorization),
+        ]);
+      } else {
+        await Promise.all([
+          replicas[0].controlTask(taskId, commandType, authorization),
+          replicas[1].controlTask(taskId, commandType, authorization),
+          replicas[2].controlTask(taskId, commandType, authorization),
+        ]);
+      }
+      expect(await commandAttempts(taskId, commandType)).toBe("1");
+    }
+  });
+
+  it("three_runtime_replicas_create_one_adapter_side_effect", async () => {
+    const commandTypes = ["UPDATE", "PAUSE", "RESUME"] as const;
+
+    for (const commandType of commandTypes) {
+      const created = await engine.callOperation(
+        requiredOperation("durable_task"),
+        {
+          resourceId: `resource-replicas-side-effect-${commandType.toLowerCase()}`,
+          ...(commandType === "UPDATE" ? { scenario: "input_required" } : {}),
+        },
+        authorization,
+      );
+      if (created.kind !== "task") throw new Error(`Expected ${commandType} task`);
+      const taskId = String(created.task.taskId);
+      const replicas = [
+        engine,
+        new TaskEngine(
+          engine.manifest,
+          engine.operationSnapshotIds,
+          gateway,
+          new TaskRepository(pool),
+          new IdempotencyRepository(pool),
+        ),
+        new TaskEngine(
+          engine.manifest,
+          engine.operationSnapshotIds,
+          gateway,
+          new TaskRepository(pool),
+          new IdempotencyRepository(pool),
+        ),
+      ];
+
+      const before = controlSideEffectCount;
+      if (commandType === "UPDATE") {
+        await Promise.all([
+          replicas[0].updateTask(taskId, { approval: true }, authorization),
+          replicas[1].updateTask(taskId, { approval: true }, authorization),
+          replicas[2].updateTask(taskId, { approval: true }, authorization),
+        ]);
+      } else {
+        await Promise.all([
+          replicas[0].controlTask(taskId, commandType, authorization),
+          replicas[1].controlTask(taskId, commandType, authorization),
+          replicas[2].controlTask(taskId, commandType, authorization),
+        ]);
+      }
+
+      expect(await commandAttempts(taskId, commandType)).toBe("1");
+
+      await new DurableCommandDispatcher(
+        gateway,
+        new TaskRepository(pool),
+        undefined,
+        `replica-${commandType.toLowerCase()}-dispatcher`,
+      ).tick();
+
+      if (commandType === "UPDATE") {
+        await Promise.all([
+          replicas[0].updateTask(taskId, { approval: true }, authorization),
+          replicas[1].updateTask(taskId, { approval: true }, authorization),
+          replicas[2].updateTask(taskId, { approval: true }, authorization),
+        ]);
+      } else {
+        await Promise.all([
+          replicas[0].controlTask(taskId, commandType, authorization),
+          replicas[1].controlTask(taskId, commandType, authorization),
+          replicas[2].controlTask(taskId, commandType, authorization),
+        ]);
+      }
+      expect(controlSideEffectCount - before).toBe(1);
+      expect(await commandAttempts(taskId, commandType)).toBe("1");
+    }
   });
 
   it("supports multiple durable input_required rounds with stable unique keys", async () => {
@@ -1952,4 +2450,37 @@ function rejectAfter(milliseconds: number, message: string): Promise<never> {
     const timer = setTimeout(() => reject(new Error(message)), milliseconds);
     timer.unref();
   });
+}
+
+function expectCommandReceipt(
+  response: Record<string, unknown>,
+  expected: {
+    commandSequence?: number;
+    commandType: "UPDATE" | "PAUSE" | "RESUME";
+    commandState: string;
+    durablyAccepted: boolean;
+    duplicate: boolean;
+  },
+) {
+  const profile =
+    (response._meta as Record<string, Record<string, unknown>> | undefined)?.[
+      "io.sdar/taskExecution"
+    ];
+  const receipt = profile?.receipt as Record<string, unknown> | undefined;
+  if (receipt === undefined) throw new Error("Expected command receipt");
+  if (expected.commandSequence !== undefined)
+    expect(receipt.commandSequence).toBe(expected.commandSequence);
+  expect(receipt.commandType).toBe(expected.commandType);
+  expect(receipt.commandState).toBe(expected.commandState);
+  expect(receipt.duplicate).toBe(expected.duplicate);
+  expect(receipt.durablyAccepted).toBe(expected.durablyAccepted);
+  expect(typeof receipt.acceptedAt).toBe("string");
+}
+
+async function commandAttempts(taskId: string, commandType: "UPDATE" | "PAUSE" | "RESUME") {
+  const result = await pool.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM task_command WHERE task_id=$1 AND command_type=$2`,
+    [taskId, commandType],
+  );
+  return result.rows[0]?.count ?? "0";
 }

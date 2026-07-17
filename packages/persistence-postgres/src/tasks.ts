@@ -59,14 +59,21 @@ export interface PendingCommandRecord {
   claimOwner: string | null;
   stopReason: string | null;
   adapterAck: Record<string, unknown> | null;
+  nextAttemptAt: Date | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
   claimUntil: Date | null;
 }
 
 export interface CommandResolution {
   sequence: number;
+  disposition: "created" | "existing";
   duplicate: boolean;
   state: PendingCommandRecord["state"];
   adapterAck: Record<string, unknown> | null;
+  lastErrorCode: string | null;
+  lastErrorMessage: string | null;
+  nextAttemptAt: Date | null;
   claimUntil: Date | null;
   claimOwner: string | null;
 }
@@ -81,6 +88,9 @@ interface PendingCommandRecordRow {
   claim_owner: string | null;
   stop_reason: string | null;
   adapter_ack: Record<string, unknown> | null;
+  next_attempt_at?: Date | null;
+  last_error_code?: string | null;
+  last_error_message?: string | null;
   claim_until: Date | null;
 }
 
@@ -95,6 +105,9 @@ function mapPendingCommandRecord(row: PendingCommandRecordRow): PendingCommandRe
     claimOwner: row.claim_owner,
     stopReason: row.stop_reason,
     adapterAck: row.adapter_ack ?? null,
+    nextAttemptAt: row.next_attempt_at ?? null,
+    lastErrorCode: row.last_error_code ?? null,
+    lastErrorMessage: row.last_error_message ?? null,
     claimUntil: row.claim_until,
   };
 }
@@ -104,6 +117,9 @@ function mapCommandResolution(row: PendingCommandRecordRow): Omit<CommandResolut
     sequence: Number(row.command_sequence),
     state: row.state,
     adapterAck: row.adapter_ack ?? null,
+    lastErrorCode: row.last_error_code ?? null,
+    lastErrorMessage: row.last_error_message ?? null,
+    nextAttemptAt: row.next_attempt_at ?? null,
     claimOwner: row.claim_owner,
     claimUntil: row.claim_until,
   };
@@ -1494,15 +1510,16 @@ export class TaskRepository {
       if (previous === undefined) throw new Error("TASK_NOT_FOUND");
       const active = await client.query<PendingCommandRecordRow>(
         `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
-                claim_owner, stop_reason, adapter_ack, claim_until
-         FROM task_command
-         WHERE task_id=$1 AND state IN ('PENDING','CLAIMED','RETRY_WAIT')
-         ORDER BY command_sequence LIMIT 1`,
+                claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                last_error_message, claim_until
+                 FROM task_command
+                 WHERE task_id=$1 AND state IN ('PENDING','CLAIMED','RETRY_WAIT')
+                 ORDER BY command_sequence LIMIT 1`,
         [taskId],
       );
       if (active.rows[0] !== undefined) {
         await client.query("COMMIT");
-        return { ...mapCommandResolution(active.rows[0]), duplicate: true };
+        return { ...mapCommandResolution(active.rows[0]), duplicate: true, disposition: "existing" };
       }
 
       const existing = await client.query<PendingCommandRecordRow>(
@@ -1516,14 +1533,15 @@ export class TaskRepository {
         const commandSequence = Number(existing.rows[0].command_sequence);
         const command = await client.query<PendingCommandRecordRow>(
           `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
-                  claim_owner, stop_reason, adapter_ack, claim_until
+                  claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                  last_error_message, claim_until
            FROM task_command WHERE task_id=$1 AND command_sequence=$2`,
           [taskId, commandSequence],
         );
         const row = command.rows[0];
         await client.query("COMMIT");
         if (row === undefined) throw new Error("CANCEL_COMMAND_NOT_VISIBLE");
-        return { ...mapCommandResolution(row), duplicate: true };
+        return { ...mapCommandResolution(row), duplicate: true, disposition: "existing" };
       }
       if (isTerminalState(previous.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
@@ -1590,7 +1608,11 @@ export class TaskRepository {
         sequence: Number(sequence),
         duplicate: false,
         state: "PENDING",
+        disposition: "created",
         adapterAck: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        nextAttemptAt: null,
         claimOwner: null,
         claimUntil: null,
       };
@@ -1621,7 +1643,8 @@ export class TaskRepository {
 
       const active = await client.query<PendingCommandRecordRow>(
         `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
-                claim_owner, stop_reason, adapter_ack, claim_until
+                claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                last_error_message, claim_until
          FROM task_command
          WHERE task_id=$1
            AND state IN ('PENDING','CLAIMED','RETRY_WAIT')
@@ -1631,7 +1654,7 @@ export class TaskRepository {
       );
       if (active.rows[0] !== undefined) {
         await client.query("COMMIT");
-        return { ...mapCommandResolution(active.rows[0]), duplicate: true };
+        return { ...mapCommandResolution(active.rows[0]), duplicate: true, disposition: "existing" };
       }
 
       const existing = await client.query<{ command_sequence: string }>(
@@ -1642,7 +1665,8 @@ export class TaskRepository {
       if (existing.rows[0] !== undefined) {
         const row = await client.query<PendingCommandRecordRow>(
           `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
-                  claim_owner, stop_reason, adapter_ack, claim_until
+                  claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                  last_error_message, claim_until
            FROM task_command
            WHERE task_id=$1 AND command_type=$2 AND request_hash=$3
            ORDER BY command_sequence DESC LIMIT 1`,
@@ -1651,7 +1675,7 @@ export class TaskRepository {
         const record = row.rows[0];
         await client.query("COMMIT");
         if (record === undefined) throw new Error("COMMAND_NOT_VISIBLE");
-        return { ...mapCommandResolution(record), duplicate: true };
+        return { ...mapCommandResolution(record), duplicate: true, disposition: "existing" };
       }
       const updated = await client.query<{ next_command_sequence: string }>(
         `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
@@ -1688,7 +1712,11 @@ export class TaskRepository {
         sequence: Number(sequence),
         duplicate: false,
         state: "PENDING",
+        disposition: "created",
         adapterAck: null,
+        lastErrorCode: null,
+        lastErrorMessage: null,
+        nextAttemptAt: null,
         claimOwner: null,
         claimUntil: null,
       };

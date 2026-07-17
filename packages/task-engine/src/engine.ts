@@ -37,6 +37,7 @@ import type { ValidatedManifest, ValidatedOperation } from "../../operation-regi
 import type {
   AdmissionIntentRecord,
   IdempotencyRepository,
+  CommandResolution,
   PendingCommandRecord,
   ResolvedTaskOperation,
   StoredInvocation,
@@ -647,87 +648,6 @@ export class TaskEngine {
     return "found";
   }
 
-  async replayPendingCommand(
-    task: TaskRecord,
-    command: PendingCommandRecord,
-    resolvedOperation?: ValidatedOperation,
-  ): Promise<void> {
-    const operation =
-      resolvedOperation ?? (await this.loadOperationSnapshot(task.operationSnapshotId));
-    const authorization = {
-      hash: task.authorizationContextHash,
-      executionMode: task.executionMode,
-      simulationId: task.simulationId,
-    };
-    const identity = {
-      taskId: task.taskId,
-      operationName: operation.name,
-      argumentHash: task.argumentHash,
-      commandSequence: command.commandSequence,
-    };
-    let ack;
-    let completedAnswers: { key: string; hash: string; value: unknown }[] = [];
-    if (command.commandType === "CANCEL") {
-      if (!operation.capabilities.cancel) {
-        throw new CapabilityNotSupportedError("CANCEL_NOT_SUPPORTED");
-      }
-      ack = await this.gateway.requestCancel(
-        task.taskId,
-        operation.name,
-        task.argumentHash,
-        task.stopReason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "USER_REQUESTED",
-        command.commandSequence,
-        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
-      );
-    } else if (command.commandType === "UPDATE") {
-      if (!operation.capabilities.inputRequired) {
-        throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
-      }
-      const answers = command.payload.answers;
-      if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
-        throw new Error("INVALID_RECOVERY_UPDATE_PAYLOAD");
-      }
-      completedAnswers = Object.entries(answers as Record<string, unknown>).map(([key, value]) => ({
-        key,
-        value,
-        hash: createHash("sha256").update(canonicalize(value)).digest("hex"),
-      }));
-      ack = await this.gateway.updateExecution(
-        identity,
-        completedAnswers.map((answer) => ({
-          key: answer.key,
-          value: answer.value,
-          answerHash: answer.hash,
-        })),
-        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
-      );
-    } else if (command.commandType === "PAUSE") {
-      if (!operation.capabilities.pauseResume) {
-        throw new CapabilityNotSupportedError("PAUSE_RESUME_NOT_SUPPORTED");
-      }
-      ack = await this.gateway.pauseExecution(identity, {
-        ...executionOptions(authorization),
-        externalExecutionId: task.externalExecutionId,
-      });
-    } else {
-      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
-      ack = await this.gateway.resumeExecution(identity, {
-        ...executionOptions(authorization),
-        externalExecutionId: task.externalExecutionId,
-      });
-    }
-    await this.#validateTaskAck(task, operation.name, command.commandSequence, ack);
-    await this.#repository.acknowledgeCommand(
-      task.taskId,
-      command.commandSequence,
-      ack.accepted,
-      ack as unknown as Record<string, unknown>,
-    );
-    if (ack.accepted && completedAnswers.length > 0) {
-      await this.#repository.completeInputAnswers(task.taskId, completedAnswers);
-    }
-  }
-
   async getTaskResult(
     taskId: string,
     authorization: AuthorizationContext,
@@ -798,7 +718,9 @@ export class TaskEngine {
     const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
       answers,
     });
-    this.#rejectCommandInProgress(command, "UPDATE");
+    if (command.disposition === "existing") {
+      return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
+    }
     return this.#taskWithCommandReceipt(taskId, authorization, "UPDATE", command);
   }
 
@@ -814,7 +736,9 @@ export class TaskEngine {
     }
     const requestHash = createHash("sha256").update(commandType).digest("hex");
     const command = await this.#repository.beginCommand(taskId, commandType, requestHash, {});
-    this.#rejectCommandInProgress(command, commandType);
+    if (command.disposition === "existing") {
+      return this.#resolveExistingCommand(taskId, authorization, commandType, command);
+    }
     return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
   }
 
@@ -822,12 +746,7 @@ export class TaskEngine {
     taskId: string,
     authorization: AuthorizationContext,
     commandType: "UPDATE" | "PAUSE" | "RESUME",
-    command: {
-      sequence: number;
-      state: PendingCommandRecord["state"];
-      adapterAck: Record<string, unknown> | null;
-      claimUntil: Date | null;
-    },
+    command: CommandResolution,
   ): Promise<Record<string, unknown>> {
     const [task, inputRequests, observations] = await Promise.all([
       this.#repository.getAuthorized(taskId, authorization),
@@ -838,10 +757,11 @@ export class TaskEngine {
     const profile = taskResult._meta?.["io.sdar/taskExecution"] as
       | Record<string, unknown>
       | undefined;
+    const acceptedAt = this.clock.now().toISOString();
     const retryAfterMs =
-      command.claimUntil === null
+      command.nextAttemptAt === null
         ? undefined
-        : Math.max(0, command.claimUntil.getTime() - this.clock.now().getTime());
+        : Math.max(0, command.nextAttemptAt.getTime() - this.clock.now().getTime());
     taskResult._meta = {
       "io.sdar/taskExecution": {
         ...(profile ?? {}),
@@ -849,6 +769,9 @@ export class TaskEngine {
           commandType,
           commandSequence: command.sequence,
           commandState: command.state,
+          durablyAccepted: true,
+          duplicate: command.duplicate,
+          acceptedAt,
           ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
           ...(command.adapterAck === null ? {} : { adapterAck: command.adapterAck }),
         },
@@ -857,31 +780,101 @@ export class TaskEngine {
     return taskResult;
   }
 
-  #rejectCommandInProgress(
+  async #resolveExistingCommand(
+    taskId: string,
+    authorization: AuthorizationContext,
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+    command: CommandResolution,
+  ): Promise<Record<string, unknown>> {
+    if (command.state === "PENDING" || command.state === "CLAIMED" || command.state === "RETRY_WAIT") {
+      this.#commandInProgressError(command, commandType);
+    }
+    if (command.state === "ACKNOWLEDGED") {
+      return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
+    }
+    if (command.state === "REJECTED") {
+      return this.#commandRejectionResult(commandType, command);
+    }
+    if (command.state === "EXHAUSTED") {
+      return this.#commandFailureResult(commandType, command);
+    }
+    return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
+  }
+
+  #commandInProgressError(
     command: {
       sequence: number;
       state: PendingCommandRecord["state"];
+      nextAttemptAt: Date | null;
       claimUntil: Date | null;
     },
     commandType: "UPDATE" | "PAUSE" | "RESUME",
-  ): void {
+  ): never {
     if (
       command.state !== "PENDING" &&
       command.state !== "CLAIMED" &&
       command.state !== "RETRY_WAIT"
     ) {
-      return;
+      throw new Error("COMMAND_NOT_IN_PROGRESS");
     }
-    const retryAfterMs =
-      command.claimUntil === null
-        ? undefined
-        : Math.max(0, command.claimUntil.getTime() - this.clock.now().getTime());
+    const retryAfterMs = this.#commandRetryAfterMs(command.nextAttemptAt ?? command.claimUntil);
     throw new CommandInProgressError({
       commandSequence: command.sequence,
       commandType,
       commandState: command.state,
       retryAfterMs,
     });
+  }
+
+  #commandRetryAfterMs(nextAttemptAt: Date | null): number {
+    return nextAttemptAt === null ? 0 : Math.max(0, nextAttemptAt.getTime() - this.clock.now().getTime());
+  }
+
+  #commandRejectionResult(
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+    command: CommandResolution,
+  ): Record<string, unknown> {
+    return {
+      content: [
+        {
+          type: "text",
+          text: command.lastErrorMessage ?? `${commandType} command was rejected.`,
+        },
+      ],
+      isError: true,
+      structuredContent: {
+        outcome: "command_rejected",
+        reasonCode: command.lastErrorCode ?? "COMMAND_REJECTED",
+        commandSequence: command.sequence,
+        commandType,
+        commandState: command.state,
+        message: command.lastErrorMessage ?? `${commandType} command was rejected.`,
+        ...(command.adapterAck === null ? {} : { adapterAck: command.adapterAck }),
+      },
+    };
+  }
+
+  #commandFailureResult(
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+    command: CommandResolution,
+  ): Record<string, unknown> {
+    return {
+      content: [
+        {
+          type: "text",
+          text: command.lastErrorMessage ?? `${commandType} command failed permanently.`,
+        },
+      ],
+      isError: true,
+      structuredContent: {
+        outcome: "command_exhausted",
+        reasonCode: command.lastErrorCode ?? "COMMAND_EXHAUSTED",
+        commandSequence: command.sequence,
+        commandType,
+        commandState: command.state,
+        message: command.lastErrorMessage ?? `${commandType} command failed permanently.`,
+      },
+    };
   }
 }
 
