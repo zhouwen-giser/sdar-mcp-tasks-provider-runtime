@@ -1871,6 +1871,113 @@ export class TaskRepository {
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
   }
 
+  async acknowledgeUpdateAndCompleteInputAnswers(
+    command: PendingCommandRecord,
+    ack: Record<string, unknown>,
+    answers: { key: string; answerHash: string; value: unknown }[],
+  ): Promise<"acknowledged" | "task_terminal" | "superseded_by_safe_stop"> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const claimed = await client.query<PendingCommandRecordRow>(
+        `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
+                claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                last_error_message, claim_until
+         FROM task_command
+         WHERE task_id=$1 AND command_sequence=$2 AND command_type='UPDATE'
+           AND state='CLAIMED' AND claim_owner=$3
+         FOR UPDATE`,
+        [command.taskId, command.commandSequence, command.claimOwner],
+      );
+      if (claimed.rows[0] === undefined) throw new Error("COMMAND_CLAIM_LOST");
+
+      const lockedTask = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new Error("TASK_NOT_FOUND");
+
+      const exhaust = async (code: "TASK_TERMINAL" | "SUPERSEDED_BY_SAFE_STOP") => {
+        const message =
+          code === "TASK_TERMINAL"
+            ? "Task transitioned to terminal while command was in progress."
+            : "Safe stop superseded the claimed command.";
+        const result = await client.query(
+          `UPDATE task_command
+             SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+                 next_attempt_at=clock_timestamp(), last_error_code=$4,
+                 last_error_message=$5, updated_at=clock_timestamp()
+           WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+          [command.taskId, command.commandSequence, command.claimOwner, code, message],
+        );
+        if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      };
+
+      if (isTerminalState(task.internal_state)) {
+        await exhaust("TASK_TERMINAL");
+        await client.query("COMMIT");
+        return "task_terminal";
+      }
+      if (
+        task.cancel_requested ||
+        task.stop_reason !== null ||
+        task.internal_state === "STOPPING"
+      ) {
+        await exhaust("SUPERSEDED_BY_SAFE_STOP");
+        await client.query("COMMIT");
+        return "superseded_by_safe_stop";
+      }
+
+      for (const answer of answers) {
+        const result = await client.query(
+          `UPDATE task_input_request
+             SET status='ANSWERED', answer_hash=$3, answer=$4::jsonb,
+                 answered_at=clock_timestamp()
+           WHERE task_id=$1 AND request_key=$2 AND status='OPEN'`,
+          [command.taskId, answer.key, answer.answerHash, JSON.stringify(answer.value)],
+        );
+        if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
+      }
+
+      const keys = answers.map((answer) => answer.key).sort();
+      await transitionTask(client, {
+        taskId: command.taskId,
+        expectedVersion: Number(task.version),
+        update: {},
+        observation: {
+          type: "task.input_answered",
+          occurredAt: new Date(),
+          reasonCode: "INPUT_ANSWERED",
+          message: "Task input was answered.",
+          substate: task.substate,
+          source: "runtime",
+          payload: { keys },
+        },
+        outboxType: "task.input_answered",
+        eventKey: `${command.taskId}:command:${String(command.commandSequence)}:input-answered`,
+        outboxPayload: { keys },
+      });
+
+      const acknowledged = await client.query(
+        `UPDATE task_command
+           SET state='ACKNOWLEDGED', adapter_ack=$4::jsonb, claim_owner=NULL,
+               claim_until=NULL, last_error_code=NULL, last_error_message=NULL,
+               updated_at=clock_timestamp()
+         WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+        [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
+      );
+      if (acknowledged.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await client.query("COMMIT");
+      return "acknowledged";
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async rejectUserCancel(
     command: PendingCommandRecord,
     adapterRevision: number,
@@ -2014,58 +2121,6 @@ export class TaskRepository {
       );
       await client.query("COMMIT");
       return fromRow(applied.row);
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async completeInputAnswers(
-    taskId: string,
-    answers: { key: string; answerHash: string; value: unknown }[],
-  ): Promise<void> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      for (const answer of answers) {
-        const result = await client.query(
-          `UPDATE task_input_request SET status='ANSWERED', answer_hash=$3,
-           answer=$4::jsonb, answered_at=clock_timestamp()
-           WHERE task_id=$1 AND request_key=$2 AND status='OPEN'`,
-          [taskId, answer.key, answer.answerHash, JSON.stringify(answer.value)],
-        );
-        if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
-      }
-      const task = await client.query<TaskRow>(
-        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
-        [taskId],
-      );
-      const row = task.rows[0];
-      if (row === undefined) throw new Error("TASK_NOT_FOUND");
-      const keys = answers.map((answer) => answer.key).sort();
-      await transitionTask(client, {
-        taskId,
-        expectedVersion: Number(row.version),
-        update: {},
-        observation: {
-          type: "task.input_answered",
-          occurredAt: new Date(),
-          reasonCode: "INPUT_ANSWERED",
-          message: "Task input was answered.",
-          substate: row.substate,
-          source: "runtime",
-          payload: { keys },
-        },
-        outboxType: "task.input_answered",
-        eventKey: `${taskId}:input-answered:${answers
-          .map((answer) => answer.answerHash)
-          .sort()
-          .join(":")}`,
-        outboxPayload: { keys },
-      });
-      await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;

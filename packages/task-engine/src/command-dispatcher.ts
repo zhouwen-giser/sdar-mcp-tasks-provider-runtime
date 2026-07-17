@@ -298,12 +298,12 @@ export class DurableCommandDispatcher {
         );
         return "rejected";
       }
-      await this.repository.acknowledgeClaimedCommand(
+      const result = await this.repository.acknowledgeUpdateAndCompleteInputAnswers(
         command,
         ack as unknown as Record<string, unknown>,
+        answers,
       );
-      await this.repository.completeInputAnswers(task.taskId, answers);
-      return "acknowledged";
+      return result === "acknowledged" ? "acknowledged" : "exhausted";
     } catch (error) {
       if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
         return "exhausted";

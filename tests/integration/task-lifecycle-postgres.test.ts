@@ -3724,9 +3724,7 @@ describe("durable task lifecycle", () => {
       (await repository.claimDueCommands(due, "normal-due")).filter(
         (command) => command.taskId === taskId,
       ),
-    ).toEqual([
-      expect.objectContaining({ taskId, commandType: "RESUME" }),
-    ]);
+    ).toEqual([expect.objectContaining({ taskId, commandType: "RESUME" })]);
   });
 
   it("cancel_retry_wait_respects_backoff", async () => {
@@ -3743,9 +3741,7 @@ describe("durable task lifecycle", () => {
       (await repository.claimDueCommands(due, "cancel-due")).filter(
         (command) => command.taskId === taskId,
       ),
-    ).toEqual([
-      expect.objectContaining({ taskId, commandType: "CANCEL" }),
-    ]);
+    ).toEqual([expect.objectContaining({ taskId, commandType: "CANCEL" })]);
   });
 
   it("multiple_ticks_before_due_do_not_call_adapter", async () => {
@@ -3774,6 +3770,69 @@ describe("durable task lifecycle", () => {
     expect(await commandAttemptCount(taskId, "PAUSE")).toBe(0);
     await repository.claimDueCommands(due, "attempt-due");
     expect(await commandAttemptCount(taskId, "PAUSE")).toBe(1);
+  });
+
+  it("update_ack_and_input_completion_are_atomic", async () => {
+    const taskId = await createPendingInputUpdate("atomic-success");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expectAtomicUpdateState(taskId, "ACKNOWLEDGED", "ANSWERED", 1, 1);
+  });
+
+  it("update_input_failure_rolls_back_command_ack", async () => {
+    await expectAtomicUpdateRollback("input");
+  });
+
+  it("update_observation_failure_rolls_back_command_and_input", async () => {
+    await expectAtomicUpdateRollback("observation");
+  });
+
+  it("update_outbox_failure_rolls_back_all_changes", async () => {
+    await expectAtomicUpdateRollback("outbox");
+  });
+
+  it("acknowledged_update_never_has_open_input", async () => {
+    const taskId = await createPendingInputUpdate("atomic-no-open");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    const inconsistent = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM task_command command
+       JOIN task_input_request input USING (task_id)
+       WHERE command.task_id=$1 AND command.command_type='UPDATE'
+         AND command.state='ACKNOWLEDGED' AND input.status='OPEN'`,
+      [taskId],
+    );
+    expect(inconsistent.rows[0]?.count).toBe("0");
+  });
+
+  it("atomic_update_failure_leaves_command_recoverable", async () => {
+    const taskId = await createPendingInputUpdate("atomic-recoverable");
+    await installAtomicFailureTrigger("outbox");
+    try {
+      await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+      await expectAtomicUpdateState(taskId, "RETRY_WAIT", "OPEN", 0, 0);
+    } finally {
+      await removeAtomicFailureTrigger("outbox");
+    }
+    await pool.query("UPDATE task_command SET next_attempt_at=clock_timestamp() WHERE task_id=$1", [
+      taskId,
+    ]);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expectAtomicUpdateState(taskId, "ACKNOWLEDGED", "ANSWERED", 1, 1);
+  });
+
+  it("expired_claim_replays_update_after_atomic_rollback", async () => {
+    const taskId = await createPendingInputUpdate("atomic-expired-claim");
+    const repository = new TaskRepository(pool);
+    const claimed = await repository.claimDueCommands(new Date(), "expired-atomic", 1);
+    expect(claimed.filter((command) => command.taskId === taskId)).toEqual([
+      expect.objectContaining({ taskId, commandType: "UPDATE" }),
+    ]);
+    await pool.query(
+      "UPDATE task_command SET claim_until=clock_timestamp() - interval '1 second' WHERE task_id=$1",
+      [taskId],
+    );
+    await new DurableCommandDispatcher(gateway, repository).tick();
+    await expectAtomicUpdateState(taskId, "ACKNOWLEDGED", "ANSWERED", 1, 1);
   });
 });
 
@@ -3913,4 +3972,99 @@ async function commandAttemptCount(
     [taskId, commandType],
   );
   return result.rows[0]?.attempt_count ?? -1;
+}
+
+async function createPendingInputUpdate(label: string): Promise<string> {
+  const created = await engine.callOperation(
+    requiredOperation("durable_task"),
+    { resourceId: `${label}-${randomUUID()}`, scenario: "input_required" },
+    authorization,
+  );
+  if (created.kind !== "task") throw new Error("Expected input Task");
+  const taskId = String(created.task.taskId);
+  await engine.updateTask(taskId, { approval: true }, authorization);
+  return taskId;
+}
+
+async function expectAtomicUpdateState(
+  taskId: string,
+  commandState: string,
+  inputState: string,
+  observationCount: number,
+  outboxCount: number,
+): Promise<void> {
+  const state = await pool.query<{
+    command_state: string;
+    input_state: string;
+    observations: string;
+    events: string;
+  }>(
+    `SELECT command.state AS command_state, input.status AS input_state,
+       (SELECT count(*)::text FROM task_observation
+        WHERE task_id=$1 AND type='task.input_answered') AS observations,
+       (SELECT count(*)::text FROM outbox_event
+        WHERE aggregate_id=$1 AND event_type='task.input_answered') AS events
+     FROM task_command command
+     JOIN task_input_request input USING (task_id)
+     WHERE command.task_id=$1 AND command.command_type='UPDATE'`,
+    [taskId],
+  );
+  expect(state.rows[0]).toMatchObject({
+    command_state: commandState,
+    input_state: inputState,
+    observations: String(observationCount),
+    events: String(outboxCount),
+  });
+}
+
+async function expectAtomicUpdateRollback(
+  target: "input" | "observation" | "outbox",
+): Promise<void> {
+  const taskId = await createPendingInputUpdate(`atomic-${target}-failure`);
+  await installAtomicFailureTrigger(target);
+  try {
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expectAtomicUpdateState(taskId, "RETRY_WAIT", "OPEN", 0, 0);
+  } finally {
+    await removeAtomicFailureTrigger(target);
+  }
+}
+
+async function installAtomicFailureTrigger(
+  target: "input" | "observation" | "outbox",
+): Promise<void> {
+  const table =
+    target === "input"
+      ? "task_input_request"
+      : target === "observation"
+        ? "task_observation"
+        : "outbox_event";
+  const operation = target === "input" ? "UPDATE" : "INSERT";
+  const predicate =
+    target === "input"
+      ? "NEW.status='ANSWERED'"
+      : target === "observation"
+        ? "NEW.type='task.input_answered'"
+        : "NEW.event_type='task.input_answered'";
+  await pool.query(`CREATE OR REPLACE FUNCTION atomic_fail_${target}()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF ${predicate} THEN RAISE EXCEPTION 'ATOMIC_${target.toUpperCase()}_FAILURE'; END IF;
+      RETURN NEW;
+    END $$`);
+  await pool.query(`CREATE TRIGGER atomic_fail_${target}
+    BEFORE ${operation} ON ${table} FOR EACH ROW EXECUTE FUNCTION atomic_fail_${target}()`);
+}
+
+async function removeAtomicFailureTrigger(
+  target: "input" | "observation" | "outbox",
+): Promise<void> {
+  const table =
+    target === "input"
+      ? "task_input_request"
+      : target === "observation"
+        ? "task_observation"
+        : "outbox_event";
+  await pool.query(`DROP TRIGGER IF EXISTS atomic_fail_${target} ON ${table}`);
+  await pool.query(`DROP FUNCTION IF EXISTS atomic_fail_${target}()`);
 }
