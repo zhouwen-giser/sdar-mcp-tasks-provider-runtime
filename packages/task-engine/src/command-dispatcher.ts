@@ -446,7 +446,7 @@ function parseUpdateAnswers(payload: Record<string, unknown>) {
   return Object.entries(answerRecord).map(([key, value]) => ({
     key,
     value,
-    answerHash: commandHash(canonicalize(value)),
+    answerHash: commandHash(value),
   }));
 }
 

@@ -718,8 +718,11 @@ export class TaskEngine {
       left.key.localeCompare(right.key),
     );
     const requestHash = createHash("sha256").update(canonicalize(normalizedAnswers)).digest("hex");
+    const pendingPayload = Object.fromEntries(
+      pending.map(({ key, value }) => [key, value] as const),
+    );
     const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
-      answers,
+      answers: pendingPayload,
     });
     if (command.disposition === "existing") {
       return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);

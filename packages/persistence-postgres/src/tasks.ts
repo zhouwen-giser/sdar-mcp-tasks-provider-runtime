@@ -589,8 +589,23 @@ export class TaskRepository {
   ): Promise<PendingCommandRecord[]> {
     // Rank candidates with a window function first, then lock base-table rows.
     // PostgreSQL rejects FOR UPDATE when the locking SELECT itself uses window functions.
-    const result = await this.pool.query<PendingCommandRecordRow>(
-      `WITH ranked AS (
+    try {
+      const result = await this.pool.query<PendingCommandRecordRow>(
+        `WITH superseded AS (
+         UPDATE task_command command
+            SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+                last_error_code='SUPERSEDED_BY_SAFE_STOP',
+                last_error_message='Safe stop superseded the pending command.',
+                updated_at=clock_timestamp()
+           FROM provider_task
+          WHERE provider_task.task_id=command.task_id
+            AND provider_task.cancel_requested IS TRUE
+            AND command.command_type IN ('UPDATE','PAUSE','RESUME')
+            AND command.state='CLAIMED'
+            AND command.claim_until <= GREATEST($1,clock_timestamp())
+         RETURNING command.task_id
+       ),
+       ranked AS (
          SELECT task_command.task_id, task_command.command_sequence,
                 ROW_NUMBER() OVER (
                   PARTITION BY task_command.task_id
@@ -600,6 +615,7 @@ export class TaskRepository {
          FROM task_command
          JOIN provider_task
            ON provider_task.task_id = task_command.task_id
+         LEFT JOIN superseded ON superseded.task_id=task_command.task_id
          WHERE task_command.command_type IN ('CANCEL','UPDATE','PAUSE','RESUME')
            AND (
              (task_command.state IN ('PENDING','RETRY_WAIT')
@@ -649,11 +665,21 @@ export class TaskRepository {
          command.payload, command.state, command.attempt_count, command.claim_owner,
          command.stop_reason, command.adapter_ack, command.next_attempt_at,
          command.last_error_code, command.last_error_message, command.claim_until`,
-      [now, ownerId, leaseMilliseconds, limit],
-    );
-    return result.rows.map((row) => ({
-      ...mapPendingCommandRecord(row),
-    }));
+        [now, ownerId, leaseMilliseconds, limit],
+      );
+      return result.rows.map((row) => ({
+        ...mapPendingCommandRecord(row),
+      }));
+    } catch (error) {
+      const databaseError = error as { code?: string; constraint?: string };
+      if (
+        databaseError.code === "23505" &&
+        databaseError.constraint === "task_command_one_claimed_per_task_idx"
+      ) {
+        return [];
+      }
+      throw error;
+    }
   }
 
   async claimDueCancelCommands(
@@ -757,9 +783,10 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
-      const task = await client.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
-        taskId,
-      ]);
+      const task = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [taskId],
+      );
       const row = task.rows[0];
       if (row === undefined) throw new Error("TASK_NOT_FOUND");
       const eventKey = `${taskId}:identity-conflict:${createHash("sha256").update(detail).digest("hex")}`;
@@ -1647,6 +1674,24 @@ export class TaskRepository {
       if (task === undefined) throw new Error("TASK_NOT_FOUND");
       if (isTerminalState(task.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
+      const existing = await client.query<PendingCommandRecordRow>(
+        `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
+                claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                last_error_message, claim_until
+         FROM task_command
+         WHERE task_id=$1 AND command_type=$2 AND request_hash=$3
+         ORDER BY command_sequence DESC LIMIT 1`,
+        [taskId, commandType, requestHash],
+      );
+      if (existing.rows[0] !== undefined) {
+        await client.query("COMMIT");
+        return {
+          ...mapCommandResolution(existing.rows[0]),
+          duplicate: true,
+          disposition: "existing",
+        };
+      }
+
       if (
         task.cancel_requested ||
         task.stop_reason !== null ||
@@ -1694,26 +1739,6 @@ export class TaskRepository {
         };
       }
 
-      const existing = await client.query<{ command_sequence: string }>(
-        `SELECT command_sequence FROM task_command
-         WHERE task_id=$1 AND command_type=$2 AND request_hash=$3`,
-        [taskId, commandType, requestHash],
-      );
-      if (existing.rows[0] !== undefined) {
-        const row = await client.query<PendingCommandRecordRow>(
-          `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
-                  claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
-                  last_error_message, claim_until
-           FROM task_command
-           WHERE task_id=$1 AND command_type=$2 AND request_hash=$3
-           ORDER BY command_sequence DESC LIMIT 1`,
-          [taskId, commandType, requestHash],
-        );
-        const record = row.rows[0];
-        await client.query("COMMIT");
-        if (record === undefined) throw new Error("COMMAND_NOT_VISIBLE");
-        return { ...mapCommandResolution(record), duplicate: true, disposition: "existing" };
-      }
       const updated = await client.query<{ next_command_sequence: string }>(
         `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
          WHERE task_id=$1 RETURNING next_command_sequence`,

@@ -1,6 +1,6 @@
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { loadRuntimeConfig } from "../../apps/runtime/src/config.js";
 import { createRuntime } from "../../apps/runtime/src/runtime.js";
 import {
@@ -68,6 +68,13 @@ beforeAll(async () => {
     new TaskRepository(pool),
     new IdempotencyRepository(pool),
   );
+});
+
+beforeEach(async () => {
+  await pool.query(`TRUNCATE TABLE
+    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_observation, provider_task, admission_intent
+    RESTART IDENTITY CASCADE`);
 });
 
 afterAll(async () => {
@@ -316,6 +323,7 @@ describe("Runtime startup and fault recovery", () => {
     const snapshotsV2 = await new OperationSnapshotRepository(pool).saveManifest(manifestV2);
     const restarted = new TaskEngine(manifestV2, snapshotsV2, gateway, new TaskRepository(pool));
     await restarted.updateTask(taskId, { approval: true }, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     expect(await restarted.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
     const newOperation = manifestV2.operations.find(
       (operation) => operation.name === "durable_task",

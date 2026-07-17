@@ -340,7 +340,11 @@ describe("H6 MCP wire and result contract", () => {
   it("first_pause_returns_pending_receipt_without_error", async () => {
     const created = await createTask("h6-task-first-pause-receipt");
     const taskId = created.task.taskId;
-    const firstPause = await rawRequest("tasks/pause", { taskId }, "h6-first-pause-wire");
+    const firstPause = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-first-pause-wire",
+    );
     expect(firstPause.error).toBeUndefined();
     if (firstPause.result === undefined) throw new Error("Expected successful wire result");
     expectTaskReceipt(firstPause.result, {
@@ -355,7 +359,11 @@ describe("H6 MCP wire and result contract", () => {
   it("first_resume_returns_pending_receipt_without_error", async () => {
     const created = await createTask("h6-task-first-resume-receipt");
     const taskId = created.task.taskId;
-    const firstResume = await rawRequest("tasks/resume", { taskId }, "h6-first-resume-wire");
+    const firstResume = await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-first-resume-wire",
+    );
     expect(firstResume.error).toBeUndefined();
     if (firstResume.result === undefined) throw new Error("Expected successful wire result");
     expectTaskReceipt(firstResume.result, {
@@ -397,14 +405,18 @@ describe("H6 MCP wire and result contract", () => {
   it("duplicate_claimed_pause_returns_command_in_progress", async () => {
     const created = await createTask("h6-task-dupe-claimed-pause");
     const taskId = created.task.taskId;
-    await rawRequest("tasks/pause", { taskId }, "h6-dupe-claimed-pause-1");
+    await rawRequest("io.sdar/taskExecution/tasks/pause", { taskId }, "h6-dupe-claimed-pause-1");
     await pool.query(
       `UPDATE task_command
          SET state='CLAIMED', claim_owner='h6-wire', claim_until=clock_timestamp()+interval '30s'
        WHERE task_id=$1 AND command_type='PAUSE' AND command_sequence=1`,
       [taskId],
     );
-    const duplicate = await rawRequest("tasks/pause", { taskId }, "h6-dupe-claimed-pause-2");
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-dupe-claimed-pause-2",
+    );
     expect(duplicate.error).toMatchObject({
       code: -32009,
       data: {
@@ -422,7 +434,11 @@ describe("H6 MCP wire and result contract", () => {
   it("duplicate_retry_wait_resume_returns_command_in_progress", async () => {
     const created = await createTask("h6-task-dupe-retry-wait-resume");
     const taskId = created.task.taskId;
-    await rawRequest("tasks/resume", { taskId }, "h6-dupe-retry-wait-resume-1");
+    await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-dupe-retry-wait-resume-1",
+    );
     await pool.query(
       `UPDATE task_command
          SET state='RETRY_WAIT', next_attempt_at=clock_timestamp()+interval '1 second',
@@ -430,7 +446,11 @@ describe("H6 MCP wire and result contract", () => {
        WHERE task_id=$1 AND command_type='RESUME' AND command_sequence=1`,
       [taskId],
     );
-    const duplicate = await rawRequest("tasks/resume", { taskId }, "h6-dupe-retry-wait-resume-2");
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-dupe-retry-wait-resume-2",
+    );
     expect(duplicate.error).toMatchObject({
       code: -32009,
       data: {
@@ -453,7 +473,11 @@ describe("H6 MCP wire and result contract", () => {
       { taskId, inputs: { approval: true } },
       "h6-cross-update-wire-1",
     );
-    const duplicate = await rawRequest("tasks/pause", { taskId }, "h6-cross-update-wire-2");
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-cross-update-wire-2",
+    );
     expect(duplicate.error).toMatchObject({
       code: -32009,
       data: {
@@ -470,14 +494,18 @@ describe("H6 MCP wire and result contract", () => {
   it("cross_type_claimed_pause_blocks_resume_with_real_blocking_type", async () => {
     const created = await createTask("h6-cross-type-claimed-pause");
     const taskId = created.task.taskId;
-    await rawRequest("tasks/pause", { taskId }, "h6-cross-pause-wire-1");
+    await rawRequest("io.sdar/taskExecution/tasks/pause", { taskId }, "h6-cross-pause-wire-1");
     await pool.query(
       `UPDATE task_command
          SET state='CLAIMED', claim_owner='h6-wire', claim_until=clock_timestamp()+interval '30s'
        WHERE task_id=$1 AND command_type='PAUSE' AND command_sequence=1`,
       [taskId],
     );
-    const duplicate = await rawRequest("tasks/resume", { taskId }, "h6-cross-pause-wire-2");
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-cross-pause-wire-2",
+    );
     expect(duplicate.error).toMatchObject({
       code: -32009,
       data: {
@@ -494,7 +522,11 @@ describe("H6 MCP wire and result contract", () => {
   it("cross_type_retry_wait_resume_blocks_update_with_real_blocking_type", async () => {
     const created = await createTask("h6-cross-type-retry-resume");
     const taskId = created.task.taskId;
-    await rawRequest("tasks/resume", { taskId }, "h6-cross-retry-resume-wire-1");
+    await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-cross-retry-resume-wire-1",
+    );
     await pool.query(
       `UPDATE task_command
          SET state='RETRY_WAIT', next_attempt_at=clock_timestamp()+interval '1 second',
@@ -502,7 +534,11 @@ describe("H6 MCP wire and result contract", () => {
        WHERE task_id=$1 AND command_type='RESUME' AND command_sequence=1`,
       [taskId],
     );
-    const duplicate = await rawRequest("tasks/pause", { taskId }, "h6-cross-retry-resume-wire-2");
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-cross-retry-resume-wire-2",
+    );
     expect(duplicate.error).toMatchObject({
       code: -32009,
       data: {
@@ -561,7 +597,11 @@ describe("H6 MCP wire and result contract", () => {
     const taskId = created.task.taskId;
     await rawRequest("tasks/cancel", { taskId }, "h6-wire-pause-stop-cancel");
 
-    const duplicate = await rawRequest("tasks/pause", { taskId }, "h6-wire-pause-stop");
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-wire-pause-stop",
+    );
     expect(duplicate.error).toMatchObject({
       code: -32009,
       data: {

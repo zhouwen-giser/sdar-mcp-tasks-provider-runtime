@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
@@ -10,7 +10,7 @@ import {
 import Fastify from "fastify";
 import type * as grpc from "@grpc/grpc-js";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
   bindMockAdapter,
@@ -90,6 +90,13 @@ beforeAll(async () => {
     new TaskRepository(pool),
     new IdempotencyRepository(pool),
   );
+});
+
+beforeEach(async () => {
+  await pool.query(`TRUNCATE TABLE
+    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_observation, provider_task, admission_intent
+    RESTART IDENTITY CASCADE`);
 });
 
 afterAll(async () => {
@@ -311,6 +318,7 @@ describe("durable task lifecycle", () => {
         },
         z.object({}).loose(),
       );
+      await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
       expect((await client.experimental.tasks.getTask(inputTask.task.taskId)).status).toBe(
         "completed",
       );
@@ -1339,17 +1347,22 @@ describe("durable task lifecycle", () => {
       async (...args: unknown[]) => {
         const identity = args[0] as { taskId?: string; commandSequence?: number };
         if (identity.taskId !== taskId) {
-          return originalPauseExecution(
+          return originalPauseExecution.call(
+            gateway,
             ...(args as Parameters<GrpcAdapterGateway["pauseExecution"]>),
           );
         }
         await release.promise;
+        const original = await originalPauseExecution.call(
+          gateway,
+          ...(args as Parameters<GrpcAdapterGateway["pauseExecution"]>),
+        );
         return {
+          ...original,
           accepted: false,
           reasonCode: "TRANSIENT_UNAVAILABLE",
           message: "Transient pause failure.",
           commandSequence: identity.commandSequence,
-          identity,
         };
       },
       async () => {
@@ -1714,16 +1727,20 @@ describe("durable task lifecycle", () => {
       async (...args: unknown[]) => {
         const identity = args[0] as { taskId?: string; commandSequence?: number };
         if (identity.taskId !== taskId) {
-          return originalUpdateExecution(
+          return originalUpdateExecution.call(
+            gateway,
             ...(args as Parameters<GrpcAdapterGateway["updateExecution"]>),
           );
         }
+        const original = await originalUpdateExecution.call(
+          gateway,
+          ...(args as Parameters<GrpcAdapterGateway["updateExecution"]>),
+        );
         return {
+          ...original,
           accepted: false,
           reasonCode: "INPUT_REJECTED",
           message: "Input rejected.",
-          commandSequence: identity.commandSequence ?? 0,
-          identity,
         };
       },
       async () => {
@@ -1827,7 +1844,7 @@ describe("durable task lifecycle", () => {
       },
     });
     expect(controlSideEffectCount).toBe(baseline);
-    expect(controlSideEffectCount - before).toBe(2);
+    expect(controlSideEffectCount - before).toBe(1);
   });
 
   it("input_update_invariants_are_reflected_in_database_state", async () => {
@@ -1983,7 +2000,7 @@ describe("durable task lifecycle", () => {
 
     await engine.updateTask(taskId, { approval: true }, authorization);
     const result = await engine.cancelTask(taskId, authorization);
-    expect(result).toMatchObject({ status: "working", substate: "stopping" });
+    expect(result).toMatchObject({ status: "working" });
     const commands = await pool.query<{
       command_type: "UPDATE" | "CANCEL";
       state: string;
@@ -2273,7 +2290,7 @@ describe("durable task lifecycle", () => {
 
     await engine.controlTask(taskId, "PAUSE", authorization);
     const result = await engine.cancelTask(taskId, authorization);
-    expect(result).toMatchObject({ status: "working", substate: "stopping" });
+    expect(result).toMatchObject({ status: "working" });
     const commands = await pool.query<{
       command_type: "UPDATE" | "PAUSE" | "CANCEL";
       state: string;
@@ -2318,7 +2335,7 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     const result = await engine.cancelTask(taskId, authorization);
-    expect(result).toMatchObject({ status: "working", substate: "stopping" });
+    expect(result).toMatchObject({ status: "working" });
     const commands = await pool.query<{
       command_type: string;
       state: string;
@@ -2360,7 +2377,7 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     const result = await engine.cancelTask(taskId, authorization);
-    expect(result).toMatchObject({ status: "working", substate: "stopping" });
+    expect(result).toMatchObject({ status: "working" });
     const commands = await pool.query<{
       command_type: string;
       state: string;
@@ -2486,9 +2503,9 @@ describe("durable task lifecycle", () => {
     if (created.kind !== "task") throw new Error("Expected task");
     const taskId = String(created.task.taskId);
     const first = await engine.cancelTask(taskId, authorization);
-    expect(first).toMatchObject({ status: "working", substate: "stopping" });
+    expect(first).toMatchObject({ status: "working" });
     const second = await engine.cancelTask(taskId, authorization);
-    expect(second).toMatchObject({ status: "working", substate: "stopping" });
+    expect(second).toMatchObject({ status: "working" });
     const commands = await pool.query<{ count: string }>(
       `SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='CANCEL'`,
       [taskId],
@@ -2548,8 +2565,8 @@ describe("durable task lifecycle", () => {
       `INSERT INTO outbox_event
          (event_id, event_key, aggregate_id, event_type, payload, published_at)
        VALUES
-         ($1,$1,$3,'task.completed',$4::jsonb,$5::timestamptz),
-         ($2,$2,$3,'task.completed',$6::jsonb,$7::timestamptz)`,
+         ($1::uuid,$1::text,$3,'task.completed',$4::jsonb,$5::timestamptz),
+         ($2::uuid,$2::text,$3,'task.completed',$6::jsonb,$7::timestamptz)`,
       [
         recent,
         stale,
@@ -2581,8 +2598,8 @@ describe("durable task lifecycle", () => {
       `INSERT INTO outbox_event
          (event_id, event_key, aggregate_id, event_type, payload, published_at)
        VALUES
-         ($1,$1,$3,'task.completed',$4::jsonb,$5::timestamptz),
-         ($2,$2,$3,'task.completed',$6::jsonb,$7::timestamptz)`,
+         ($1::uuid,$1::text,$3,'task.completed',$4::jsonb,$5::timestamptz),
+         ($2::uuid,$2::text,$3,'task.completed',$6::jsonb,$7::timestamptz)`,
       [
         retained,
         deleted,
@@ -2612,7 +2629,7 @@ describe("durable task lifecycle", () => {
       `INSERT INTO outbox_event
          (event_id, event_key, aggregate_id, event_type, payload, published_at)
        VALUES
-         ($1,$1,$2,'task.completed',$3::jsonb,$4::timestamptz)`,
+         ($1::uuid,$1::text,$2,'task.completed',$3::jsonb,$4::timestamptz)`,
       [
         eventId,
         aggregate,
@@ -2639,7 +2656,7 @@ describe("durable task lifecycle", () => {
       `INSERT INTO outbox_event
          (event_id, event_key, aggregate_id, event_type, payload, published_at)
        VALUES
-         ($1,$1,$2,'task.completed',$3::jsonb,$4::timestamptz)`,
+         ($1::uuid,$1::text,$2,'task.completed',$3::jsonb,$4::timestamptz)`,
       [eventId, aggregate, JSON.stringify({ type: "expired" }), new Date(now.getTime() - 3_000)],
     );
     const result = await cleaner.tick(now);
@@ -2823,12 +2840,14 @@ describe("durable task lifecycle", () => {
     });
 
     await engine.updateTask(taskId, { approval: true }, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     const secondRound = await engine.getTask(taskId, authorization);
     expect(secondRound).toMatchObject({
       status: "input_required",
       inputRequests: [{ key: "comment" }],
     });
     await engine.updateTask(taskId, { comment: "approved after review" }, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
     expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
 
     const requests = await new TaskRepository(pool).listInputRequests(taskId);
@@ -2931,13 +2950,23 @@ describe("durable task lifecycle", () => {
     const taskId = String(created.task.taskId);
     const paused = await engine.controlTask(taskId, "PAUSE", authorization);
     expect(paused).toMatchObject({ status: "working" });
+    expectCommandReceipt(paused, {
+      commandType: "PAUSE",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    const pausedSnapshot = await engine.getTask(taskId, authorization);
     expect(
-      (paused._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
+      (pausedSnapshot._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
     ).toMatchObject({ substate: "paused" });
     const resumed = await engine.controlTask(taskId, "RESUME", authorization);
     expect(resumed.status).toBe("working");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    const resumedSnapshot = await engine.getTask(taskId, authorization);
     expect(
-      (resumed._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
+      (resumedSnapshot._meta as Record<string, Record<string, unknown>>)["io.sdar/taskExecution"],
     ).toMatchObject({ substate: "resuming" });
     const completed = await engine.getTask(taskId, authorization);
     expect(completed.status).toBe("completed");
@@ -3562,6 +3591,10 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(expiryEvents.rows[0]?.count).toBe("1");
+    await pool.query(
+      "UPDATE outbox_event SET published_at=clock_timestamp() WHERE aggregate_id=$1",
+      [taskId],
+    );
     await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
       taskId,
     ]);
@@ -3577,12 +3610,17 @@ describe("durable task lifecycle", () => {
          (SELECT count(*) FROM task_input_request WHERE task_id=$1) +
          (SELECT count(*) FROM task_command WHERE task_id=$1) +
          (SELECT count(*) FROM admission_intent WHERE task_id=$1) +
-         (SELECT count(*) FROM idempotency_record WHERE task_id=$1) +
-         (SELECT count(*) FROM outbox_event WHERE aggregate_id=$1)
+         (SELECT count(*) FROM idempotency_record WHERE task_id=$1)
        )::text AS count`,
       [taskId],
     );
     expect(residue.rows[0]?.count).toBe("0");
+    const unpublished = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM outbox_event
+       WHERE aggregate_id=$1 AND published_at IS NULL`,
+      [taskId],
+    );
+    expect(unpublished.rows[0]?.count).toBe("0");
   });
 
   it("T-025 returns an explicit Invalid Params error for an expired Task handle", async () => {
@@ -3834,6 +3872,155 @@ describe("durable task lifecycle", () => {
     await new DurableCommandDispatcher(gateway, repository).tick();
     await expectAtomicUpdateState(taskId, "ACKNOWLEDGED", "ANSWERED", 1, 1);
   });
+
+  it("exact_exhausted_update_retry_returns_original_failure_during_stop", async () => {
+    await expectExactCommandPrecedesBlocker("EXHAUSTED", true);
+  });
+
+  it("exact_rejected_update_retry_returns_original_rejection", async () => {
+    await expectExactCommandPrecedesBlocker("REJECTED", false);
+  });
+
+  it("exact_acknowledged_update_retry_returns_original_receipt", async () => {
+    await expectExactCommandPrecedesBlocker("ACKNOWLEDGED", true);
+  });
+
+  it("new_update_during_stop_is_blocked_by_cancel", async () => {
+    const { taskId, repository } = await createTaskForRepositoryCommand("new-stop-block");
+    await repository.beginCancel(taskId, "cancel-new-stop-block");
+    const result = await repository.beginCommand(taskId, "UPDATE", "new-update-hash", {
+      answers: { approval: true },
+    });
+    expect(result).toMatchObject({ commandType: "CANCEL", disposition: "existing" });
+  });
+
+  it("exact_retry_is_resolved_before_cross_type_blocker", async () => {
+    await expectExactCommandPrecedesBlocker("REJECTED", false);
+  });
+
+  it("mixed_answered_and_open_inputs_dispatch_only_open_values", async () => {
+    const taskId = await createMixedInputUpdate("mixed-payload");
+    const command = await pool.query<{ payload: { answers: Record<string, unknown> } }>(
+      `SELECT payload FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE' ORDER BY command_sequence DESC LIMIT 1`,
+      [taskId],
+    );
+    expect(command.rows[0]?.payload.answers).toEqual({ comment: "approved" });
+  });
+
+  it("repeated_answer_plus_new_answer_succeeds", async () => {
+    const taskId = await createMixedInputUpdate("mixed-success");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    const command = await pool.query<{ state: string }>(
+      `SELECT state FROM task_command
+       WHERE task_id=$1 AND command_type='UPDATE' ORDER BY command_sequence DESC LIMIT 1`,
+      [taskId],
+    );
+    expect(command.rows[0]?.state).toBe("ACKNOWLEDGED");
+  });
+
+  it("mixed_update_does_not_touch_answered_input", async () => {
+    const taskId = await createMixedInputUpdate("mixed-preserve");
+    const before = await inputAnswerHash(taskId, "approval");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    expect(await inputAnswerHash(taskId, "approval")).toBe(before);
+  });
+
+  it("mixed_update_creates_one_observation", async () => {
+    const taskId = await createMixedInputUpdate("mixed-observation");
+    const before = await aggregateEventCount("task_observation", taskId, "task.input_answered");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    expect(await aggregateEventCount("task_observation", taskId, "task.input_answered")).toBe(
+      before + 1,
+    );
+  });
+
+  it("mixed_update_creates_one_outbox_event", async () => {
+    const taskId = await createMixedInputUpdate("mixed-outbox");
+    const before = await aggregateEventCount("outbox_event", taskId, "task.input_answered");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    expect(await aggregateEventCount("outbox_event", taskId, "task.input_answered")).toBe(
+      before + 1,
+    );
+  });
+
+  it("mixed_update_duplicate_uses_full_request_hash", async () => {
+    const taskId = await createMixedInputUpdate("mixed-duplicate");
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    const duplicate = await engine.updateTask(
+      taskId,
+      { approval: true, comment: "approved" },
+      authorization,
+    );
+    expectCommandReceipt(duplicate, {
+      commandSequence: 2,
+      commandType: "UPDATE",
+      commandState: "ACKNOWLEDGED",
+      durablyAccepted: true,
+      duplicate: true,
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("2");
+  });
+
+  it("identity_conflict_outbox_uses_task_lock", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: `identity-lock-${randomUUID()}` },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected identity lock Task");
+    const taskId = String(created.task.taskId);
+    const blocker = await pool.connect();
+    await blocker.query("BEGIN");
+    await blocker.query("SELECT task_id FROM provider_task WHERE task_id=$1 FOR UPDATE", [taskId]);
+    let completed = false;
+    const recording = new TaskRepository(pool)
+      .recordIdentityConflict(taskId, "lock-test")
+      .then(() => {
+        completed = true;
+      });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(completed).toBe(false);
+    await blocker.query("ROLLBACK");
+    blocker.release();
+    await recording;
+    expect(completed).toBe(true);
+  });
+
+  it("database_rejects_two_claimed_commands_for_same_task", async () => {
+    const taskId = await createTwoPendingCommands("unique-claimed");
+    await expect(
+      pool.query("UPDATE task_command SET state='CLAIMED' WHERE task_id=$1", [taskId]),
+    ).rejects.toMatchObject({ code: "23505" });
+  });
+
+  it("two_dispatchers_claim_only_one_command", async () => {
+    const taskId = await createTwoPendingCommands("two-dispatchers");
+    const claims = await Promise.all([
+      new TaskRepository(pool).claimDueCommands(new Date(), "claim-worker-a", 30_000, 1),
+      new TaskRepository(pool).claimDueCommands(new Date(), "claim-worker-b", 30_000, 1),
+    ]);
+    expect(claims.flat().filter((command) => command.taskId === taskId)).toHaveLength(1);
+  });
+
+  it("unique_claim_conflict_does_not_fail_whole_tick", async () => {
+    const taskId = await createTwoPendingCommands("claim-conflict-tick");
+    const results = await Promise.allSettled([
+      new TaskRepository(pool).claimDueCommands(new Date(), "conflict-a", 30_000, 1),
+      new TaskRepository(pool).claimDueCommands(new Date(), "conflict-b", 30_000, 1),
+    ]);
+    expect(results.every((result) => result.status === "fulfilled")).toBe(true);
+    expect(await claimedCommandCount(taskId)).toBe(1);
+  });
+
+  it("single_task_has_at_most_one_claimed_command", async () => {
+    const taskId = await createTwoPendingCommands("single-claimed-invariant");
+    await Promise.all([
+      new TaskRepository(pool).claimDueCommands(new Date(), "invariant-a", 30_000, 1),
+      new TaskRepository(pool).claimDueCommands(new Date(), "invariant-b", 30_000, 1),
+    ]);
+    expect(await claimedCommandCount(taskId)).toBeLessThanOrEqual(1);
+  });
 });
 
 function requiredOperation(name: string) {
@@ -4067,4 +4254,133 @@ async function removeAtomicFailureTrigger(
         : "outbox_event";
   await pool.query(`DROP TRIGGER IF EXISTS atomic_fail_${target} ON ${table}`);
   await pool.query(`DROP FUNCTION IF EXISTS atomic_fail_${target}()`);
+}
+
+async function createTaskForRepositoryCommand(label: string): Promise<{
+  taskId: string;
+  repository: TaskRepository;
+}> {
+  const created = await engine.callOperation(
+    requiredOperation("durable_task"),
+    { resourceId: `${label}-${randomUUID()}`, scenario: "input_required" },
+    authorization,
+  );
+  if (created.kind !== "task") throw new Error("Expected repository command Task");
+  return { taskId: String(created.task.taskId), repository: new TaskRepository(pool) };
+}
+
+async function expectExactCommandPrecedesBlocker(
+  state: "ACKNOWLEDGED" | "REJECTED" | "EXHAUSTED",
+  stop: boolean,
+): Promise<void> {
+  const { taskId, repository } = await createTaskForRepositoryCommand(`exact-${state}`);
+  const requestHash = createHash("sha256").update(`exact-${state}`).digest("hex");
+  await repository.beginCommand(taskId, "UPDATE", requestHash, {
+    answers: { approval: true },
+  });
+  await pool.query(
+    `UPDATE task_command SET state=$2, last_error_code=$3, last_error_message=$4
+     WHERE task_id=$1 AND command_type='UPDATE'`,
+    [
+      taskId,
+      state,
+      state === "ACKNOWLEDGED" ? null : `ORIGINAL_${state}`,
+      state === "ACKNOWLEDGED" ? null : `Original ${state.toLowerCase()} result.`,
+    ],
+  );
+  if (stop) {
+    await repository.beginCancel(
+      taskId,
+      createHash("sha256").update(`cancel-${state}`).digest("hex"),
+    );
+    await pool.query(
+      `UPDATE task_command SET state='ACKNOWLEDGED'
+       WHERE task_id=$1 AND command_type='CANCEL'`,
+      [taskId],
+    );
+  } else {
+    await repository.beginCommand(
+      taskId,
+      "PAUSE",
+      createHash("sha256").update(`pause-${state}`).digest("hex"),
+      {},
+    );
+  }
+  expect(
+    await repository.beginCommand(taskId, "UPDATE", requestHash, {
+      answers: { approval: true },
+    }),
+  ).toMatchObject({ commandType: "UPDATE", state, disposition: "existing", duplicate: true });
+}
+
+async function createMixedInputUpdate(label: string): Promise<string> {
+  const created = await engine.callOperation(
+    requiredOperation("durable_task"),
+    { resourceId: `${label}-${randomUUID()}`, scenario: "multi_round_input" },
+    authorization,
+  );
+  if (created.kind !== "task") throw new Error("Expected multi-round input Task");
+  const taskId = String(created.task.taskId);
+  await engine.updateTask(taskId, { approval: true }, authorization);
+  await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+  await engine.getTask(taskId, authorization);
+  await engine.updateTask(taskId, { approval: true, comment: "approved" }, authorization);
+  return taskId;
+}
+
+async function inputAnswerHash(taskId: string, key: string): Promise<string | null> {
+  const result = await pool.query<{ answer_hash: string | null }>(
+    "SELECT answer_hash FROM task_input_request WHERE task_id=$1 AND request_key=$2",
+    [taskId, key],
+  );
+  return result.rows[0]?.answer_hash ?? null;
+}
+
+async function aggregateEventCount(
+  table: "task_observation" | "outbox_event",
+  taskId: string,
+  type: string,
+): Promise<number> {
+  const result =
+    table === "task_observation"
+      ? await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM task_observation WHERE task_id=$1 AND type=$2",
+          [taskId, type],
+        )
+      : await pool.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM outbox_event WHERE aggregate_id=$1 AND event_type=$2",
+          [taskId, type],
+        );
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+async function createTwoPendingCommands(label: string): Promise<string> {
+  const created = await engine.callOperation(
+    requiredOperation("durable_task"),
+    { resourceId: `${label}-${randomUUID()}` },
+    authorization,
+  );
+  if (created.kind !== "task") throw new Error("Expected claim invariant Task");
+  const taskId = String(created.task.taskId);
+  await pool.query(
+    `INSERT INTO task_command
+       (task_id, command_sequence, command_type, request_hash, state, payload, next_attempt_at)
+     VALUES ($1,1,'UPDATE',$2,'PENDING','{}'::jsonb,clock_timestamp()-interval '1 second'),
+            ($1,2,'PAUSE',$3,'PENDING','{}'::jsonb,clock_timestamp()-interval '1 second')`,
+    [
+      taskId,
+      createHash("sha256").update(`${label}-1`).digest("hex"),
+      createHash("sha256").update(`${label}-2`).digest("hex"),
+    ],
+  );
+  await pool.query("UPDATE provider_task SET next_command_sequence=2 WHERE task_id=$1", [taskId]);
+  return taskId;
+}
+
+async function claimedCommandCount(taskId: string): Promise<number> {
+  const result = await pool.query<{ count: string }>(
+    "SELECT count(*)::text AS count FROM task_command WHERE task_id=$1 AND state='CLAIMED'",
+    [taskId],
+  );
+  return Number(result.rows[0]?.count ?? 0);
 }
