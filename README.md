@@ -2,10 +2,11 @@
 
 An independently deployable, language-neutral Runtime for the SEP-2663 task lifecycle and the `io.sdar/taskExecution` Provider Profile. The Runtime is implemented in strict TypeScript and delegates resource facts and side effects to versioned gRPC/Protobuf Adapters.
 
-The current release candidate is `v1.0.0-rc.3`. Its reliability hardening plan is
-[`runtime-rc3-hardening-plan.md`](docs/implementation/runtime-rc3-hardening-plan.md); regenerated
-release evidence is under [`reports/runtime-v1-rc3/`](reports/runtime-v1-rc3/). Published rc.2
-migrations, reports and release history remain immutable.
+The current release is `v1.1.0`, adding fail-safe Provider Ops Telemetry without changing Runtime
+business semantics. Its live plan is
+[`runtime-v1.1-telemetry-exec-plan.md`](docs/implementation/runtime-v1.1-telemetry-exec-plan.md).
+Published `v1.0.0-rc.2` and `v1.0.0-rc.3` migrations, reports, tags, and release history remain
+immutable.
 
 ## Runtime quick start
 
@@ -38,7 +39,9 @@ TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm v
 Configuration and security are documented in
 [`configuration.md`](docs/operations/configuration.md) and
 [`security-recovery.md`](docs/operations/security-recovery.md); deployment and
-incident procedures are in the [`runbook`](docs/operations/runbook.md).
+incident procedures are in the [`runbook`](docs/operations/runbook.md). OTLP signal contracts,
+privacy rules and failure behavior are in
+[`provider-ops-telemetry.md`](docs/operations/provider-ops-telemetry.md).
 
 Adapter authors should begin with the
 [`quick start`](docs/adapter/quick-start.md) and dual-language expanded Adapter
@@ -51,7 +54,7 @@ safety `not_claimed`; a Mock Adapter result is not production qualification.
 
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).
-Root commands in `package.json` expose every release gate; `pnpm verify:rc3` includes
+Root commands in `package.json` expose every release gate; `pnpm verify:v1.1` includes
 formatting, lint, types, build/Proto drift, audit/SBOM, deployment/container,
 unit/contract/integration/recovery/security/E2E/conformance, the six rc.1 red-regression guards,
 and the rc.3 capacity checks. CI additionally runs Buf lint/breaking against the immutable rc.1

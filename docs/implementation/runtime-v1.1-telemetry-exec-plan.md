@@ -37,8 +37,8 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | complete    |
 | H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | complete    |
 | H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | complete    |
-| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | in progress |
-| Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | pending     |
+| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | complete    |
+| Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | in progress |
 
 ## Design decisions
 
@@ -72,6 +72,7 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | 2026-07-18 | H7 exporter timeout/queue overflow isolation tests (8 focused)    | PASS   |
 | 2026-07-18 | H8 sanitizer/export privacy tests (10 focused)                    | PASS   |
 | 2026-07-18 | H9 repository boundary scan: no telemetry-dev/ClickHouse runtime  | PASS   |
+| 2026-07-18 | Docs/config/version drift review and regenerated v1.1 SBOM        | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.

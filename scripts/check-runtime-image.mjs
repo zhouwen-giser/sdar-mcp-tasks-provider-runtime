@@ -2,8 +2,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import process from "node:process";
 
-const primary = "sdar-runtime:rc3-audit-primary";
-const repeat = "sdar-runtime:rc3-audit-repeat";
+const primary = "sdar-runtime:v1.1-audit-primary";
+const repeat = "sdar-runtime:v1.1-audit-repeat";
 // Docker Desktop's containerd store reports a compressed value while the Linux
 // Engine reports the expanded layer total. The release ceiling follows the
 // authoritative GitHub Linux measurement and still catches material growth.
@@ -73,7 +73,7 @@ const report = {
   reproducibleFilesystemAndConfig: reproducible,
 };
 mkdirSync("reports/image", { recursive: true });
-writeFileSync("reports/image/runtime-v1-rc3.json", `${JSON.stringify(report, null, 2)}\n`);
+writeFileSync("reports/image/runtime-v1.1.json", `${JSON.stringify(report, null, 2)}\n`);
 process.stdout.write(`${JSON.stringify(result)}\n`);
 
 function build(tag) {

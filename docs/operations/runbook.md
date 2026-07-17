@@ -5,8 +5,9 @@
 Startup applies checksum-protected migrations, validates Adapter Manifest and
 provider identity, persists operation snapshots, performs the first recovery
 scan, and only then listens. `/health/live` proves the event loop can respond;
-`/health/ready` additionally reports `database`, `adapter`, `recovery`, `scheduler`,
-`commandDispatcher`, and `ttlCleaner` independently.
+`/health/ready` additionally reports `database`, `adapter`, `adapterManifest`, `recovery`,
+`scheduler`, `commandDispatcher`, `outboxPublisher`, `outboxCleaner`, and `ttlCleaner`
+independently. Telemetry is deliberately absent from readiness.
 Remove a replica from traffic on any non-ready dependency.
 
 Adapter readiness is a continuous identity-checked probe, not a startup latch. Adapter Manifest
@@ -38,8 +39,8 @@ TTL purge.
 - Drain HTTP traffic before termination. A process exit does not lose durable
   tasks; another replica or restarted process scans them.
 - Streamable HTTP is stateless: do not configure sticky sessions, expect an
-  `Mcp-Session-Id`, or depend on GET/DELETE/resumable notifications in rc.2.
-- Before rc.3 rollout, run `pnpm verify:rc3`, Buf breaking against `v1.0.0-rc.1`, and the
+  `Mcp-Session-Id`, or depend on GET/DELETE/resumable notifications.
+- Before v1.1 rollout, run `pnpm verify:v1.1`, Buf breaking against `v1.0.0-rc.1`, and the
   three-image Compose build. Archive conformance, capacity, SBOM and image JSON as evidence.
 - Size `DATABASE_POOL_MAX` for replicas and probes. The capacity gate proves a max-one pool can
   make SQL progress during a slow Adapter RPC; rising pool waiters still require investigation.
@@ -58,6 +59,11 @@ For an Outbox backlog, repair the publisher/consumer and redeliver unpublished
 rows; event ids and observation revisions are idempotency keys. For suspected
 credential exposure, rotate JWT/database/mTLS secrets, restart replicas, and
 audit authentication failures without logging the secret values.
+
+For an OTLP Collector outage, repair or reroute the Collector without draining Runtime traffic.
+Exporter queues and timeouts are bounded and drops do not change readiness or durable state.
+Confirm recovery with `adapter_rpc_total`, `provider_error_total`, Collector receiver metrics,
+and a fresh non-sensitive test event; do not weaken the sanitizer or add raw payload logging.
 
 ## Rollback
 

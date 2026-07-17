@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.0 - 2026-07-18
+
+- Added optional OpenTelemetry traces, stable Provider Ops events and low-cardinality metrics
+  while preserving the existing Prometheus endpoint.
+- Derived lifecycle audit events from committed Task/Outbox facts and command events from the
+  Durable Command Dispatcher; added payload-free Adapter RPC spans and scheduler/recovery/TTL
+  operational events.
+- Added deterministic UUIDv5 record ids, RFC 8785/SHA-256 record hashes, bounded exporter queues,
+  failure isolation and recursive privacy sanitization.
+- Kept Task state, command, scheduling, safe-stop, recovery, readiness, Adapter protocol and
+  database migration semantics unchanged. Published rc.2/rc.3 artifacts remain immutable.
+
 ## 1.0.0-rc.3 - 2026-07-17
 
 - Reliability hardening for multi-instance lease ownership, start-window correctness,
