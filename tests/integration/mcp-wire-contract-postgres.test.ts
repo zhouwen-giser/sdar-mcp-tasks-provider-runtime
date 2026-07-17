@@ -320,7 +320,7 @@ describe("H6 MCP wire and result contract", () => {
 
   it("first_update_returns_pending_receipt_without_error", async () => {
     const created = await createTask("h6-task-first-update-receipt", "input_required");
-    const taskId = String(created.task.taskId);
+    const taskId = created.task.taskId;
     const firstUpdate = await rawRequest(
       "tasks/update",
       { taskId, inputs: { approval: true } },
@@ -339,7 +339,7 @@ describe("H6 MCP wire and result contract", () => {
 
   it("first_pause_returns_pending_receipt_without_error", async () => {
     const created = await createTask("h6-task-first-pause-receipt");
-    const taskId = String(created.task.taskId);
+    const taskId = created.task.taskId;
     const firstPause = await rawRequest(
       "tasks/pause",
       { taskId },
@@ -358,7 +358,7 @@ describe("H6 MCP wire and result contract", () => {
 
   it("first_resume_returns_pending_receipt_without_error", async () => {
     const created = await createTask("h6-task-first-resume-receipt");
-    const taskId = String(created.task.taskId);
+    const taskId = created.task.taskId;
     const firstResume = await rawRequest(
       "tasks/resume",
       { taskId },
@@ -377,7 +377,7 @@ describe("H6 MCP wire and result contract", () => {
 
   it("duplicate_pending_update_returns_command_in_progress", async () => {
     const created = await createTask("h6-task-dupe-pending-update", "input_required");
-    const taskId = String(created.task.taskId);
+    const taskId = created.task.taskId;
     await rawRequest("tasks/update", { taskId, inputs: { approval: true } }, "h6-dupe-update-wire-1");
     const duplicate = await rawRequest(
       "tasks/update",
@@ -391,14 +391,16 @@ describe("H6 MCP wire and result contract", () => {
         commandSequence: 1,
         commandType: "UPDATE",
         commandState: "PENDING",
-        retryAfterMs: expect.any(Number),
       },
     });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
   });
 
   it("duplicate_claimed_pause_returns_command_in_progress", async () => {
     const created = await createTask("h6-task-dupe-claimed-pause");
-    const taskId = String(created.task.taskId);
+    const taskId = created.task.taskId;
     await rawRequest("tasks/pause", { taskId }, "h6-dupe-claimed-pause-1");
     await pool.query(
       `UPDATE task_command
@@ -414,14 +416,16 @@ describe("H6 MCP wire and result contract", () => {
         commandSequence: 1,
         commandType: "PAUSE",
         commandState: "CLAIMED",
-        retryAfterMs: expect.any(Number),
       },
     });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
   });
 
   it("duplicate_retry_wait_resume_returns_command_in_progress", async () => {
     const created = await createTask("h6-task-dupe-retry-wait-resume");
-    const taskId = String(created.task.taskId);
+    const taskId = created.task.taskId;
     await rawRequest("tasks/resume", { taskId }, "h6-dupe-retry-wait-resume-1");
     await pool.query(
       `UPDATE task_command
@@ -438,9 +442,11 @@ describe("H6 MCP wire and result contract", () => {
         commandSequence: 1,
         commandType: "RESUME",
         commandState: "RETRY_WAIT",
-        retryAfterMs: expect.any(Number),
       },
     });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
   });
 });
 

@@ -82,11 +82,12 @@ export const STANDARD_RESULT_FIELDS = {
 
 export function sanitizeResultPayload(snapshot: AdapterSnapshotLike): Record<string, unknown> {
   const source = snapshot.result ?? {};
-  if (source === null || typeof source !== "object" || Array.isArray(source)) {
-    return snapshot.result === null || snapshot.result === undefined ? {} : { value: source };
+  if (typeof source !== "object" || Array.isArray(source)) {
+    return { value: source };
   }
   const filtered: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+  const payload = source;
+  for (const [key, value] of Object.entries(payload)) {
     if (!STANDARD_RESULT_FIELDS[key as keyof typeof STANDARD_RESULT_FIELDS]) {
       filtered[key] = value;
     }

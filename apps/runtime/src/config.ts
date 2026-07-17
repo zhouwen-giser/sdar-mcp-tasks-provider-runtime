@@ -64,7 +64,7 @@ const EnvironmentSchema = z
     if (value.AUTH_MODE === "jwt_hs256" && value.JWT_HS256_SECRET === undefined) {
       context.addIssue({ code: "custom", message: "jwt_hs256 requires JWT_HS256_SECRET" });
     }
-    if (value.INTERNAL_ENDPOINTS_ENABLED === true && value.INTERNAL_ADMIN_TOKEN === undefined) {
+    if (value.INTERNAL_ENDPOINTS_ENABLED && value.INTERNAL_ADMIN_TOKEN === undefined) {
       context.addIssue({
         code: "custom",
         message: "INTERNAL_ENDPOINTS_ENABLED requires INTERNAL_ADMIN_TOKEN",
@@ -90,22 +90,30 @@ export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env):
   const violations: string[] = [];
   if (value.COMMAND_CLAIM_LEASE_MS < commandClaimLeaseMinimum) {
     violations.push(
-      `COMMAND_CLAIM_LEASE_MS must be >= ${commandClaimLeaseMinimum} for current timeout and budget`,
+      "COMMAND_CLAIM_LEASE_MS must be >= " +
+        String(commandClaimLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (value.SCHEDULE_CLAIM_LEASE_MS < scheduleClaimLeaseMinimum) {
     violations.push(
-      `SCHEDULE_CLAIM_LEASE_MS must be >= ${scheduleClaimLeaseMinimum} for current timeout and budget`,
+      "SCHEDULE_CLAIM_LEASE_MS must be >= " +
+        String(scheduleClaimLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (value.RECOVERY_LEASE_MS < recoveryLeaseMinimum) {
     violations.push(
-      `RECOVERY_LEASE_MS must be >= ${recoveryLeaseMinimum} for current timeout and budget`,
+      "RECOVERY_LEASE_MS must be >= " +
+        String(recoveryLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (value.IDEMPOTENCY_LEASE_MS < idempotencyLeaseMinimum) {
     violations.push(
-      `IDEMPOTENCY_LEASE_MS must be >= ${idempotencyLeaseMinimum} for current timeout and budget`,
+      "IDEMPOTENCY_LEASE_MS must be >= " +
+        String(idempotencyLeaseMinimum) +
+        " for current timeout and budget",
     );
   }
   if (violations.length > 0) {

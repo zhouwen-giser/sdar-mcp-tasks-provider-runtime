@@ -5,11 +5,9 @@ import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import {
   protoStructToJson,
   validateAdapterSnapshotIdentity,
-  validateCommandAckIdentity,
 } from "../../adapter-protocol/src/index.js";
 import type {
   AvailabilityCheckInput,
-  CommandAck,
   ExecutionSnapshot,
   StartOperationResponse,
 } from "../../adapter-protocol/src/index.js";
@@ -18,6 +16,7 @@ import type {
   AvailabilityCheck,
   AvailabilityResponseValue,
   Clock,
+  SnapshotTransition,
   TaskExecutionTiming,
   TimingAnchors,
 } from "../../domain/src/index.js";
@@ -105,26 +104,6 @@ export class TaskEngine {
       const detail = error instanceof Error ? error.message : "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH";
       await this.#repository.recordIdentityConflict(task.taskId, detail);
       this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "snapshot" });
-      throw error;
-    }
-  }
-
-  async #validateTaskAck(
-    task: TaskRecord,
-    operationName: string,
-    commandSequence: number,
-    ack: CommandAck,
-  ): Promise<void> {
-    try {
-      validateCommandAckIdentity(ack, {
-        ...expectedTaskIdentity(task, operationName),
-        commandSequence,
-      });
-    } catch (error) {
-      const detail =
-        error instanceof Error ? error.message : "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH";
-      await this.#repository.recordIdentityConflict(task.taskId, detail);
-      this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "command_ack" });
       throw error;
     }
   }
@@ -753,10 +732,11 @@ export class TaskEngine {
       this.#repository.listInputRequests(taskId),
       this.#repository.listObservations(taskId),
     ]);
-    const taskResult = detailedTask(task, inputRequests, observations);
-    const profile = taskResult._meta?.["io.sdar/taskExecution"] as
-      | Record<string, unknown>
-      | undefined;
+    const taskResult = detailedTask(task, inputRequests, observations) as Record<
+      string,
+      Record<string, unknown> | null
+    > & { _meta?: Record<string, Record<string, unknown>> };
+    const profile = taskResult._meta?.["io.sdar/taskExecution"];
     const acceptedAt = this.clock.now().toISOString();
     const retryAfterMs =
       command.nextAttemptAt === null
@@ -786,17 +766,18 @@ export class TaskEngine {
     commandType: "UPDATE" | "PAUSE" | "RESUME",
     command: CommandResolution,
   ): Promise<Record<string, unknown>> {
-    if (command.state === "PENDING" || command.state === "CLAIMED" || command.state === "RETRY_WAIT") {
-      this.#commandInProgressError(command, commandType);
-    }
-    if (command.state === "ACKNOWLEDGED") {
-      return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
-    }
-    if (command.state === "REJECTED") {
-      return this.#commandRejectionResult(commandType, command);
-    }
-    if (command.state === "EXHAUSTED") {
-      return this.#commandFailureResult(commandType, command);
+    switch (command.state) {
+      case "PENDING":
+      case "CLAIMED":
+      case "RETRY_WAIT":
+        this.#commandInProgressError(command, commandType);
+        break;
+      case "ACKNOWLEDGED":
+        return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
+      case "REJECTED":
+        return this.#commandRejectionResult(commandType, command);
+      case "EXHAUSTED":
+        return this.#commandFailureResult(commandType, command);
     }
     return this.#taskWithCommandReceipt(taskId, authorization, commandType, command);
   }
@@ -1103,7 +1084,7 @@ function stopTransition(
   operation: ValidatedOperation,
   snapshot: ExecutionSnapshot,
   completedAt: Date,
-) {
+): SnapshotTransition {
   if (snapshot.state === "CANCELLED" && task.stopReason === "DEADLINE_REACHED") {
     return deadlineReached(snapshot.message, completedAt);
   }

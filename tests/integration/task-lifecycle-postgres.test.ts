@@ -1099,12 +1099,18 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.updateTask(taskId, { approval: true }, authorization);
-    await expect(engine.updateTask(taskId, { approval: true }, authorization)).rejects.toMatchObject({
+    let duplicateError: unknown;
+    try {
+      await engine.updateTask(taskId, { approval: true }, authorization);
+    } catch (error) {
+      duplicateError = error;
+    }
+    expect(duplicateError).toMatchObject({
       commandSequence: 1,
       commandType: "UPDATE",
       commandState: "PENDING",
-      retryAfterMs: expect.any(Number),
     });
+    expect((duplicateError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
     expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
     expect(controlSideEffectCount).toBe(before);
   });
@@ -1148,13 +1154,19 @@ describe("durable task lifecycle", () => {
        WHERE task_id=$1 AND command_type='PAUSE' AND command_sequence=1`,
       [taskId],
     );
-    await expect(engine.controlTask(taskId, "PAUSE", authorization)).rejects.toMatchObject({
+    let duplicateError: unknown;
+    try {
+      await engine.controlTask(taskId, "PAUSE", authorization);
+    } catch (error) {
+      duplicateError = error;
+    }
+    expect(duplicateError).toMatchObject({
       reasonCode: "COMMAND_IN_PROGRESS",
       commandSequence: 1,
       commandType: "PAUSE",
       commandState: "CLAIMED",
-      retryAfterMs: expect.any(Number),
     });
+    expect((duplicateError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
     expect(await commandAttempts(taskId, "PAUSE")).toBe("1");
     expect(controlSideEffectCount).toBe(before);
   });
@@ -1199,13 +1211,19 @@ describe("durable task lifecycle", () => {
        WHERE task_id=$1 AND command_type='RESUME' AND command_sequence=1`,
       [taskId],
     );
-    await expect(engine.controlTask(taskId, "RESUME", authorization)).rejects.toMatchObject({
+    let duplicateError: unknown;
+    try {
+      await engine.controlTask(taskId, "RESUME", authorization);
+    } catch (error) {
+      duplicateError = error;
+    }
+    expect(duplicateError).toMatchObject({
       reasonCode: "COMMAND_IN_PROGRESS",
       commandSequence: 1,
       commandType: "RESUME",
       commandState: "RETRY_WAIT",
-      retryAfterMs: expect.any(Number),
     });
+    expect((duplicateError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
     expect(await commandAttempts(taskId, "RESUME")).toBe("1");
     expect(controlSideEffectCount).toBe(before);
   });
@@ -1447,7 +1465,7 @@ describe("durable task lifecycle", () => {
       );
       if (created.kind !== "task") throw new Error(`Expected ${commandType} task`);
       const taskId = String(created.task.taskId);
-      const replicas = [
+      const replicas: [TaskEngine, TaskEngine, TaskEngine] = [
         engine,
         new TaskEngine(
           engine.manifest,
@@ -1465,16 +1483,18 @@ describe("durable task lifecycle", () => {
         ),
       ];
       if (commandType === "UPDATE") {
+        const [firstReplica, secondReplica, thirdReplica] = replicas;
         await Promise.all([
-          replicas[0].updateTask(taskId, { approval: true }, authorization),
-          replicas[1].updateTask(taskId, { approval: true }, authorization),
-          replicas[2].updateTask(taskId, { approval: true }, authorization),
+          firstReplica.updateTask(taskId, { approval: true }, authorization),
+          secondReplica.updateTask(taskId, { approval: true }, authorization),
+          thirdReplica.updateTask(taskId, { approval: true }, authorization),
         ]);
       } else {
+        const [firstReplica, secondReplica, thirdReplica] = replicas;
         await Promise.all([
-          replicas[0].controlTask(taskId, commandType, authorization),
-          replicas[1].controlTask(taskId, commandType, authorization),
-          replicas[2].controlTask(taskId, commandType, authorization),
+          firstReplica.controlTask(taskId, commandType, authorization),
+          secondReplica.controlTask(taskId, commandType, authorization),
+          thirdReplica.controlTask(taskId, commandType, authorization),
         ]);
       }
       expect(await commandAttempts(taskId, commandType)).toBe("1");
@@ -1495,7 +1515,7 @@ describe("durable task lifecycle", () => {
       );
       if (created.kind !== "task") throw new Error(`Expected ${commandType} task`);
       const taskId = String(created.task.taskId);
-      const replicas = [
+      const replicas: [TaskEngine, TaskEngine, TaskEngine] = [
         engine,
         new TaskEngine(
           engine.manifest,
@@ -1515,16 +1535,18 @@ describe("durable task lifecycle", () => {
 
       const before = controlSideEffectCount;
       if (commandType === "UPDATE") {
+        const [firstReplica, secondReplica, thirdReplica] = replicas;
         await Promise.all([
-          replicas[0].updateTask(taskId, { approval: true }, authorization),
-          replicas[1].updateTask(taskId, { approval: true }, authorization),
-          replicas[2].updateTask(taskId, { approval: true }, authorization),
+          firstReplica.updateTask(taskId, { approval: true }, authorization),
+          secondReplica.updateTask(taskId, { approval: true }, authorization),
+          thirdReplica.updateTask(taskId, { approval: true }, authorization),
         ]);
       } else {
+        const [firstReplica, secondReplica, thirdReplica] = replicas;
         await Promise.all([
-          replicas[0].controlTask(taskId, commandType, authorization),
-          replicas[1].controlTask(taskId, commandType, authorization),
-          replicas[2].controlTask(taskId, commandType, authorization),
+          firstReplica.controlTask(taskId, commandType, authorization),
+          secondReplica.controlTask(taskId, commandType, authorization),
+          thirdReplica.controlTask(taskId, commandType, authorization),
         ]);
       }
 
@@ -1538,16 +1560,18 @@ describe("durable task lifecycle", () => {
       ).tick();
 
       if (commandType === "UPDATE") {
+        const [firstReplica, secondReplica, thirdReplica] = replicas;
         await Promise.all([
-          replicas[0].updateTask(taskId, { approval: true }, authorization),
-          replicas[1].updateTask(taskId, { approval: true }, authorization),
-          replicas[2].updateTask(taskId, { approval: true }, authorization),
+          firstReplica.updateTask(taskId, { approval: true }, authorization),
+          secondReplica.updateTask(taskId, { approval: true }, authorization),
+          thirdReplica.updateTask(taskId, { approval: true }, authorization),
         ]);
       } else {
+        const [firstReplica, secondReplica, thirdReplica] = replicas;
         await Promise.all([
-          replicas[0].controlTask(taskId, commandType, authorization),
-          replicas[1].controlTask(taskId, commandType, authorization),
-          replicas[2].controlTask(taskId, commandType, authorization),
+          firstReplica.controlTask(taskId, commandType, authorization),
+          secondReplica.controlTask(taskId, commandType, authorization),
+          thirdReplica.controlTask(taskId, commandType, authorization),
         ]);
       }
       expect(controlSideEffectCount - before).toBe(1);

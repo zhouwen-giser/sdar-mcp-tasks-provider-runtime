@@ -115,6 +115,7 @@ function mapPendingCommandRecord(row: PendingCommandRecordRow): PendingCommandRe
 function mapCommandResolution(row: PendingCommandRecordRow): Omit<CommandResolution, "duplicate"> {
   return {
     sequence: Number(row.command_sequence),
+    disposition: "existing",
     state: row.state,
     adapterAck: row.adapter_ack ?? null,
     lastErrorCode: row.last_error_code ?? null,
@@ -1908,7 +1909,7 @@ export class TaskRepository {
 
   async completeInputAnswers(
     taskId: string,
-    answers: { key: string; hash: string; value: unknown }[],
+    answers: { key: string; answerHash: string; value: unknown }[],
   ): Promise<void> {
     const client = await this.pool.connect();
     try {
@@ -1918,7 +1919,7 @@ export class TaskRepository {
           `UPDATE task_input_request SET status='ANSWERED', answer_hash=$3,
            answer=$4::jsonb, answered_at=clock_timestamp()
            WHERE task_id=$1 AND request_key=$2 AND status='OPEN'`,
-          [taskId, answer.key, answer.hash, JSON.stringify(answer.value)],
+          [taskId, answer.key, answer.answerHash, JSON.stringify(answer.value)],
         );
         if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
       }
@@ -1944,7 +1945,7 @@ export class TaskRepository {
         },
         outboxType: "task.input_answered",
         eventKey: `${taskId}:input-answered:${answers
-          .map((answer) => answer.hash)
+          .map((answer) => answer.answerHash)
           .sort()
           .join(":")}`,
         outboxPayload: { keys },

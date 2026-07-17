@@ -4,7 +4,7 @@ import {
   validateCommandAckIdentity,
 } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
-import type { Clock } from "../../domain/src/index.js";
+import type { Clock, ExecutionMode } from "../../domain/src/index.js";
 import { isTerminalState, systemClock } from "../../domain/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { PendingCommandRecord, TaskRepository } from "../../persistence-postgres/src/index.js";
@@ -68,8 +68,7 @@ export class DurableCommandDispatcher {
           if (outcome === "acknowledged") result.acknowledged += 1;
           else if (outcome === "retriable") result.retried += 1;
           else if (outcome === "rejected") result.rejected += 1;
-          else if (outcome === "exhausted") result.exhausted += 1;
-          else if (outcome === "terminal") result.terminal += 1;
+          else result.exhausted += 1;
           continue;
         }
         if (command.commandType === "UPDATE") {
@@ -135,11 +134,11 @@ export class DurableCommandDispatcher {
       argumentHash: string;
       externalExecutionId: string | null;
       authorizationContextHash: string;
-      executionMode: string;
+      executionMode: ExecutionMode;
       simulationId: string | null;
     },
     operation: ValidatedOperation,
-  ): Promise<"acknowledged" | "retriable" | "rejected" | "exhausted" | "terminal"> {
+  ): Promise<"acknowledged" | "retriable" | "rejected" | "exhausted"> {
     const operationName = operation.name;
     const stopReason =
       command.stopReason === "DEADLINE_REACHED"
@@ -239,7 +238,7 @@ export class DurableCommandDispatcher {
       argumentHash: string;
       externalExecutionId: string | null;
       authorizationContextHash: string;
-      executionMode: string;
+      executionMode: ExecutionMode;
       simulationId: string | null;
     },
     operationName: string,
@@ -297,7 +296,7 @@ export class DurableCommandDispatcher {
       argumentHash: string;
       externalExecutionId: string | null;
       authorizationContextHash: string;
-      executionMode: string;
+      executionMode: ExecutionMode;
       simulationId: string | null;
     },
     operationName: string,
@@ -384,7 +383,8 @@ function parseUpdateAnswers(payload: Record<string, unknown>) {
   ) {
     throw new Error("INVALID_UPDATE_COMMAND_PAYLOAD");
   }
-  return Object.entries(answers).map(([key, value]) => ({
+  const answerRecord = answers as Record<string, unknown>;
+  return Object.entries(answerRecord).map(([key, value]) => ({
     key,
     value,
     answerHash: commandHash(canonicalize(value)),
@@ -407,7 +407,7 @@ function commandHash(value: unknown): string {
 
 function executionOptions(task: {
   authorizationContextHash: string;
-  executionMode: string;
+  executionMode: ExecutionMode;
   simulationId: string | null;
 }): Record<string, unknown> {
   return {

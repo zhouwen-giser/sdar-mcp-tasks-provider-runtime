@@ -77,7 +77,7 @@ export interface CommandInProgressContext {
   commandSequence: number;
   commandType: string;
   commandState: string;
-  retryAfterMs?: number;
+  retryAfterMs: number;
 }
 
 export class CommandInProgressError extends RuntimeError {
@@ -97,7 +97,7 @@ export class CommandInProgressError extends RuntimeError {
   readonly commandSequence: number;
   readonly commandType: string;
   readonly commandState: string;
-  readonly retryAfterMs?: number;
+  readonly retryAfterMs: number;
 }
 
 export function isRuntimeError(error: unknown): error is RuntimeError {

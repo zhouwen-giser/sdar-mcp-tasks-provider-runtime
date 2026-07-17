@@ -302,7 +302,7 @@ function mapProtocolError(error: unknown): McpError {
       commandSequence: error.commandSequence,
       commandType: error.commandType,
       commandState: error.commandState,
-      ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+      retryAfterMs: error.retryAfterMs,
     });
   }
   if (isRuntimeError(error)) {
