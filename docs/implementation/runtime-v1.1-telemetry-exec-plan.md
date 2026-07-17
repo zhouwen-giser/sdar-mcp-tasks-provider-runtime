@@ -28,8 +28,8 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | Phase   | Deliverable                                                 | Required evidence                       | Status      |
 | ------- | ----------------------------------------------------------- | --------------------------------------- | ----------- |
 | H0      | OTel SDK foundation, resource, lifecycle                    | init/resource/shutdown tests            | complete    |
-| H1      | stable Provider Ops envelope, UUIDv5 ID, RFC 8785 hash      | deterministic ID/hash tests             | in progress |
-| H2      | committed Task lifecycle audit events                       | commit/rollback integration tests       | pending     |
+| H1      | stable Provider Ops envelope, UUIDv5 ID, RFC 8785 hash      | deterministic ID/hash tests             | complete    |
+| H2      | committed Task lifecycle audit events                       | commit/rollback integration tests       | in progress |
 | H3      | command dispatch events                                     | state/duplicate/retry/supersede tests   | pending     |
 | H4      | Adapter RPC spans                                           | success/error/no-payload tests          | pending     |
 | H5      | scheduler/recovery/TTL events                               | component event tests                   | pending     |
@@ -58,6 +58,7 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | ---------- | ---------------------------------------------- | ------ |
 | 2026-07-17 | rc.3 `pnpm verify:rc3` before branch creation  | PASS   |
 | 2026-07-18 | H0 format, typecheck, lint and unit (33 tests) | PASS   |
+| 2026-07-18 | H1 format, typecheck, lint and unit (38 tests) | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.

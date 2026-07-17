@@ -11,6 +11,7 @@ import { BatchSpanProcessor, NodeTracerProvider } from "@opentelemetry/sdk-trace
 import type { SpanExporter } from "@opentelemetry/sdk-trace-node";
 import { createProviderResource } from "./provider-resource.js";
 import type { ProviderResourceInput } from "./provider-resource.js";
+import type { ProviderOpsEnvelope } from "./event-envelope.js";
 
 const INSTRUMENTATION_NAME = "@sdar/provider-ops-telemetry";
 const INSTRUMENTATION_VERSION = "1.1.0";
@@ -121,6 +122,15 @@ export class ProviderTelemetry {
       body: body as never,
       attributes,
       timestamp: new Date(),
+    });
+  }
+
+  emitEnvelope(envelope: ProviderOpsEnvelope): void {
+    this.event(envelope.recordType, envelope, {
+      "sdar.schema.name": envelope.schemaName,
+      "sdar.schema.version": envelope.schemaVersion,
+      "sdar.record.id": envelope.recordId,
+      "sdar.record.hash": envelope.recordHash,
     });
   }
 
