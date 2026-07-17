@@ -2,11 +2,11 @@
 
 Date: 2026-07-17
 
-Verified implementation commit: `f658bdc`
+Verified implementation commit: `19c818feadf6df7e16250279a14650e56c35ac24`
 
 Aggregate command: `pnpm verify:rc3`
 
-Result: PASS (316.4 seconds, PostgreSQL 17 and Docker Desktop)
+Result: PASS (287.4 seconds, PostgreSQL 17 and Docker Desktop)
 
 | Gate                             | Result | Evidence                                                             |
 | -------------------------------- | ------ | -------------------------------------------------------------------- |
@@ -14,10 +14,10 @@ Result: PASS (316.4 seconds, PostgreSQL 17 and Docker Desktop)
 | Production build and Proto drift | PASS   | pinned Docker fallback regenerated identical Proto output on Windows |
 | Dependency audit and SBOM        | PASS   | no known vulnerabilities; 184 production components                  |
 | Deployment and image             | PASS   | 8 Kubernetes manifests; two reproducible non-root images             |
-| Unit                             | PASS   | 27 tests                                                             |
+| Unit                             | PASS   | 29 tests                                                             |
 | Contract                         | PASS   | 4 tests                                                              |
-| Integration                      | PASS   | 77 tests in 17 files                                                 |
-| Recovery                         | PASS   | 8 tests                                                              |
+| Integration                      | PASS   | 157 tests in 17 files                                                |
+| Recovery                         | PASS   | 9 tests                                                              |
 | Security                         | PASS   | 16 tests                                                             |
 | E2E                              | PASS   | 4 tests                                                              |
 | Adapter conformance              | PASS   | TypeScript and Python reference Adapters                             |

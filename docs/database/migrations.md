@@ -72,10 +72,8 @@ already-due migration recovery lease; COMPLETE rows retain their payload and no 
 partial index orders takeover work by lease expiry. Runtime claims in a short transaction,
 performs Adapter work without a checked-out PoolClient, and completes with an owner CAS.
 
-`013_single_claimed_command.sql` enforces one `CLAIMED` command per Task and requires every
-claimed row to carry both owner and expiry. Dispatchers renew ownership during slow Adapter RPCs
-and use owner-CAS completion, preventing expired batch claims from producing duplicate side
-effects across Runtime replicas.
+`013_single_claimed_command.sql` is the immutable rc.2 migration that enforces one `CLAIMED`
+command per Task.
 
 `014_start_confirmation_watchdog.sql` adds `WAITING_START_CONFIRMATION` and durable confirmation
 deadline/attempt fields. Every bound execution without confirmed start is reconciled before a
@@ -89,13 +87,17 @@ filenames.
 index. Successful reconciliation resets the schedule; failures receive bounded exponential
 backoff so persistent failures cannot starve newly recoverable Tasks.
 
+`016_command_claim_lease_consistency.sql` requires every claimed command to carry both owner and
+expiry. Dispatchers renew ownership during slow Adapter RPCs and use owner-CAS completion,
+preventing expired batch claims from producing duplicate side effects across Runtime replicas.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate
 Snapshot insertion, task lifecycle constraints, crash windows, applied-migration tamper
 detection, and a complete 001-006 rc.1 fixture containing pending/uncertain admissions,
 working/queued/input/stopping/scheduled/terminal Tasks, a pending command, observation/outbox and
-idempotency data. After 007-015 it proves data/backfills and executes Recovery, Dispatcher and
+idempotency data. After 007-016 it proves data/backfills and executes Recovery, Dispatcher and
 Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter. rc.3 also verifies all
-16 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths.
+17 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths.
 
 rc.2 repository code reads the committed Task through the same client used for the publication
 transaction, then releases it. This is a runtime access-pattern fix and requires no schema

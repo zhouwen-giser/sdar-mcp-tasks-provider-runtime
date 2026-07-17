@@ -2,7 +2,7 @@
 
 Date: 2026-07-17
 
-Verified implementation commit: `f658bdc`
+Verified implementation commit: `19c818feadf6df7e16250279a14650e56c35ac24`
 
 Result: PASS
 
@@ -14,7 +14,7 @@ Result: PASS
   read-only root filesystem, dropped capabilities, RuntimeDefault seccomp and no service-account
   token mount.
 - Two independently built `sdar-runtime:rc3-audit-*` images had identical filesystem/config
-  shape, ran as `node`, excluded tests/docs/dev dependencies and measured 97,165,200 bytes against
+  shape, ran as `node`, excluded tests/docs/dev dependencies and measured 97,177,354 bytes against
   the 350,000,000-byte ceiling.
 - Manifest drift is a readiness failure, Outbox publication failures retain events and block TTL
   purge, and ambiguous production configuration is rejected at startup.
