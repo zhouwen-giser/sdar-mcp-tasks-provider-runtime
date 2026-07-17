@@ -1377,6 +1377,255 @@ describe("durable task lifecycle", () => {
     expect(controlSideEffectCount).toBe(before);
   });
 
+  it("acknowledged_cancel_blocks_new_update", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-stop-ack-block", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='ACKNOWLEDGED', claim_owner=NULL, claim_until=NULL,
+             adapter_ack=$2::jsonb
+       WHERE task_id=$1 AND command_type='CANCEL' AND command_sequence=1`,
+      [
+        taskId,
+        JSON.stringify({
+          accepted: true,
+          reasonCode: "STOP_ACCEPTED",
+          message: "Safe stop accepted.",
+        }),
+      ],
+    );
+
+    let requestError: unknown;
+    try {
+      await engine.updateTask(taskId, { approval: true }, authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({
+      commandSequence: 1,
+      commandType: "CANCEL",
+      requestedCommandType: "UPDATE",
+      blockingCommandType: "CANCEL",
+      commandState: "ACKNOWLEDGED",
+    });
+    expect((requestError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("0");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("acknowledged_cancel_blocks_new_pause", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-pause-stop-ack-block" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='ACKNOWLEDGED', claim_owner=NULL, claim_until=NULL,
+             adapter_ack=$2::jsonb
+       WHERE task_id=$1 AND command_type='CANCEL' AND command_sequence=1`,
+      [
+        taskId,
+        JSON.stringify({
+          accepted: true,
+          reasonCode: "STOP_ACCEPTED",
+          message: "Safe stop accepted.",
+        }),
+      ],
+    );
+
+    let requestError: unknown;
+    try {
+      await engine.controlTask(taskId, "PAUSE", authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({
+      commandSequence: 1,
+      commandType: "CANCEL",
+      requestedCommandType: "PAUSE",
+      blockingCommandType: "CANCEL",
+      commandState: "ACKNOWLEDGED",
+    });
+    expect((requestError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
+    expect(await commandAttempts(taskId, "PAUSE")).toBe("0");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("acknowledged_cancel_blocks_new_resume", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-resume-stop-ack-block" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='ACKNOWLEDGED', claim_owner=NULL, claim_until=NULL,
+             adapter_ack=$2::jsonb
+       WHERE task_id=$1 AND command_type='CANCEL' AND command_sequence=1`,
+      [
+        taskId,
+        JSON.stringify({
+          accepted: true,
+          reasonCode: "STOP_ACCEPTED",
+          message: "Safe stop accepted.",
+        }),
+      ],
+    );
+
+    let requestError: unknown;
+    try {
+      await engine.controlTask(taskId, "RESUME", authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({
+      commandSequence: 1,
+      commandType: "CANCEL",
+      requestedCommandType: "RESUME",
+      blockingCommandType: "CANCEL",
+      commandState: "ACKNOWLEDGED",
+    });
+    expect((requestError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
+    expect(await commandAttempts(taskId, "RESUME")).toBe("0");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("pending_cancel_blocks_new_update", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-update-stop-pending-block", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.cancelTask(taskId, authorization);
+    let requestError: unknown;
+    try {
+      await engine.updateTask(taskId, { approval: true }, authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({
+      commandSequence: 1,
+      commandType: "CANCEL",
+      requestedCommandType: "UPDATE",
+      blockingCommandType: "CANCEL",
+      commandState: "PENDING",
+    });
+    expect((requestError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("0");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("claimed_cancel_blocks_new_pause", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-pause-claimed-stop-block" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.cancelTask(taskId, authorization);
+    await pool.query(
+      `UPDATE task_command
+         SET state='CLAIMED', claim_owner='h6-stop-claimed', claim_until=clock_timestamp()+interval '30s'
+       WHERE task_id=$1 AND command_type='CANCEL' AND command_sequence=1`,
+      [taskId],
+    );
+
+    let requestError: unknown;
+    try {
+      await engine.controlTask(taskId, "PAUSE", authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({
+      commandSequence: 1,
+      commandType: "CANCEL",
+      requestedCommandType: "PAUSE",
+      blockingCommandType: "CANCEL",
+      commandState: "CLAIMED",
+    });
+    expect((requestError as { retryAfterMs?: unknown }).retryAfterMs).toEqual(expect.any(Number));
+    expect(await commandAttempts(taskId, "PAUSE")).toBe("0");
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("stopping_task_never_creates_normal_command", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-stop-no-cancel", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    await pool.query(
+      `UPDATE provider_task
+         SET internal_state='STOPPING', mcp_status='working', substate='stopping',
+             cancel_requested=true, stop_reason='USER_REQUESTED', updated_at=clock_timestamp()
+       WHERE task_id=$1`,
+      [taskId],
+    );
+
+    let requestError: unknown;
+    try {
+      await engine.updateTask(taskId, { approval: true }, authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({ message: "STOP_IN_PROGRESS_WITHOUT_COMMAND" });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("0");
+  });
+
+  it("stopping_without_cancel_command_fails_closed", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-stop-without-cancel" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    await pool.query(
+      `UPDATE provider_task
+         SET internal_state='STOPPING', mcp_status='working', substate='stopping',
+             cancel_requested=true, stop_reason='USER_REQUESTED', updated_at=clock_timestamp()
+       WHERE task_id=$1`,
+      [taskId],
+    );
+
+    let requestError: unknown;
+    try {
+      await engine.controlTask(taskId, "RESUME", authorization);
+    } catch (error) {
+      requestError = error;
+    }
+    expect(requestError).toMatchObject({ message: "STOP_IN_PROGRESS_WITHOUT_COMMAND" });
+    expect(await commandAttempts(taskId, "RESUME")).toBe("0");
+  });
+
   it("pending_pause_then_cancel_creates_cancel", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),

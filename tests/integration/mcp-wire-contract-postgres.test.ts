@@ -515,6 +515,68 @@ describe("H6 MCP wire and result contract", () => {
       },
     });
   });
+
+  it("acknowledged_cancel_blocks_new_update_with_protocol", async () => {
+    const created = await createTask("h6-wire-update-stop-ack", "input_required");
+    const taskId = created.task.taskId;
+    await rawRequest("tasks/cancel", { taskId }, "h6-wire-update-stop-cancel");
+    await pool.query(
+      `UPDATE task_command
+         SET state='ACKNOWLEDGED', claim_owner=NULL, claim_until=NULL,
+             adapter_ack=$2::jsonb
+       WHERE task_id=$1 AND command_type='CANCEL' AND command_sequence=1`,
+      [
+        taskId,
+        JSON.stringify({
+          accepted: true,
+          reasonCode: "STOP_ACCEPTED",
+          message: "Safe stop accepted.",
+        }),
+      ],
+    );
+
+    const duplicate = await rawRequest(
+      "tasks/update",
+      { taskId, inputs: { approval: true } },
+      "h6-wire-update-stop",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "CANCEL",
+        requestedCommandType: "UPDATE",
+        blockingCommandType: "CANCEL",
+        commandState: "ACKNOWLEDGED",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
+  });
+
+  it("pending_cancel_blocks_new_pause_with_protocol", async () => {
+    const created = await createTask("h6-wire-pause-stop-pending");
+    const taskId = created.task.taskId;
+    await rawRequest("tasks/cancel", { taskId }, "h6-wire-pause-stop-cancel");
+
+    const duplicate = await rawRequest("tasks/pause", { taskId }, "h6-wire-pause-stop");
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "CANCEL",
+        requestedCommandType: "PAUSE",
+        blockingCommandType: "CANCEL",
+        commandState: "PENDING",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
+  });
 });
 
 function createTask(resourceId: string, scenario?: string, ttl = 60_000, pollInterval?: number) {

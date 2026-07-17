@@ -775,6 +775,9 @@ export class TaskEngine {
         this.#commandInProgressError(command, commandType);
         break;
       case "ACKNOWLEDGED":
+        if (command.commandType === "CANCEL") {
+          this.#commandInProgressError(command, commandType);
+        }
         return this.#taskWithCommandReceipt(taskId, authorization, command);
       case "REJECTED":
         return this.#commandRejectionResult(command);

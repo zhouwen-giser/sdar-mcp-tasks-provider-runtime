@@ -1630,6 +1630,33 @@ export class TaskRepository {
       if (task === undefined) throw new Error("TASK_NOT_FOUND");
       if (isTerminalState(task.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
+      if (
+        task.cancel_requested ||
+        task.stop_reason !== null ||
+        task.internal_state === "STOPPING"
+      ) {
+        const stopping = await client.query<PendingCommandRecordRow>(
+          `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
+                  claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
+                  last_error_message, claim_until
+           FROM task_command
+           WHERE task_id=$1
+             AND command_type='CANCEL'
+             AND state IN ('PENDING','CLAIMED','RETRY_WAIT','ACKNOWLEDGED')
+           ORDER BY command_sequence DESC LIMIT 1`,
+          [taskId],
+        );
+        if (stopping.rows[0] !== undefined) {
+          await client.query("COMMIT");
+          return {
+            ...mapCommandResolution(stopping.rows[0]),
+            duplicate: true,
+            disposition: "existing",
+          };
+        }
+        throw new Error("STOP_IN_PROGRESS_WITHOUT_COMMAND");
+      }
+
       const active = await client.query<PendingCommandRecordRow>(
         `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
                 claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
