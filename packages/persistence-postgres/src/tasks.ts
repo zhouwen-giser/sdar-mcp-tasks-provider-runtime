@@ -1770,6 +1770,25 @@ export class TaskRepository {
     return result.rowCount ?? 0;
   }
 
+  async supersedeClaimedCommandForSafeStop(command: PendingCommandRecord): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE task_command
+         SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+             next_attempt_at=clock_timestamp(), last_error_code='SUPERSEDED_BY_SAFE_STOP',
+             last_error_message='Safe stop superseded the claimed command.',
+             updated_at=clock_timestamp()
+       WHERE task_id=$1
+         AND command_sequence=$2
+         AND command_type IN ('UPDATE','PAUSE','RESUME')
+         AND state='CLAIMED'
+         AND claim_owner=$3`,
+      [command.taskId, command.commandSequence, command.claimOwner],
+    );
+    if (result.rowCount !== 1) {
+      throw new Error("COMMAND_CLAIM_LOST");
+    }
+  }
+
   async supersedeExpiredClaimedNormalCommandsForSafeStop(taskId: string): Promise<number> {
     const result = await this.pool.query(
       `UPDATE task_command

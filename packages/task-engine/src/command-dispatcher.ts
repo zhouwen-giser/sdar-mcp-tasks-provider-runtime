@@ -78,8 +78,10 @@ export class DurableCommandDispatcher {
             result.acknowledged += 1;
           } else if (outcome === "retriable") {
             result.retried += 1;
-          } else {
+          } else if (outcome === "rejected") {
             result.rejected += 1;
+          } else {
+            result.exhausted += 1;
           }
           continue;
         }
@@ -93,8 +95,10 @@ export class DurableCommandDispatcher {
           result.acknowledged += 1;
         } else if (outcome === "retriable") {
           result.retried += 1;
-        } else {
+        } else if (outcome === "rejected") {
           result.rejected += 1;
+        } else {
+          result.exhausted += 1;
         }
       } catch (error) {
         if (isIdentityError(error)) {
@@ -119,9 +123,10 @@ export class DurableCommandDispatcher {
           command.commandType !== "CANCEL" &&
           (task.cancelRequested || task.stopReason !== null)
         ) {
-          await this.repository.supersedeNormalCommandsForSafeStop(command.taskId, true);
-          result.exhausted += 1;
-          continue;
+          if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
+            result.exhausted += 1;
+            continue;
+          }
         }
         await this.repository.retryClaimedCommand(
           command,
@@ -251,7 +256,7 @@ export class DurableCommandDispatcher {
       simulationId: string | null;
     },
     operationName: string,
-  ): Promise<"acknowledged" | "retriable" | "rejected"> {
+  ): Promise<"acknowledged" | "retriable" | "rejected" | "exhausted"> {
     const answers = parseUpdateAnswers(command.payload);
     const identity = {
       taskId: task.taskId,
@@ -259,42 +264,52 @@ export class DurableCommandDispatcher {
       argumentHash: task.argumentHash,
       commandSequence: command.commandSequence,
     };
-    const ack = await this.gateway.updateExecution(identity, answers, {
-      ...executionOptions(task),
-      externalExecutionId: task.externalExecutionId,
-    });
-    validateCommandAckIdentity(ack, {
-      taskId: task.taskId,
-      externalExecutionId: task.externalExecutionId,
-      operationName,
-      argumentHash: task.argumentHash,
-      authorizationContextHash: task.authorizationContextHash,
-      executionMode: task.executionMode,
-      simulationId: task.simulationId,
-      commandSequence: command.commandSequence,
-    });
-    if (!ack.accepted) {
-      if (isRetryableAck(ack.reasonCode)) {
-        await this.retry(
+    try {
+      const ack = await this.gateway.updateExecution(identity, answers, {
+        ...executionOptions(task),
+        externalExecutionId: task.externalExecutionId,
+      });
+      validateCommandAckIdentity(ack, {
+        taskId: task.taskId,
+        externalExecutionId: task.externalExecutionId,
+        operationName,
+        argumentHash: task.argumentHash,
+        authorizationContextHash: task.authorizationContextHash,
+        executionMode: task.executionMode,
+        simulationId: task.simulationId,
+        commandSequence: command.commandSequence,
+      });
+      if (!ack.accepted) {
+        if (isRetryableAck(ack.reasonCode)) {
+          if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
+            return "exhausted";
+          }
+          await this.retry(
+            command,
+            ack.reasonCode || "ADAPTER_RETRYABLE_REJECTION",
+            ack.message || "Adapter rejected update command.",
+          );
+          return "retriable";
+        }
+        await this.repository.rejectClaimedCommand(
           command,
-          ack.reasonCode || "ADAPTER_RETRYABLE_REJECTION",
+          typeof ack.reasonCode === "string" ? ack.reasonCode : "ADAPTER_REJECTED",
           ack.message || "Adapter rejected update command.",
         );
-        return "retriable";
+        return "rejected";
       }
-      await this.repository.rejectClaimedCommand(
+      await this.repository.acknowledgeClaimedCommand(
         command,
-        typeof ack.reasonCode === "string" ? ack.reasonCode : "ADAPTER_REJECTED",
-        ack.message || "Adapter rejected update command.",
+        ack as unknown as Record<string, unknown>,
       );
-      return "rejected";
+      await this.repository.completeInputAnswers(task.taskId, answers);
+      return "acknowledged";
+    } catch (error) {
+      if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
+        return "exhausted";
+      }
+      throw error;
     }
-    await this.repository.acknowledgeClaimedCommand(
-      command,
-      ack as unknown as Record<string, unknown>,
-    );
-    await this.repository.completeInputAnswers(task.taskId, answers);
-    return "acknowledged";
   }
 
   private async dispatchPauseOrResume(
@@ -310,53 +325,63 @@ export class DurableCommandDispatcher {
     },
     operationName: string,
     commandType: "PAUSE" | "RESUME",
-  ): Promise<"acknowledged" | "retriable" | "rejected"> {
+  ): Promise<"acknowledged" | "retriable" | "rejected" | "exhausted"> {
     const identity = {
       taskId: task.taskId,
       operationName,
       argumentHash: task.argumentHash,
       commandSequence: command.commandSequence,
     };
-    const ack = await (commandType === "PAUSE"
-      ? this.gateway.pauseExecution(identity, {
-          ...executionOptions(task),
-          externalExecutionId: task.externalExecutionId,
-        })
-      : this.gateway.resumeExecution(identity, {
-          ...executionOptions(task),
-          externalExecutionId: task.externalExecutionId,
-        }));
-    validateCommandAckIdentity(ack, {
-      taskId: task.taskId,
-      externalExecutionId: task.externalExecutionId,
-      operationName,
-      argumentHash: task.argumentHash,
-      authorizationContextHash: task.authorizationContextHash,
-      executionMode: task.executionMode,
-      simulationId: task.simulationId,
-      commandSequence: command.commandSequence,
-    });
-    if (!ack.accepted) {
-      if (isRetryableAck(ack.reasonCode)) {
-        await this.retry(
+    try {
+      const ack = await (commandType === "PAUSE"
+        ? this.gateway.pauseExecution(identity, {
+            ...executionOptions(task),
+            externalExecutionId: task.externalExecutionId,
+          })
+        : this.gateway.resumeExecution(identity, {
+            ...executionOptions(task),
+            externalExecutionId: task.externalExecutionId,
+          }));
+      validateCommandAckIdentity(ack, {
+        taskId: task.taskId,
+        externalExecutionId: task.externalExecutionId,
+        operationName,
+        argumentHash: task.argumentHash,
+        authorizationContextHash: task.authorizationContextHash,
+        executionMode: task.executionMode,
+        simulationId: task.simulationId,
+        commandSequence: command.commandSequence,
+      });
+      if (!ack.accepted) {
+        if (isRetryableAck(ack.reasonCode)) {
+          if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
+            return "exhausted";
+          }
+          await this.retry(
+            command,
+            ack.reasonCode || "ADAPTER_RETRYABLE_REJECTION",
+            ack.message || "Adapter rejected pause/resume command.",
+          );
+          return "retriable";
+        }
+        await this.repository.rejectClaimedCommand(
           command,
-          ack.reasonCode || "ADAPTER_RETRYABLE_REJECTION",
-          ack.message || "Adapter rejected pause/resume command.",
+          typeof ack.reasonCode === "string" ? ack.reasonCode : "ADAPTER_REJECTED",
+          ack.message || "Adapter rejected pause or resume command.",
         );
-        return "retriable";
+        return "rejected";
       }
-      await this.repository.rejectClaimedCommand(
+      await this.repository.acknowledgeClaimedCommand(
         command,
-        typeof ack.reasonCode === "string" ? ack.reasonCode : "ADAPTER_REJECTED",
-        ack.message || "Adapter rejected pause or resume command.",
+        ack as unknown as Record<string, unknown>,
       );
-      return "rejected";
+      return "acknowledged";
+    } catch (error) {
+      if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
+        return "exhausted";
+      }
+      throw error;
     }
-    await this.repository.acknowledgeClaimedCommand(
-      command,
-      ack as unknown as Record<string, unknown>,
-    );
-    return "acknowledged";
   }
 
   private async retry(
@@ -370,6 +395,27 @@ export class DurableCommandDispatcher {
       errorCode,
       errorMessage,
     );
+  }
+
+  private async trySupersedeClaimedCommandForSafeStop(
+    command: PendingCommandRecord,
+  ): Promise<boolean> {
+    const task = await this.repository.getById(command.taskId);
+    if (
+      task === null ||
+      (!task.cancelRequested && task.stopReason === null && task.internalState !== "STOPPING")
+    ) {
+      return false;
+    }
+    try {
+      await this.repository.supersedeClaimedCommandForSafeStop(command);
+    } catch (error) {
+      if (error instanceof Error && error.message === "COMMAND_CLAIM_LOST") {
+        return true;
+      }
+      throw error;
+    }
+    return true;
   }
 }
 

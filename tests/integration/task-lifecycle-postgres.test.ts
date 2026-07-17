@@ -1228,6 +1228,438 @@ describe("durable task lifecycle", () => {
     expect(controlSideEffectCount).toBe(before);
   });
 
+  it("retryable_update_ack_after_cancel_is_exhausted", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-retryable-update-ack-after-cancel", scenario: "input_required" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    const release = createDeferred<void>();
+    const repository = new TaskRepository(pool);
+    const originalUpdateExecution = (
+      gateway as unknown as {
+        updateExecution: GrpcAdapterGateway["updateExecution"];
+      }
+    ).updateExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "updateExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId)
+          return originalUpdateExecution(
+            ...(args as Parameters<GrpcAdapterGateway["updateExecution"]>),
+          );
+        await release.promise;
+        return {
+          accepted: false,
+          reasonCode: "TRANSIENT_UNAVAILABLE",
+          message: "Transient update failure.",
+          commandSequence: identity.commandSequence ?? 0,
+          identity,
+        };
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "retryable-update-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "UPDATE");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
+    );
+
+    const cancelAfter = await pool.query<{
+      command_type: "UPDATE" | "CANCEL";
+      state: string;
+      last_error_code: string | null;
+    }>(
+      `SELECT command_type, state, last_error_code FROM task_command
+       WHERE task_id=$1 ORDER BY command_sequence`,
+      [taskId],
+    );
+    const normalCommand = cancelAfter.rows.find((row) => row.command_type === "UPDATE");
+    const cancelCommand = cancelAfter.rows.find((row) => row.command_type === "CANCEL");
+    expect(normalCommand).toMatchObject({
+      state: "EXHAUSTED",
+      last_error_code: "SUPERSEDED_BY_SAFE_STOP",
+    });
+    if (cancelCommand !== undefined) {
+      expect(cancelCommand.state).toBe("PENDING");
+    }
+
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "retryable-update-dispatcher-followup",
+    ).tick();
+    const finalRows = await pool.query<{
+      command_type: "UPDATE" | "CANCEL";
+      state: string;
+    }>(`SELECT command_type, state FROM task_command WHERE task_id=$1 ORDER BY command_sequence`, [
+      taskId,
+    ]);
+    expect(finalRows.rows.find((row) => row.command_type === "CANCEL")?.state).toBe("ACKNOWLEDGED");
+    expect(controlSideEffectCount - before).toBe(1);
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+  });
+
+  it("retryable_pause_ack_after_cancel_is_exhausted", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-retryable-pause-ack-after-cancel" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.controlTask(taskId, "PAUSE", authorization);
+    const repository = new TaskRepository(pool);
+    const release = createDeferred<void>();
+    const originalPauseExecution = (
+      gateway as unknown as {
+        pauseExecution: GrpcAdapterGateway["pauseExecution"];
+      }
+    ).pauseExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "pauseExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId) {
+          return originalPauseExecution(
+            ...(args as Parameters<GrpcAdapterGateway["pauseExecution"]>),
+          );
+        }
+        await release.promise;
+        return {
+          accepted: false,
+          reasonCode: "TRANSIENT_UNAVAILABLE",
+          message: "Transient pause failure.",
+          commandSequence: identity.commandSequence,
+          identity,
+        };
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "retryable-pause-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "PAUSE");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
+    );
+
+    const cancelAfter = await repository.getById(taskId);
+    expect(cancelAfter).toMatchObject({ internalState: "STOPPING" });
+
+    const rows = await pool.query<{
+      command_type: "UPDATE" | "PAUSE" | "CANCEL";
+      state: string;
+      last_error_code: string | null;
+    }>(`SELECT command_type, state, last_error_code FROM task_command WHERE task_id=$1`, [taskId]);
+    expect(rows.rows.find((row) => row.command_type === "PAUSE")).toMatchObject({
+      state: "EXHAUSTED",
+      last_error_code: "SUPERSEDED_BY_SAFE_STOP",
+    });
+    expect(await commandAttempts(taskId, "PAUSE")).toBe("1");
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "retryable-pause-dispatcher-followup",
+    ).tick();
+    expect(controlSideEffectCount - before).toBe(1);
+    const finalCancel = await pool.query<{ state: string }>(
+      `SELECT state FROM task_command WHERE task_id=$1 AND command_type='CANCEL'`,
+      [taskId],
+    );
+    expect(finalCancel.rows[0]?.state).toBe("ACKNOWLEDGED");
+  });
+
+  it("retryable_resume_ack_after_cancel_is_exhausted", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-retryable-resume-ack-after-cancel" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.controlTask(taskId, "RESUME", authorization);
+    const repository = new TaskRepository(pool);
+    const release = createDeferred<void>();
+    const originalResumeExecution = (
+      gateway as unknown as {
+        resumeExecution: GrpcAdapterGateway["resumeExecution"];
+      }
+    ).resumeExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "resumeExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId)
+          return originalResumeExecution(
+            ...(args as Parameters<GrpcAdapterGateway["resumeExecution"]>),
+          );
+        await release.promise;
+        return {
+          accepted: false,
+          reasonCode: "TRANSIENT_UNAVAILABLE",
+          message: "Transient resume failure.",
+          commandSequence: identity.commandSequence ?? 0,
+          identity,
+        };
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "retryable-resume-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "RESUME");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
+    );
+
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "retryable-resume-dispatcher-followup",
+    ).tick();
+
+    const rows = await pool.query<{
+      command_type: "PAUSE" | "RESUME" | "CANCEL";
+      state: string;
+      last_error_code: string | null;
+    }>(
+      `SELECT command_type, state, last_error_code FROM task_command WHERE task_id=$1 ORDER BY command_sequence`,
+      [taskId],
+    );
+    expect(rows.rows.find((row) => row.command_type === "RESUME")).toMatchObject({
+      state: "EXHAUSTED",
+      last_error_code: "SUPERSEDED_BY_SAFE_STOP",
+    });
+    expect(rows.rows.find((row) => row.command_type === "CANCEL")).toMatchObject({
+      state: "ACKNOWLEDGED",
+    });
+    expect(controlSideEffectCount - before).toBe(1);
+  });
+
+  it("transient_update_exception_after_cancel_is_exhausted", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      {
+        resourceId: "resource-transient-update-exception-after-cancel",
+        scenario: "input_required",
+      },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected input task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.updateTask(taskId, { approval: true }, authorization);
+    const release = createDeferred<void>();
+    const repository = new TaskRepository(pool);
+    const originalUpdateExecution = (
+      gateway as unknown as {
+        updateExecution: GrpcAdapterGateway["updateExecution"];
+      }
+    ).updateExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "updateExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId)
+          return originalUpdateExecution(
+            ...(args as Parameters<GrpcAdapterGateway["updateExecution"]>),
+          );
+        await release.promise;
+        throw new Error("simulated transient failure");
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "transient-update-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "UPDATE");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
+    );
+
+    const rows = await pool.query<{ state: string; last_error_code: string | null }>(
+      `SELECT state, last_error_code FROM task_command WHERE task_id=$1 AND command_type='UPDATE'`,
+      [taskId],
+    );
+    expect(rows.rows[0]).toMatchObject({
+      state: "EXHAUSTED",
+      last_error_code: "SUPERSEDED_BY_SAFE_STOP",
+    });
+    expect(await commandAttempts(taskId, "UPDATE")).toBe("1");
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "transient-update-dispatcher-followup",
+    ).tick();
+    expect(controlSideEffectCount - before).toBe(1);
+  });
+
+  it("transient_pause_exception_after_cancel_is_exhausted", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-transient-pause-exception-after-cancel" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.controlTask(taskId, "PAUSE", authorization);
+    const release = createDeferred<void>();
+    const repository = new TaskRepository(pool);
+    const originalPauseExecution = (
+      gateway as unknown as {
+        pauseExecution: GrpcAdapterGateway["pauseExecution"];
+      }
+    ).pauseExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "pauseExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId)
+          return originalPauseExecution(
+            ...(args as Parameters<GrpcAdapterGateway["pauseExecution"]>),
+          );
+        await release.promise;
+        throw new Error("simulated transient failure");
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "transient-pause-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "PAUSE");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
+    );
+
+    const rows = await pool.query<{ state: string; last_error_code: string | null }>(
+      `SELECT state, last_error_code FROM task_command WHERE task_id=$1 AND command_type='PAUSE'`,
+      [taskId],
+    );
+    expect(rows.rows[0]).toMatchObject({
+      state: "EXHAUSTED",
+      last_error_code: "SUPERSEDED_BY_SAFE_STOP",
+    });
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "transient-pause-dispatcher-followup",
+    ).tick();
+    expect(controlSideEffectCount - before).toBe(1);
+  });
+
+  it("transient_resume_exception_after_cancel_is_exhausted", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "resource-transient-resume-exception-after-cancel" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task");
+    const taskId = String(created.task.taskId);
+    const before = controlSideEffectCount;
+
+    await engine.controlTask(taskId, "RESUME", authorization);
+    const release = createDeferred<void>();
+    const repository = new TaskRepository(pool);
+    const originalResumeExecution = (
+      gateway as unknown as {
+        resumeExecution: GrpcAdapterGateway["resumeExecution"];
+      }
+    ).resumeExecution;
+    await withTemporaryGatewayMethod(
+      gateway,
+      "resumeExecution",
+      async (...args: unknown[]) => {
+        const identity = args[0] as { taskId?: string; commandSequence?: number };
+        if (identity.taskId !== taskId)
+          return originalResumeExecution(
+            ...(args as Parameters<GrpcAdapterGateway["resumeExecution"]>),
+          );
+        await release.promise;
+        throw new Error("simulated transient failure");
+      },
+      async () => {
+        const dispatcher = new DurableCommandDispatcher(
+          gateway,
+          repository,
+          undefined,
+          "transient-resume-dispatcher",
+        );
+        const pending = dispatcher.tick();
+        await waitForClaimedCommand(taskId, "RESUME");
+        await engine.cancelTask(taskId, authorization);
+        release.resolve();
+        await pending;
+      },
+    );
+
+    const rows = await pool.query<{ state: string; last_error_code: string | null }>(
+      `SELECT state, last_error_code FROM task_command WHERE task_id=$1 AND command_type='RESUME'`,
+      [taskId],
+    );
+    expect(rows.rows[0]).toMatchObject({
+      state: "EXHAUSTED",
+      last_error_code: "SUPERSEDED_BY_SAFE_STOP",
+    });
+    await new DurableCommandDispatcher(
+      gateway,
+      repository,
+      undefined,
+      "transient-resume-dispatcher-followup",
+    ).tick();
+    expect(controlSideEffectCount - before).toBe(1);
+  });
+
   it("acknowledged_duplicate_returns_original_success", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
@@ -2061,7 +2493,22 @@ describe("durable task lifecycle", () => {
             ];
       const settled = await Promise.allSettled(commandRequests);
       expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      expect(settled.filter((result) => result.status === "rejected")).toHaveLength(2);
+      const rejected = settled.filter((result) => result.status === "rejected");
+      expect(rejected).toHaveLength(2);
+      for (const result of rejected) {
+        const reason = result.reason as {
+          reasonCode?: string;
+          commandType?: string;
+          blockingCommandType?: string;
+          requestedCommandType?: string;
+        };
+        expect(reason).toMatchObject({
+          reasonCode: "COMMAND_IN_PROGRESS",
+          requestedCommandType: commandType,
+          blockingCommandType: commandType,
+          commandType: commandType,
+        });
+      }
       expect(await commandAttempts(taskId, commandType)).toBe("1");
     }
   });
@@ -2114,7 +2561,22 @@ describe("durable task lifecycle", () => {
             ];
       const firstAttempt = await Promise.allSettled(commandRequests);
       expect(firstAttempt.filter((result) => result.status === "fulfilled")).toHaveLength(1);
-      expect(firstAttempt.filter((result) => result.status === "rejected")).toHaveLength(2);
+      const rejected = firstAttempt.filter((result) => result.status === "rejected");
+      expect(rejected).toHaveLength(2);
+      for (const result of rejected) {
+        const reason = result.reason as {
+          reasonCode?: string;
+          commandType?: string;
+          blockingCommandType?: string;
+          requestedCommandType?: string;
+        };
+        expect(reason).toMatchObject({
+          reasonCode: "COMMAND_IN_PROGRESS",
+          requestedCommandType: commandType,
+          blockingCommandType: commandType,
+          commandType: commandType,
+        });
+      }
 
       expect(await commandAttempts(taskId, commandType)).toBe("1");
 
@@ -3039,6 +3501,60 @@ function rejectAfter(milliseconds: number, message: string): Promise<never> {
     const timer = setTimeout(() => reject(new Error(message)), milliseconds);
     timer.unref();
   });
+}
+
+function createDeferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((newResolve, newReject) => {
+    resolve = newResolve;
+    reject = newReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function sleep(milliseconds: number) {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(() => resolve(), milliseconds);
+    timer.unref();
+  });
+}
+
+async function waitForClaimedCommand(taskId: string, commandType: "UPDATE" | "PAUSE" | "RESUME") {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const result = await pool.query<{
+      state: string;
+      claim_owner: string | null;
+      command_sequence: string;
+    }>(
+      `SELECT command_type, state, claim_owner, command_sequence FROM task_command
+       WHERE task_id=$1 AND command_type=$2
+       ORDER BY command_sequence DESC LIMIT 1`,
+      [taskId, commandType],
+    );
+    const command = result.rows[0];
+    if (command?.state === "CLAIMED" && command.claim_owner !== null) {
+      return;
+    }
+    await sleep(20);
+  }
+  throw new Error(`Timed out waiting for ${commandType} command CLAIMED state`);
+}
+
+async function withTemporaryGatewayMethod(
+  gateway: GrpcAdapterGateway,
+  method: "updateExecution" | "pauseExecution" | "resumeExecution",
+  replacement: (...args: unknown[]) => Promise<unknown>,
+  action: () => Promise<void>,
+) {
+  const gatewayRecord = gateway as unknown as Record<string, unknown>;
+  const original = gatewayRecord[method] as (...args: unknown[]) => Promise<unknown>;
+  gatewayRecord[method] = replacement;
+  try {
+    await action();
+  } finally {
+    gatewayRecord[method] = original;
+  }
 }
 
 function expectCommandReceipt(
