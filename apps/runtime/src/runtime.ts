@@ -88,6 +88,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     onRpc: (method, outcome, durationMs, context) => {
       metrics.increment("sdar_adapter_rpc_total", { method, outcome });
       telemetry?.adapterRpc(method, outcome, durationMs, context);
+      telemetry?.metric("adapter_rpc_total", 1, { method, outcome });
+      telemetry?.metric("adapter_rpc_duration", durationMs, { method, outcome }, "histogram");
     },
   });
   const dependencies: RuntimeDependencies = {
@@ -308,6 +310,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         {
           concurrency: config.COMMAND_DISPATCH_CONCURRENCY,
           leaseMilliseconds: config.COMMAND_CLAIM_LEASE_MS,
+          onMetric: (durationMs) =>
+            telemetry?.metric("command_dispatch_duration", durationMs, {}, "histogram"),
         },
       );
       const outboxCleaner = new OutboxCleaner(taskRepository, {
@@ -344,14 +348,20 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         taskRepository,
         config.RECOVERY_LEASE_MS,
         (error, taskId) => {
+          telemetry?.metric("provider_error_total", 1, { source: "recovery" });
           logger.warn(
             { err: error, taskId, providerId: validated.providerId },
             "task recovery deferred",
           );
         },
-        (event, amount) => telemetry?.event("provider.recovery_event", { event, amount }),
+        (event, amount) => {
+          telemetry?.event("provider.recovery_event", { event, amount });
+          telemetry?.metric("provider_recovery_total", amount, { event });
+        },
       );
+      const recoveryStartedAt = performance.now();
       const recovered = await recovery.scan();
+      telemetry.metric("recovery_duration", performance.now() - recoveryStartedAt, {}, "histogram");
       metrics.increment("sdar_recovery_total", { outcome: "scan" });
       dependencies.recovery = "ready";
       logger.info(
@@ -368,6 +378,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       dependencies.ttlCleaner = "ready";
       await outboxPublisher.tick();
       dependencies.outboxPublisher = "ready";
+      await updateOperationalGauges(pool, telemetry);
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
         schedulerTicking = true;
@@ -375,6 +386,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           .tick()
           .then(() => {
             dependencies.scheduler = "ready";
+            void updateOperationalGauges(pool, telemetry);
           })
           .catch((error: unknown) => {
             dependencies.scheduler = "failed";
@@ -535,6 +547,38 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
 function requiredOutboxWebhookUrl(config: RuntimeConfig): string {
   if (config.OUTBOX_WEBHOOK_URL === undefined) throw new Error("OUTBOX_WEBHOOK_URL_REQUIRED");
   return config.OUTBOX_WEBHOOK_URL;
+}
+
+async function updateOperationalGauges(
+  pool: Pool,
+  telemetry: ProviderTelemetry | undefined,
+): Promise<void> {
+  if (telemetry === undefined) return;
+  try {
+    const counts = await pool.query<{
+      active_tasks: string;
+      pending_commands: string;
+      outbox_pending: string;
+      recovery_backlog: string;
+    }>(`SELECT
+      (SELECT count(*) FROM provider_task WHERE internal_state NOT LIKE 'TERMINAL_%')::text
+        AS active_tasks,
+      (SELECT count(*) FROM task_command WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text
+        AS pending_commands,
+      (SELECT count(*) FROM outbox_event WHERE published_at IS NULL)::text AS outbox_pending,
+      ((SELECT count(*) FROM admission_intent WHERE state IN ('PENDING','UNCERTAIN')) +
+       (SELECT count(*) FROM provider_task
+        WHERE internal_state NOT LIKE 'TERMINAL_%' AND next_recovery_at <= clock_timestamp()))::text
+        AS recovery_backlog`);
+    const row = counts.rows[0];
+    if (row === undefined) return;
+    telemetry.metric("active_tasks", Number(row.active_tasks), {}, "gauge");
+    telemetry.metric("pending_commands", Number(row.pending_commands), {}, "gauge");
+    telemetry.metric("outbox_pending", Number(row.outbox_pending), {}, "gauge");
+    telemetry.metric("recovery_backlog", Number(row.recovery_backlog), {}, "gauge");
+  } catch {
+    // Metrics collection is best effort and never affects Runtime readiness or Task state.
+  }
 }
 
 function authenticationOptions(config: RuntimeConfig): AuthenticationOptions {

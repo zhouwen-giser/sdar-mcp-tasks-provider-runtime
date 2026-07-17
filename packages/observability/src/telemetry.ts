@@ -34,7 +34,7 @@ export interface ProviderTelemetryOptions {
   metricReader?: MetricReader;
 }
 
-export type ProviderMetricKind = "counter" | "histogram";
+export type ProviderMetricKind = "counter" | "histogram" | "gauge";
 
 export interface AdapterRpcTelemetryContext {
   taskId?: string;
@@ -45,7 +45,21 @@ export interface AdapterRpcTelemetryContext {
 interface ProviderMetricInstrument {
   add?: (value: number, attributes?: Attributes) => void;
   record?: (value: number, attributes?: Attributes) => void;
+  set?: (value: number, attributes?: Attributes) => void;
 }
+
+const BOUNDED_METRIC_LABELS = new Set([
+  "commandType",
+  "decision",
+  "event",
+  "method",
+  "outcome",
+  "reasonCode",
+  "resultClass",
+  "source",
+  "state",
+  "status",
+]);
 
 export class ProviderTelemetry {
   readonly #options: ProviderTelemetryOptions;
@@ -178,6 +192,24 @@ export class ProviderTelemetry {
       "sdar.record.id": envelope.recordId,
       "sdar.record.hash": envelope.recordHash,
     });
+    const payload =
+      typeof envelope.payload === "object" &&
+      envelope.payload !== null &&
+      !Array.isArray(envelope.payload)
+        ? envelope.payload
+        : {};
+    if (envelope.recordType === "provider.task_lifecycle") {
+      this.metric("provider_task_transition_total", 1, {
+        state: stringAttribute(payload.currentState),
+        resultClass: stringAttribute(payload.resultClass),
+      });
+    } else if (envelope.recordType === "provider.command_dispatch") {
+      this.metric("provider_command_total", 1, {
+        commandType: stringAttribute(payload.commandType),
+        state: stringAttribute(payload.currentState),
+        status: stringAttribute(payload.adapterRpcStatus),
+      });
+    }
   }
 
   metric(
@@ -191,12 +223,39 @@ export class ProviderTelemetry {
     let instrument = this.#metricInstruments.get(key);
     if (instrument === undefined) {
       const meter = this.#meterProvider.getMeter(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
-      instrument = kind === "counter" ? meter.createCounter(name) : meter.createHistogram(name);
+      if (kind === "counter") instrument = meter.createCounter(name);
+      else if (kind === "histogram") instrument = meter.createHistogram(name);
+      else {
+        const gauge = meter.createObservableGauge(name);
+        let currentValue = 0;
+        let currentAttributes: Attributes = {};
+        gauge.addCallback((observation) => observation.observe(currentValue, currentAttributes));
+        instrument = {
+          set: (nextValue, nextAttributes = {}) => {
+            currentValue = nextValue;
+            currentAttributes = nextAttributes;
+          },
+        };
+      }
       this.#metricInstruments.set(key, instrument);
     }
-    if (kind === "counter") instrument.add?.(value, attributes);
-    else instrument.record?.(value, attributes);
+    const boundedAttributes = boundedMetricAttributes(attributes);
+    if (kind === "counter") instrument.add?.(value, boundedAttributes);
+    else if (kind === "histogram") instrument.record?.(value, boundedAttributes);
+    else instrument.set?.(value, boundedAttributes);
   }
+}
+
+function boundedMetricAttributes(attributes: Attributes): Attributes {
+  return Object.fromEntries(
+    Object.entries(attributes).filter(
+      ([key, value]) => BOUNDED_METRIC_LABELS.has(key) && value !== undefined,
+    ),
+  );
+}
+
+function stringAttribute(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
 function signalEndpoint(base: string | undefined, signal: "traces" | "metrics" | "logs"): string {

@@ -2559,6 +2559,7 @@ async function transitionTask(
   client: PoolClient,
   request: TaskTransitionRequest,
 ): Promise<{ row: TaskRow; applied: boolean }> {
+  const transitionStartedAt = performance.now();
   const locked = await client.query<TaskRow>(
     "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
     [request.taskId],
@@ -2699,6 +2700,7 @@ async function transitionTask(
         authorizationContextHash: row.authorization_context_hash,
         observationRevision: revision,
         adapterRevision: Number(row.adapter_revision),
+        taskTransitionDurationMs: performance.now() - transitionStartedAt,
       }),
     ],
   );

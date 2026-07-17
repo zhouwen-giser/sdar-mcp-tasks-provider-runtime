@@ -27,6 +27,12 @@ const TASK_LIFECYCLE_EVENTS = new Set([
 
 export interface ProviderOpsEventEmitter {
   emitEnvelope(envelope: ProviderOpsEnvelope): void;
+  metric?(
+    name: string,
+    value?: number,
+    attributes?: Record<string, string>,
+    kind?: "counter" | "histogram" | "gauge",
+  ): void;
 }
 
 export interface ProviderOpsOutboxContext {
@@ -46,6 +52,14 @@ export class ProviderOpsOutboxSink implements OutboxSink {
   async publish(events: OutboxRecord[]): Promise<void> {
     await this.downstream.publish(events);
     for (const event of events) {
+      const transitionDurationMs = finiteNumberField(event.payload, "taskTransitionDurationMs");
+      if (transitionDurationMs !== undefined && TASK_LIFECYCLE_EVENTS.has(event.eventType)) {
+        try {
+          this.emitter.metric?.("task_transition_duration", transitionDurationMs, {}, "histogram");
+        } catch {
+          // Telemetry must never change Outbox delivery or Task lifecycle behavior.
+        }
+      }
       const envelopes = [
         lifecycleEnvelope(event, this.context),
         commandEnvelope(event, this.context),
@@ -192,4 +206,9 @@ function allowlistedPayload(
 function numericField(payload: Record<string, unknown>, key: string): number | undefined {
   const value = payload[key];
   return typeof value === "number" && Number.isSafeInteger(value) ? value : undefined;
+}
+
+function finiteNumberField(payload: Record<string, unknown>, key: string): number | undefined {
+  const value = payload[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
