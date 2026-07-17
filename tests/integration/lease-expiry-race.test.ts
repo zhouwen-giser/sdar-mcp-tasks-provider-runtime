@@ -58,6 +58,7 @@ describe("H1 command lease expiry race", () => {
       undefined,
       "runtime-a",
       undefined,
+      undefined,
       snapshots,
       { concurrency: 8, leaseMilliseconds: 60 },
     );
@@ -66,6 +67,7 @@ describe("H1 command lease expiry race", () => {
       repository as unknown as TaskRepository,
       undefined,
       "runtime-b",
+      undefined,
       undefined,
       snapshots,
       { concurrency: 8, leaseMilliseconds: 60 },
@@ -99,7 +101,7 @@ class LeaseRaceRepository {
     }));
   }
 
-  claimDueCancelCommands(
+  claimDueCommands(
     _now: Date,
     owner: string,
     leaseMilliseconds: number,
@@ -125,6 +127,10 @@ class LeaseRaceRepository {
     const current = this.requiredOwned(command);
     current.claimUntil = Date.now() + leaseMilliseconds;
     return Promise.resolve();
+  }
+
+  supersedeExpiredClaimedNormalCommandsForSafeStop(): Promise<number> {
+    return Promise.resolve(0);
   }
 
   getById(taskId: string): Promise<TaskRecord> {
@@ -160,9 +166,16 @@ class LeaseRaceRepository {
   }
 }
 
-interface LeaseCommand extends Omit<PendingCommandRecord, "claimOwner"> {
+interface LeaseCommand {
+  taskId: string;
+  commandSequence: number;
+  commandType: "CANCEL" | "UPDATE" | "PAUSE" | "RESUME";
+  payload: Record<string, unknown>;
+  state: PendingCommandRecord["state"];
+  attemptCount: number;
   claimOwner: string | null;
   claimUntil: number;
+  stopReason: string | null;
 }
 
 function toPendingCommand(command: LeaseCommand): PendingCommandRecord {
@@ -173,7 +186,12 @@ function toPendingCommand(command: LeaseCommand): PendingCommandRecord {
     payload: command.payload,
     state: command.state,
     attemptCount: command.attemptCount,
+    adapterAck: null,
+    nextAttemptAt: null,
+    lastErrorCode: null,
+    lastErrorMessage: null,
     claimOwner: command.claimOwner,
+    claimUntil: command.claimUntil === 0 ? null : new Date(command.claimUntil),
     stopReason: command.stopReason,
   };
 }

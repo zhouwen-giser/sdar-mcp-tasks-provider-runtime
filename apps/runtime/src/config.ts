@@ -6,10 +6,10 @@ const BooleanEnvironmentSchema = z
 
 const EnvironmentSchema = z
   .object({
+    RUNTIME_ENV: z.enum(["development", "test", "production"]).default("development"),
     HOST: z.string().default("0.0.0.0"),
     PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
     LOG_LEVEL: z.string().default("info"),
-    RUNTIME_ENV: z.enum(["development", "test", "production"]).default("development"),
     PROVIDER_ID: z.string().min(1).max(128).default("mock-provider"),
     DATABASE_URL: z.url().default("postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime"),
     ADAPTER_ENDPOINT: z.string().refine(validAdapterEndpoint).default("127.0.0.1:7001"),
@@ -33,16 +33,30 @@ const EnvironmentSchema = z
     IDEMPOTENCY_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
     IDEMPOTENCY_WAIT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
     IDEMPOTENCY_POLL_MS: z.coerce.number().int().min(5).max(1_000).default(20),
+    COMMAND_CLAIM_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+    SCHEDULE_CLAIM_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+    RECOVERY_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+    LEASE_SAFETY_MARGIN_MS: z.coerce.number().int().min(100).max(60_000).default(500),
+    DB_PUBLICATION_BUDGET_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
+    ALLOW_WEAK_LEASE_CONFIGURATION: BooleanEnvironmentSchema.default(false),
+    INTERNAL_ENDPOINTS_ENABLED: BooleanEnvironmentSchema.default(false),
+    INTERNAL_ADMIN_TOKEN: z.string().min(32).optional(),
     ADAPTER_HEALTH_POLL_MS: z.coerce.number().int().min(100).max(300_000).default(5_000),
     ADAPTER_HEALTH_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(10).default(2),
     ADAPTER_MANIFEST_POLL_MS: z.coerce.number().int().min(100).max(3_600_000).default(60_000),
     SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
     COMMAND_DISPATCH_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
     SCHEDULER_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
-    ALLOW_WEAK_LEASE_CONFIGURATION: BooleanEnvironmentSchema.default(false),
+    OUTBOX_CLEANER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(60_000),
     RECOVERY_POLL_MS: z.coerce.number().int().min(500).max(300_000).default(5_000),
     TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
     TTL_PURGE_GRACE_MS: z.coerce.number().int().min(1_000).max(604_800_000).default(86_400_000),
+    OUTBOX_PUBLISHED_RETENTION_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(7_776_000_000)
+      .default(86_400_000),
     TTL_CLEANER_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(128),
     OUTBOX_SINK: z.enum(["internal_noop", "webhook"]).default("internal_noop"),
     OUTBOX_WEBHOOK_URL: z.url().optional(),
@@ -86,12 +100,73 @@ const EnvironmentSchema = z
     ) {
       context.addIssue({ code: "custom", message: "production Outbox webhook requires HTTPS" });
     }
+    if (value.INTERNAL_ENDPOINTS_ENABLED && value.INTERNAL_ADMIN_TOKEN === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "INTERNAL_ENDPOINTS_ENABLED requires INTERNAL_ADMIN_TOKEN",
+      });
+    }
   });
 
-export type RuntimeConfig = z.infer<typeof EnvironmentSchema>;
+export type RuntimeConfig = z.infer<typeof EnvironmentSchema> & {
+  leaseValidationMode: "strict" | "degraded";
+  leaseValidationMessage: string | null;
+};
 
 export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env): RuntimeConfig {
-  return EnvironmentSchema.parse(environment);
+  const value = EnvironmentSchema.parse(environment);
+  const commandClaimLeaseMinimum =
+    2 * value.ADAPTER_RPC_TIMEOUT_MS +
+    value.DB_PUBLICATION_BUDGET_MS +
+    value.LEASE_SAFETY_MARGIN_MS;
+  const scheduleClaimLeaseMinimum =
+    value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+  const recoveryLeaseMinimum =
+    value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+  const idempotencyLeaseMinimum =
+    2 * value.ADAPTER_RPC_TIMEOUT_MS +
+    value.DB_PUBLICATION_BUDGET_MS +
+    value.LEASE_SAFETY_MARGIN_MS;
+  const violations: string[] = [];
+  if (value.COMMAND_CLAIM_LEASE_MS < commandClaimLeaseMinimum) {
+    violations.push(
+      "COMMAND_CLAIM_LEASE_MS must be >= " +
+        String(commandClaimLeaseMinimum) +
+        " for current timeout and budget",
+    );
+  }
+  if (value.SCHEDULE_CLAIM_LEASE_MS < scheduleClaimLeaseMinimum) {
+    violations.push(
+      "SCHEDULE_CLAIM_LEASE_MS must be >= " +
+        String(scheduleClaimLeaseMinimum) +
+        " for current timeout and budget",
+    );
+  }
+  if (value.RECOVERY_LEASE_MS < recoveryLeaseMinimum) {
+    violations.push(
+      "RECOVERY_LEASE_MS must be >= " +
+        String(recoveryLeaseMinimum) +
+        " for current timeout and budget",
+    );
+  }
+  if (value.IDEMPOTENCY_LEASE_MS < idempotencyLeaseMinimum) {
+    violations.push(
+      "IDEMPOTENCY_LEASE_MS must be >= " +
+        String(idempotencyLeaseMinimum) +
+        " for current timeout and budget",
+    );
+  }
+  if (violations.length > 0) {
+    if (value.RUNTIME_ENV === "production" || !value.ALLOW_WEAK_LEASE_CONFIGURATION) {
+      throw new Error(violations.join("; "));
+    }
+    return {
+      ...value,
+      leaseValidationMode: "degraded",
+      leaseValidationMessage: violations.join("; "),
+    };
+  }
+  return { ...value, leaseValidationMode: "strict", leaseValidationMessage: null };
 }
 
 export function parseBooleanEnv(value: string | boolean): boolean {

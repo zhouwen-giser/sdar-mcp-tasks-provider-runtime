@@ -317,6 +317,304 @@ describe("H6 MCP wire and result contract", () => {
     expect(malformed.status).toBe(200);
     expect(malformedBody.error).toMatchObject({ code: ErrorCode.InvalidParams });
   });
+
+  it("first_update_returns_pending_receipt_without_error", async () => {
+    const created = await createTask("h6-task-first-update-receipt", "input_required");
+    const taskId = created.task.taskId;
+    const firstUpdate = await rawRequest(
+      "tasks/update",
+      { taskId, inputs: { approval: true } },
+      "h6-first-update-wire",
+    );
+    expect(firstUpdate.error).toBeUndefined();
+    if (firstUpdate.result === undefined) throw new Error("Expected successful wire result");
+    expectTaskReceipt(firstUpdate.result, {
+      commandSequence: 1,
+      commandType: "UPDATE",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+  });
+
+  it("first_pause_returns_pending_receipt_without_error", async () => {
+    const created = await createTask("h6-task-first-pause-receipt");
+    const taskId = created.task.taskId;
+    const firstPause = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-first-pause-wire",
+    );
+    expect(firstPause.error).toBeUndefined();
+    if (firstPause.result === undefined) throw new Error("Expected successful wire result");
+    expectTaskReceipt(firstPause.result, {
+      commandSequence: 1,
+      commandType: "PAUSE",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+  });
+
+  it("first_resume_returns_pending_receipt_without_error", async () => {
+    const created = await createTask("h6-task-first-resume-receipt");
+    const taskId = created.task.taskId;
+    const firstResume = await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-first-resume-wire",
+    );
+    expect(firstResume.error).toBeUndefined();
+    if (firstResume.result === undefined) throw new Error("Expected successful wire result");
+    expectTaskReceipt(firstResume.result, {
+      commandSequence: 1,
+      commandType: "RESUME",
+      commandState: "PENDING",
+      durablyAccepted: true,
+      duplicate: false,
+    });
+  });
+
+  it("duplicate_pending_update_returns_command_in_progress", async () => {
+    const created = await createTask("h6-task-dupe-pending-update", "input_required");
+    const taskId = created.task.taskId;
+    await rawRequest(
+      "tasks/update",
+      { taskId, inputs: { approval: true } },
+      "h6-dupe-update-wire-1",
+    );
+    const duplicate = await rawRequest(
+      "tasks/update",
+      { taskId, inputs: { approval: true } },
+      "h6-dupe-update-wire-2",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "UPDATE",
+        commandState: "PENDING",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
+  });
+
+  it("duplicate_claimed_pause_returns_command_in_progress", async () => {
+    const created = await createTask("h6-task-dupe-claimed-pause");
+    const taskId = created.task.taskId;
+    await rawRequest("io.sdar/taskExecution/tasks/pause", { taskId }, "h6-dupe-claimed-pause-1");
+    await pool.query(
+      `UPDATE task_command
+         SET state='CLAIMED', claim_owner='h6-wire', claim_until=clock_timestamp()+interval '30s'
+       WHERE task_id=$1 AND command_type='PAUSE' AND command_sequence=1`,
+      [taskId],
+    );
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-dupe-claimed-pause-2",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "PAUSE",
+        commandState: "CLAIMED",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
+  });
+
+  it("duplicate_retry_wait_resume_returns_command_in_progress", async () => {
+    const created = await createTask("h6-task-dupe-retry-wait-resume");
+    const taskId = created.task.taskId;
+    await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-dupe-retry-wait-resume-1",
+    );
+    await pool.query(
+      `UPDATE task_command
+         SET state='RETRY_WAIT', next_attempt_at=clock_timestamp()+interval '1 second',
+             claim_owner=NULL, claim_until=NULL
+       WHERE task_id=$1 AND command_type='RESUME' AND command_sequence=1`,
+      [taskId],
+    );
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-dupe-retry-wait-resume-2",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "RESUME",
+        commandState: "RETRY_WAIT",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
+  });
+
+  it("cross_type_pending_update_blocks_pause_with_real_blocking_type", async () => {
+    const created = await createTask("h6-cross-type-pending-update", "input_required");
+    const taskId = created.task.taskId;
+    await rawRequest(
+      "tasks/update",
+      { taskId, inputs: { approval: true } },
+      "h6-cross-update-wire-1",
+    );
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-cross-update-wire-2",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        requestedCommandType: "PAUSE",
+        blockingCommandType: "UPDATE",
+        commandType: "UPDATE",
+        commandState: "PENDING",
+      },
+    });
+  });
+
+  it("cross_type_claimed_pause_blocks_resume_with_real_blocking_type", async () => {
+    const created = await createTask("h6-cross-type-claimed-pause");
+    const taskId = created.task.taskId;
+    await rawRequest("io.sdar/taskExecution/tasks/pause", { taskId }, "h6-cross-pause-wire-1");
+    await pool.query(
+      `UPDATE task_command
+         SET state='CLAIMED', claim_owner='h6-wire', claim_until=clock_timestamp()+interval '30s'
+       WHERE task_id=$1 AND command_type='PAUSE' AND command_sequence=1`,
+      [taskId],
+    );
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-cross-pause-wire-2",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        requestedCommandType: "RESUME",
+        blockingCommandType: "PAUSE",
+        commandType: "PAUSE",
+        commandState: "CLAIMED",
+      },
+    });
+  });
+
+  it("cross_type_retry_wait_resume_blocks_update_with_real_blocking_type", async () => {
+    const created = await createTask("h6-cross-type-retry-resume");
+    const taskId = created.task.taskId;
+    await rawRequest(
+      "io.sdar/taskExecution/tasks/resume",
+      { taskId },
+      "h6-cross-retry-resume-wire-1",
+    );
+    await pool.query(
+      `UPDATE task_command
+         SET state='RETRY_WAIT', next_attempt_at=clock_timestamp()+interval '1 second',
+             claim_owner=NULL, claim_until=NULL
+       WHERE task_id=$1 AND command_type='RESUME' AND command_sequence=1`,
+      [taskId],
+    );
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-cross-retry-resume-wire-2",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        requestedCommandType: "PAUSE",
+        blockingCommandType: "RESUME",
+        commandType: "RESUME",
+        commandState: "RETRY_WAIT",
+      },
+    });
+  });
+
+  it("acknowledged_cancel_blocks_new_update_with_protocol", async () => {
+    const created = await createTask("h6-wire-update-stop-ack", "input_required");
+    const taskId = created.task.taskId;
+    await rawRequest("tasks/cancel", { taskId }, "h6-wire-update-stop-cancel");
+    await pool.query(
+      `UPDATE task_command
+         SET state='ACKNOWLEDGED', claim_owner=NULL, claim_until=NULL,
+             adapter_ack=$2::jsonb
+       WHERE task_id=$1 AND command_type='CANCEL' AND command_sequence=1`,
+      [
+        taskId,
+        JSON.stringify({
+          accepted: true,
+          reasonCode: "STOP_ACCEPTED",
+          message: "Safe stop accepted.",
+        }),
+      ],
+    );
+
+    const duplicate = await rawRequest(
+      "tasks/update",
+      { taskId, inputs: { approval: true } },
+      "h6-wire-update-stop",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "CANCEL",
+        requestedCommandType: "UPDATE",
+        blockingCommandType: "CANCEL",
+        commandState: "ACKNOWLEDGED",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toBe(0);
+  });
+
+  it("pending_cancel_blocks_new_pause_with_protocol", async () => {
+    const created = await createTask("h6-wire-pause-stop-pending");
+    const taskId = created.task.taskId;
+    await rawRequest("tasks/cancel", { taskId }, "h6-wire-pause-stop-cancel");
+
+    const duplicate = await rawRequest(
+      "io.sdar/taskExecution/tasks/pause",
+      { taskId },
+      "h6-wire-pause-stop",
+    );
+    expect(duplicate.error).toMatchObject({
+      code: -32009,
+      data: {
+        reasonCode: "COMMAND_IN_PROGRESS",
+        commandSequence: 1,
+        commandType: "CANCEL",
+        requestedCommandType: "PAUSE",
+        blockingCommandType: "CANCEL",
+        commandState: "PENDING",
+      },
+    });
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
+      expect.any(Number),
+    );
+  });
 });
 
 function createTask(resourceId: string, scenario?: string, ttl = 60_000, pollInterval?: number) {
@@ -335,4 +633,61 @@ function createTask(resourceId: string, scenario?: string, ttl = 60_000, pollInt
 
 function getDetailedTask(taskId: string) {
   return client.request({ method: "tasks/get", params: { taskId } }, DetailedTaskResultSchema);
+}
+
+async function rawRequest(method: string, params: Record<string, unknown>, id: string) {
+  const response = await fetch(mcpUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id,
+      method,
+      params,
+    }),
+  });
+  const bodyText = await response.text();
+  const dataLine = bodyText.split(/\r?\n/u).find((line) => line.startsWith("data: "));
+  if (dataLine === undefined) throw new Error("wire response did not contain SSE data");
+  const body = JSON.parse(dataLine.slice(6)) as {
+    jsonrpc?: string;
+    id?: string;
+    result?: Record<string, unknown>;
+    error?: {
+      code: number;
+      message?: string;
+      data?: Record<string, unknown>;
+    };
+  };
+  expect(response.status).toBe(200);
+  expect(body.jsonrpc).toBe("2.0");
+  expect(body.id).toBe(id);
+  return body;
+}
+
+function expectTaskReceipt(
+  result: Record<string, unknown>,
+  expected: {
+    commandSequence: number;
+    commandType: "UPDATE" | "PAUSE" | "RESUME";
+    commandState: string;
+    durablyAccepted: boolean;
+    duplicate: boolean;
+  },
+) {
+  const profile = (result._meta as Record<string, Record<string, unknown>> | undefined)?.[
+    "io.sdar/taskExecution"
+  ];
+  const receipt = profile?.receipt as Record<string, unknown> | undefined;
+  if (receipt === undefined) throw new Error("Expected command receipt");
+  expect(receipt.commandSequence).toBe(expected.commandSequence);
+  expect(receipt.commandType).toBe(expected.commandType);
+  expect(receipt.commandState).toBe(expected.commandState);
+  expect(receipt.duplicate).toBe(expected.duplicate);
+  expect(receipt.durablyAccepted).toBe(expected.durablyAccepted);
+  expect(typeof receipt.acceptedAt).toBe("string");
+  expect(receipt).not.toHaveProperty("adapterAck");
 }

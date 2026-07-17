@@ -5,11 +5,9 @@ import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import {
   protoStructToJson,
   validateAdapterSnapshotIdentity,
-  validateCommandAckIdentity,
 } from "../../adapter-protocol/src/index.js";
 import type {
   AvailabilityCheckInput,
-  CommandAck,
   ExecutionSnapshot,
   StartOperationResponse,
 } from "../../adapter-protocol/src/index.js";
@@ -18,6 +16,7 @@ import type {
   AvailabilityCheck,
   AvailabilityResponseValue,
   Clock,
+  SnapshotTransition,
   TaskExecutionTiming,
   TimingAnchors,
 } from "../../domain/src/index.js";
@@ -25,6 +24,7 @@ import {
   CapabilityNotSupportedError,
   defaultTiming,
   InvalidParamsError,
+  CommandInProgressError,
   isTerminalState,
   systemClock,
   TechnicalExecutionError,
@@ -37,6 +37,7 @@ import type {
   AdmissionIntentRecord,
   IdempotencyRepository,
   ObservationPage,
+  CommandResolution,
   PendingCommandRecord,
   ResolvedTaskOperation,
   StoredInvocation,
@@ -108,26 +109,6 @@ export class TaskEngine {
       const detail = error instanceof Error ? error.message : "ADAPTER_SNAPSHOT_IDENTITY_MISMATCH";
       await this.#repository.recordIdentityConflict(task.taskId, detail);
       this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "snapshot" });
-      throw error;
-    }
-  }
-
-  async #validateTaskAck(
-    task: TaskRecord,
-    operationName: string,
-    commandSequence: number,
-    ack: CommandAck,
-  ): Promise<void> {
-    try {
-      validateCommandAckIdentity(ack, {
-        ...expectedTaskIdentity(task, operationName),
-        commandSequence,
-      });
-    } catch (error) {
-      const detail =
-        error instanceof Error ? error.message : "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH";
-      await this.#repository.recordIdentityConflict(task.taskId, detail);
-      this.metrics?.increment("sdar_adapter_identity_conflicts_total", { kind: "command_ack" });
       throw error;
     }
   }
@@ -669,87 +650,6 @@ export class TaskEngine {
     return "found";
   }
 
-  async replayPendingCommand(
-    task: TaskRecord,
-    command: PendingCommandRecord,
-    resolvedOperation?: ValidatedOperation,
-  ): Promise<void> {
-    const operation =
-      resolvedOperation ?? (await this.loadOperationSnapshot(task.operationSnapshotId));
-    const authorization = {
-      hash: task.authorizationContextHash,
-      executionMode: task.executionMode,
-      simulationId: task.simulationId,
-    };
-    const identity = {
-      taskId: task.taskId,
-      operationName: operation.name,
-      argumentHash: task.argumentHash,
-      commandSequence: command.commandSequence,
-    };
-    let ack;
-    let completedAnswers: { key: string; hash: string; value: unknown }[] = [];
-    if (command.commandType === "CANCEL") {
-      if (!operation.capabilities.cancel) {
-        throw new CapabilityNotSupportedError("CANCEL_NOT_SUPPORTED");
-      }
-      ack = await this.gateway.requestCancel(
-        task.taskId,
-        operation.name,
-        task.argumentHash,
-        task.stopReason === "DEADLINE_REACHED" ? "DEADLINE_REACHED" : "USER_REQUESTED",
-        command.commandSequence,
-        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
-      );
-    } else if (command.commandType === "UPDATE") {
-      if (!operation.capabilities.inputRequired) {
-        throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
-      }
-      const answers = command.payload.answers;
-      if (typeof answers !== "object" || answers === null || Array.isArray(answers)) {
-        throw new Error("INVALID_RECOVERY_UPDATE_PAYLOAD");
-      }
-      completedAnswers = Object.entries(answers as Record<string, unknown>).map(([key, value]) => ({
-        key,
-        value,
-        hash: createHash("sha256").update(canonicalize(value)).digest("hex"),
-      }));
-      ack = await this.gateway.updateExecution(
-        identity,
-        completedAnswers.map((answer) => ({
-          key: answer.key,
-          value: answer.value,
-          answerHash: answer.hash,
-        })),
-        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
-      );
-    } else if (command.commandType === "PAUSE") {
-      if (!operation.capabilities.pauseResume) {
-        throw new CapabilityNotSupportedError("PAUSE_RESUME_NOT_SUPPORTED");
-      }
-      ack = await this.gateway.pauseExecution(identity, {
-        ...executionOptions(authorization),
-        externalExecutionId: task.externalExecutionId,
-      });
-    } else {
-      if (!operation.capabilities.pauseResume) throw new Error("PAUSE_RESUME_NOT_SUPPORTED");
-      ack = await this.gateway.resumeExecution(identity, {
-        ...executionOptions(authorization),
-        externalExecutionId: task.externalExecutionId,
-      });
-    }
-    await this.#validateTaskAck(task, operation.name, command.commandSequence, ack);
-    await this.#repository.acknowledgeCommand(
-      task.taskId,
-      command.commandSequence,
-      ack.accepted,
-      ack as unknown as Record<string, unknown>,
-    );
-    if (ack.accepted && completedAnswers.length > 0) {
-      await this.#repository.completeInputAnswers(task.taskId, completedAnswers);
-    }
-  }
-
   async getTaskResult(
     taskId: string,
     authorization: AuthorizationContext,
@@ -784,7 +684,10 @@ export class TaskEngine {
       throw new CapabilityNotSupportedError("CANCEL_NOT_SUPPORTED");
     }
     const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
-    await this.#repository.beginCancel(taskId, requestHash);
+    const command = await this.#repository.beginCancel(taskId, requestHash);
+    if (command.commandType !== "CANCEL") {
+      throw new Error("CANCEL_COMMAND_NOT_PERSISTED");
+    }
     task = (await this.#repository.getById(taskId)) ?? task;
     return detailedTask(task);
   }
@@ -793,7 +696,7 @@ export class TaskEngine {
     taskId: string,
     answers: Record<string, unknown>,
     authorization: AuthorizationContext,
-  ): Promise<Record<string, never>> {
+  ): Promise<Record<string, unknown>> {
     const task = await this.#repository.getAuthorized(taskId, authorization);
     const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
     if (!operation.capabilities.inputRequired) {
@@ -801,11 +704,13 @@ export class TaskEngine {
     }
     const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
+    const allAnswers: { key: string; hash: string; value: unknown }[] = [];
     const pending: { key: string; hash: string; value: unknown }[] = [];
     for (const [key, value] of Object.entries(answers)) {
       const request = requests.find((candidate) => candidate.key === key);
       if (request === undefined) throw new InvalidParamsError("UNKNOWN_INPUT_REQUEST_KEY");
       const hash = createHash("sha256").update(canonicalize(value)).digest("hex");
+      allAnswers.push({ key, hash, value });
       if (request.status === "ANSWERED") {
         if (request.answerHash !== hash) throw new InvalidParamsError("INPUT_ANSWER_CONFLICT");
         continue;
@@ -815,37 +720,37 @@ export class TaskEngine {
       }
       pending.push({ key, hash, value });
     }
-    if (pending.length === 0) return {};
-    const requestHash = createHash("sha256").update(canonicalize(pending)).digest("hex");
-    const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
-      answers,
-    });
-    if (!command.duplicate) {
-      const ack = await this.gateway.updateExecution(
-        {
-          taskId,
-          operationName: task.operationName,
-          argumentHash: task.argumentHash,
-          commandSequence: command.sequence,
-        },
-        pending.map((answer) => ({
-          key: answer.key,
-          value: answer.value,
-          answerHash: answer.hash,
-        })),
-        { ...executionOptions(authorization), externalExecutionId: task.externalExecutionId },
+    if (pending.length === 0) {
+      const normalizedAnswers = [...allAnswers].sort((left, right) =>
+        left.key.localeCompare(right.key),
       );
-      await this.#validateTaskAck(task, operation.name, command.sequence, ack);
-      await this.#repository.acknowledgeCommand(
+      const requestHash = createHash("sha256")
+        .update(canonicalize(normalizedAnswers))
+        .digest("hex");
+      const command = await this.#repository.findCommandByRequestHash(
         taskId,
-        command.sequence,
-        ack.accepted,
-        ack as unknown as Record<string, unknown>,
+        "UPDATE",
+        requestHash,
       );
-      if (!ack.accepted) throw new Error("ADAPTER_INPUT_REJECTED");
-      await this.#repository.completeInputAnswers(taskId, pending);
+      if (command !== null) {
+        return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
+      }
+      return this.#taskSnapshot(taskId, authorization);
     }
-    return {};
+    const normalizedAnswers = [...allAnswers].sort((left, right) =>
+      left.key.localeCompare(right.key),
+    );
+    const requestHash = createHash("sha256").update(canonicalize(normalizedAnswers)).digest("hex");
+    const pendingPayload = Object.fromEntries(
+      pending.map(({ key, value }) => [key, value] as const),
+    );
+    const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
+      answers: pendingPayload,
+    });
+    if (command.disposition === "existing") {
+      return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
+    }
+    return this.#taskWithCommandReceipt(taskId, authorization, command);
   }
 
   async controlTask(
@@ -860,33 +765,188 @@ export class TaskEngine {
     }
     const requestHash = createHash("sha256").update(commandType).digest("hex");
     const command = await this.#repository.beginCommand(taskId, commandType, requestHash, {});
-    if (!command.duplicate) {
-      const identity = {
-        taskId,
-        operationName: operation.name,
-        argumentHash: task.argumentHash,
-        commandSequence: command.sequence,
-      };
-      const ack =
-        commandType === "PAUSE"
-          ? await this.gateway.pauseExecution(identity, {
-              ...executionOptions(authorization),
-              externalExecutionId: task.externalExecutionId,
-            })
-          : await this.gateway.resumeExecution(identity, {
-              ...executionOptions(authorization),
-              externalExecutionId: task.externalExecutionId,
-            });
-      await this.#validateTaskAck(task, operation.name, command.sequence, ack);
-      await this.#repository.acknowledgeCommand(
-        taskId,
-        command.sequence,
-        ack.accepted,
-        ack as unknown as Record<string, unknown>,
-      );
-      if (!ack.accepted) throw new Error("ADAPTER_CONTROL_REJECTED");
+    if (command.disposition === "existing") {
+      return this.#resolveExistingCommand(taskId, authorization, commandType, command);
     }
-    return this.getTask(taskId, authorization);
+    return this.#taskWithCommandReceipt(taskId, authorization, command);
+  }
+
+  async #taskWithCommandReceipt(
+    taskId: string,
+    authorization: AuthorizationContext,
+    command: CommandResolution,
+  ): Promise<Record<string, unknown>> {
+    const [task, inputRequests, observations] = await Promise.all([
+      this.#repository.getAuthorized(taskId, authorization),
+      this.#repository.listInputRequests(taskId),
+      this.#repository.listObservationPage(taskId),
+    ]);
+    const taskResult = detailedTask(task, inputRequests, observations) as Record<
+      string,
+      Record<string, unknown> | null
+    > & { _meta?: Record<string, Record<string, unknown>> };
+    const profile = taskResult._meta?.["io.sdar/taskExecution"];
+    const acceptedAt = this.clock.now().toISOString();
+    const retryAfterMs =
+      command.nextAttemptAt === null
+        ? undefined
+        : Math.max(0, command.nextAttemptAt.getTime() - this.clock.now().getTime());
+    taskResult._meta = {
+      "io.sdar/taskExecution": {
+        ...(profile ?? {}),
+        receipt: {
+          commandType: command.commandType,
+          commandSequence: command.sequence,
+          commandState: command.state,
+          durablyAccepted: true,
+          duplicate: command.duplicate,
+          acceptedAt,
+          ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+          ...(command.adapterAck === null ? {} : { adapterAck: command.adapterAck }),
+        },
+      },
+    };
+    return taskResult;
+  }
+
+  async #taskSnapshot(
+    taskId: string,
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, unknown>> {
+    const [task, inputRequests, observations] = await Promise.all([
+      this.#repository.getAuthorized(taskId, authorization),
+      this.#repository.listInputRequests(taskId),
+      this.#repository.listObservationPage(taskId),
+    ]);
+    return detailedTask(task, inputRequests, observations);
+  }
+
+  async #resolveExistingCommand(
+    taskId: string,
+    authorization: AuthorizationContext,
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+    command: CommandResolution,
+  ): Promise<Record<string, unknown>> {
+    switch (command.state) {
+      case "PENDING":
+      case "CLAIMED":
+      case "RETRY_WAIT":
+        this.#commandInProgressError(command, commandType);
+        break;
+      case "ACKNOWLEDGED":
+        if (command.commandType === "CANCEL") {
+          this.#blockingCommandError(command, commandType);
+        }
+        return this.#taskWithCommandReceipt(taskId, authorization, command);
+      case "REJECTED":
+        return this.#commandRejectionResult(command);
+      case "EXHAUSTED":
+        return this.#commandFailureResult(command);
+    }
+    return this.#taskWithCommandReceipt(taskId, authorization, command);
+  }
+
+  #commandInProgressError(
+    command: {
+      sequence: number;
+      commandType: CommandResolution["commandType"];
+      state: PendingCommandRecord["state"];
+      nextAttemptAt: Date | null;
+      claimUntil: Date | null;
+    },
+    commandType: "UPDATE" | "PAUSE" | "RESUME",
+  ): never {
+    if (
+      command.state !== "PENDING" &&
+      command.state !== "CLAIMED" &&
+      command.state !== "RETRY_WAIT"
+    ) {
+      throw new Error("COMMAND_NOT_IN_PROGRESS");
+    }
+    const retryAfterMs = this.#commandRetryAfterMs(command.nextAttemptAt ?? command.claimUntil);
+    throw new CommandInProgressError({
+      commandSequence: command.sequence,
+      commandType: command.commandType,
+      requestedCommandType: commandType,
+      blockingCommandType: command.commandType,
+      commandState: command.state,
+      retryAfterMs,
+    });
+  }
+
+  #blockingCommandError(
+    command: CommandResolution,
+    requestedCommandType: "UPDATE" | "PAUSE" | "RESUME",
+  ): never {
+    if (
+      command.state !== "PENDING" &&
+      command.state !== "CLAIMED" &&
+      command.state !== "RETRY_WAIT" &&
+      !(command.commandType === "CANCEL" && command.state === "ACKNOWLEDGED")
+    ) {
+      throw new Error("COMMAND_NOT_BLOCKING");
+    }
+    const retryAfterMs =
+      command.state === "ACKNOWLEDGED"
+        ? 0
+        : this.#commandRetryAfterMs(command.nextAttemptAt ?? command.claimUntil);
+    throw new CommandInProgressError({
+      commandSequence: command.sequence,
+      commandType: command.commandType,
+      requestedCommandType,
+      blockingCommandType: command.commandType,
+      commandState: command.state,
+      retryAfterMs,
+    });
+  }
+
+  #commandRetryAfterMs(nextAttemptAt: Date | null): number {
+    return nextAttemptAt === null
+      ? 0
+      : Math.max(0, nextAttemptAt.getTime() - this.clock.now().getTime());
+  }
+
+  #commandRejectionResult(command: CommandResolution): Record<string, unknown> {
+    const commandType = command.commandType;
+    return {
+      content: [
+        {
+          type: "text",
+          text: command.lastErrorMessage ?? `${commandType} command was rejected.`,
+        },
+      ],
+      isError: true,
+      structuredContent: {
+        outcome: "command_rejected",
+        reasonCode: command.lastErrorCode ?? "COMMAND_REJECTED",
+        commandSequence: command.sequence,
+        commandType,
+        commandState: command.state,
+        message: command.lastErrorMessage ?? `${commandType} command was rejected.`,
+        ...(command.adapterAck === null ? {} : { adapterAck: command.adapterAck }),
+      },
+    };
+  }
+
+  #commandFailureResult(command: CommandResolution): Record<string, unknown> {
+    const commandType = command.commandType;
+    return {
+      content: [
+        {
+          type: "text",
+          text: command.lastErrorMessage ?? `${commandType} command failed permanently.`,
+        },
+      ],
+      isError: true,
+      structuredContent: {
+        outcome: "command_exhausted",
+        reasonCode: command.lastErrorCode ?? "COMMAND_EXHAUSTED",
+        commandSequence: command.sequence,
+        commandType,
+        commandState: command.state,
+        message: command.lastErrorMessage ?? `${commandType} command failed permanently.`,
+      },
+    };
   }
 }
 
@@ -1126,7 +1186,7 @@ function stopTransition(
   operation: ValidatedOperation,
   snapshot: ExecutionSnapshot,
   completedAt: Date,
-) {
+): SnapshotTransition {
   if (snapshot.state === "CANCELLED" && task.stopReason === "DEADLINE_REACHED") {
     return deadlineReached(snapshot.message, completedAt);
   }
@@ -1135,6 +1195,14 @@ function stopTransition(
       snapshot.message,
       completedAt,
       sanitizedAdapterResultPayload(snapshot),
+    );
+  }
+  if (task.stopReason === "START_WINDOW_MISSED" && isTerminalTaskState(snapshot.state)) {
+    return startWindowMissedWithAdapterResultTransition(
+      snapshot,
+      task,
+      completedAt,
+      "START_WINDOW_MISSED",
     );
   }
   return validatedSnapshotTransition(operation, snapshot);
@@ -1154,11 +1222,55 @@ function snapshotHasStarted(state: string): boolean {
     "RUNNING",
     "PAUSED",
     "RESUMING",
+    "WAITING_INPUT",
     "SUCCEEDED",
     "BUSINESS_FAILED",
     "PARTIALLY_COMPLETED",
     "TECHNICAL_FAILED",
   ].includes(state);
+}
+
+function isTerminalTaskState(state: string): boolean {
+  return [
+    "SUCCEEDED",
+    "BUSINESS_FAILED",
+    "PARTIALLY_COMPLETED",
+    "CANCELLED",
+    "TECHNICAL_FAILED",
+  ].includes(state);
+}
+
+function startWindowMissedWithAdapterResultTransition(
+  snapshot: ExecutionSnapshot,
+  task: TaskRecord,
+  completedAt: Date,
+  stopReason: string,
+): SnapshotTransition {
+  const message =
+    task.actualStartedAt === null
+      ? snapshot.message || "Start window was missed before execution began."
+      : "Task completed after the start window was missed.";
+  const base = startWindowMissed(completedAt, message);
+  return {
+    internalState: "TERMINAL_COMPLETED",
+    mcpStatus: "completed",
+    substate: null,
+    statusMessage: message,
+    result: {
+      ...base,
+      structuredContent: {
+        ...(base.structuredContent as Record<string, unknown>),
+        stopReason,
+        adapterOutcome: snapshot.state,
+        ...(snapshot.result === undefined || snapshot.result === null
+          ? {}
+          : { adapterResult: snapshot.result }),
+      },
+    },
+    error: null,
+    terminal: true,
+    observationType: "task.start_window_missed",
+  };
 }
 
 function storedInvocation(invocation: ToolInvocationResult): StoredInvocation {

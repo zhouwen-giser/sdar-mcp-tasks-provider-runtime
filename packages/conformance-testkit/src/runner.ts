@@ -281,10 +281,16 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       );
       assert(created.kind === "task", "input operation did not return Task");
       const taskId = String(created.task.taskId);
+      const dispatcher = new DurableCommandDispatcher(gateway, repository);
       await engine.updateTask(taskId, { approval: true }, authorization);
+      assert((await dispatcher.tick()).acknowledged === 1, "first input update was not dispatched");
       const second = await engine.getTask(taskId, authorization);
       assert(second.status === "input_required", "second input round missing");
       await engine.updateTask(taskId, { comment: "approved" }, authorization);
+      assert(
+        (await dispatcher.tick()).acknowledged === 1,
+        "second input update was not dispatched",
+      );
       assert(
         (await engine.getTask(taskId, authorization)).status === "completed",
         "input Task incomplete",

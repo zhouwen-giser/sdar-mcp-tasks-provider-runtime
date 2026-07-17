@@ -24,7 +24,7 @@ beforeAll(async () => {
   const migrations = resolve(process.cwd(), "migrations");
   for (const file of await readdir(migrations)) {
     const version = Number.parseInt(file.slice(0, 3), 10);
-    if (/^\d{3}[a-z]?_.+\.sql$/.test(file) && version <= 12) {
+    if (/^\d{3}[a-z]?_.+\.sql$/.test(file) && version <= 13) {
       await copyFile(resolve(migrations, file), resolve(rc2Migrations, file));
     }
   }
@@ -85,6 +85,7 @@ describe("rc.2 database forward upgrade", () => {
           "014_start_confirmation_watchdog.sql",
           "014_observation_pagination.sql",
           "015_recovery_backoff.sql",
+          "016_command_claim_lease_consistency.sql",
         ],
       ],
     );
@@ -93,6 +94,7 @@ describe("rc.2 database forward upgrade", () => {
       "014_observation_pagination.sql",
       "014_start_confirmation_watchdog.sql",
       "015_recovery_backoff.sql",
+      "016_command_claim_lease_consistency.sql",
     ]);
     expect(
       await pool.query(

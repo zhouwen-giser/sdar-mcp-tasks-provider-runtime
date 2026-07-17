@@ -94,6 +94,6 @@ describe("pre-012 database forward upgrade", () => {
     const current = await upgradePool.query<{ count: string }>(
       "SELECT count(*) FROM runtime_schema_migration",
     );
-    expect(current.rows[0]?.count).toBe("16");
+    expect(current.rows[0]?.count).toBe("17");
   });
 });

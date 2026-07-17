@@ -24,6 +24,13 @@
 - Expanded the release capacity gate with slow-Adapter database progress, durable dispatcher,
   scheduled/watchdog, 100/500/1000 recovery-candidate, Observation/Outbox growth and image
   evidence.
+- Fixed first-command UPDATE/PAUSE/RESUME handling to avoid false COMMAND_IN_PROGRESS,
+  returning durable PENDING receipts on first request and idempotent resolved results for repeated
+  terminal command states; removed legacy command replay semantics from Recovery in favor of
+  Dispatcher-only command execution.
+- Made outbox published-event retention configurable via OUTBOX_PUBLISHED_RETENTION_MS and
+  wired it through runtime config, compose, Kubernetes, and config validation; added retention
+  behavior test coverage.
 
 ## 1.0.0-rc.1 - 2026-07-16
 

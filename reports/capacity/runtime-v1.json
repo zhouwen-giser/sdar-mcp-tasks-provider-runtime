@@ -1,47 +1,47 @@
 {
   "version": "1.0.0-rc.2",
-  "generatedAt": "2026-07-17T00:12:23.055Z",
+  "generatedAt": "2026-07-17T09:57:35.978Z",
   "environment": {
-    "node": "v22.14.0",
-    "platform": "win32/x64",
-    "cpuLogicalCount": 16,
-    "memoryBytes": 34085838848,
+    "node": "v22.23.1",
+    "platform": "linux/x64",
+    "cpuLogicalCount": 12,
+    "memoryBytes": 16636121088,
     "database": "TEST_DATABASE_URL target (credentials redacted)",
     "topology": "single Runtime (PostgreSQL pool max 1), single TypeScript Adapter, sequential MCP client"
   },
   "workloads": {
     "synchronousTool": {
       "iterations": 100,
-      "durationMs": 943.8857,
-      "throughputPerSecond": 105.9450312680868,
+      "durationMs": 693.7429769999999,
+      "throughputPerSecond": 144.14560336514947,
       "latencyMs": {
-        "p50": 9.005599999999959,
-        "p95": 12.110299999999825,
-        "p99": 12.441100000000006,
-        "max": 12.657600000000002
+        "p50": 6.4274190000001,
+        "p95": 9.485953999999992,
+        "p99": 13.07189900000003,
+        "max": 15.581437999999707
       }
     },
     "durableTaskCreateAndGet": {
       "iterations": 25,
-      "durationMs": 1261.0818,
-      "throughputPerSecond": 19.824249307221784,
+      "durationMs": 1147.7284690000001,
+      "throughputPerSecond": 21.782155514345785,
       "latencyMs": {
-        "p50": 46.47330000000011,
-        "p95": 65.95110000000022,
-        "p99": 68.33689999999979,
-        "max": 68.33689999999979
+        "p50": 44.80118700000003,
+        "p95": 56.17790100000002,
+        "p99": 60.7934250000003,
+        "max": 60.7934250000003
       }
     },
     "slowAdapterDatabaseAvailability": {
       "adapterResponseDelayMs": 750,
-      "databaseQueryDurationMs": 1.0398000000000138,
+      "databaseQueryDurationMs": 0.41038800000001174,
       "databaseQueryCompletedBeforeAdapterResponse": true,
-      "taskId": "c9d6b111-6855-44e2-8864-86fc8faa3551"
+      "taskId": "3a91d834-78da-492b-8877-e376c0b954f9"
     },
     "durableCommandDispatcher": {
       "commands": 20,
-      "durationMs": 451.02419999999984,
-      "commandsPerSecond": 44.343518596119694,
+      "durationMs": 449.5977190000003,
+      "commandsPerSecond": 44.484211451259576,
       "result": {
         "claimed": 20,
         "acknowledged": 20,
@@ -53,7 +53,7 @@
     },
     "scheduledScan": {
       "futureTasks": 32,
-      "durationMs": 7.770199999999932,
+      "durationMs": 5.417725000000246,
       "result": {
         "started": 0,
         "missed": 0,
@@ -65,7 +65,7 @@
     },
     "watchdogScan": {
       "overdueTasks": 16,
-      "durationMs": 137.26029999999992,
+      "durationMs": 87.54079199999978,
       "result": {
         "started": 0,
         "missed": 0,
@@ -79,20 +79,20 @@
       "100": {
         "requested": 100,
         "returned": 100,
-        "durationMs": 3.7626000000000204,
-        "candidatesPerSecond": 26577.366714505784
+        "durationMs": 2.2186899999996967,
+        "candidatesPerSecond": 45071.64137397007
       },
       "500": {
         "requested": 500,
         "returned": 500,
-        "durationMs": 13.09059999999954,
-        "candidatesPerSecond": 38195.34627901071
+        "durationMs": 9.174253000000135,
+        "candidatesPerSecond": 54500.35005574761
       },
       "1000": {
         "requested": 1000,
         "returned": 1000,
-        "durationMs": 19.714899999999943,
-        "candidatesPerSecond": 50723.05718010251
+        "durationMs": 18.47439900000063,
+        "candidatesPerSecond": 54128.959756686316
       }
     },
     "observationOutboxGrowth": {

@@ -33,6 +33,7 @@
     "OUTBOX_SINK": "internal_noop",
     "OUTBOX_POLL_MS": "1000",
     "OUTBOX_BATCH_SIZE": "100",
-    "RECOVERY_POLL_MS": "5000"
+    "RECOVERY_POLL_MS": "5000",
+    "OUTBOX_PUBLISHED_RETENTION_MS": "86400000"
   }
 }

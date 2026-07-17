@@ -10,7 +10,7 @@ Clients may select `live`, `simulation`, or `historical-replay`, but non-live re
 
 Set `ADAPTER_TLS_MODE=required` with `ADAPTER_TLS_CA_PATH`, `ADAPTER_TLS_CERT_PATH`, and `ADAPTER_TLS_KEY_PATH` for Runtime-to-Adapter mutual TLS. `disabled` is explicit plaintext development transport. Secret file contents and bearer tokens are redacted and are never included in task trace events.
 
-Startup readiness requires database migrations, Adapter Manifest/connectivity checks, snapshot persistence, and an initial recovery scan. Recovery uses a transaction-scoped advisory lock per taskId. It reconciles every nonterminal external execution, replays PENDING controls by original command sequence, and safely retries admission by the original taskId only after a NOT_FOUND proof. Periodic scans provide polling fallback. TRANSIENT_UNAVAILABLE retains the last durable fact; confirmed missing bound execution becomes a visible technical failure.
+Startup readiness requires database migrations, Adapter Manifest/connectivity checks, snapshot persistence, and an initial recovery scan. Recovery uses a transaction-scoped advisory lock per taskId. Recovery reconciles uncertain Admission and nonterminal Tasks. The Durable Command Dispatcher exclusively claims and executes persisted commands, including commands whose previous claim lease expired. Periodic scans provide polling fallback. TRANSIENT_UNAVAILABLE retains the last durable fact; confirmed missing bound execution becomes a visible technical failure.
 
 Readiness continuously separates database, Adapter, Adapter Manifest, recovery, scheduler,
 command dispatcher, Outbox publisher and TTL cleaner. Adapter probing is overlap-guarded and identity checked; an Adapter outage does not

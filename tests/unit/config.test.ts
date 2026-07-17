@@ -18,6 +18,7 @@ describe("Runtime configuration", () => {
     expect(config.SCHEDULER_CONCURRENCY).toBe(8);
     expect(config.OUTBOX_SINK).toBe("internal_noop");
     expect(config.OUTBOX_BATCH_SIZE).toBe(100);
+    expect(config.OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
   });
 
   it("rejects invalid ports and timeouts", () => {
@@ -43,5 +44,31 @@ describe("Runtime configuration", () => {
         ADAPTER_TLS_KEY_PATH: "/run/secrets/client-key.pem",
       }).ADAPTER_TLS_MODE,
     ).toBe("required");
+  });
+
+  it("validates outbox published retention bounds", () => {
+    expect(loadRuntimeConfig({}).OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
+    expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "59999" })).toThrow();
+    expect(
+      loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "60000" }).OUTBOX_PUBLISHED_RETENTION_MS,
+    ).toBe(60_000);
+    expect(
+      loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000000" })
+        .OUTBOX_PUBLISHED_RETENTION_MS,
+    ).toBe(7_776_000_000);
+    expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000001" })).toThrow();
+  });
+
+  it("requires long RPC scenarios to raise command and idempotency leases", () => {
+    expect(() => loadRuntimeConfig({ ADAPTER_RPC_TIMEOUT_MS: "20000" })).toThrow(
+      "COMMAND_CLAIM_LEASE_MS must be >= 41500",
+    );
+    expect(
+      loadRuntimeConfig({
+        ADAPTER_RPC_TIMEOUT_MS: "20000",
+        COMMAND_CLAIM_LEASE_MS: "60000",
+        IDEMPOTENCY_LEASE_MS: "60000",
+      }).leaseValidationMode,
+    ).toBe("strict");
   });
 });

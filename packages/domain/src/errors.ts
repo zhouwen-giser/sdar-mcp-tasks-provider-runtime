@@ -6,7 +6,8 @@ export type RuntimeErrorKind =
   | "adapter_contract"
   | "adapter_transient"
   | "technical_execution"
-  | "business_tool";
+  | "business_tool"
+  | "command_in_progress";
 
 export abstract class RuntimeError extends Error {
   constructor(
@@ -70,6 +71,39 @@ export class BusinessToolError extends RuntimeError {
   constructor(reasonCode: string, safeMessage: string, options?: ErrorOptions) {
     super("business_tool", reasonCode, safeMessage, options);
   }
+}
+
+export interface CommandInProgressContext {
+  commandSequence: number;
+  requestedCommandType: string;
+  blockingCommandType: string;
+  commandType: string;
+  commandState: string;
+  retryAfterMs: number;
+}
+
+export class CommandInProgressError extends RuntimeError {
+  constructor(context: CommandInProgressContext, options?: ErrorOptions) {
+    super(
+      "command_in_progress",
+      "COMMAND_IN_PROGRESS",
+      `Command is already in progress: ${context.blockingCommandType}.`,
+      options,
+    );
+    this.commandSequence = context.commandSequence;
+    this.commandType = context.blockingCommandType;
+    this.requestedCommandType = context.requestedCommandType;
+    this.blockingCommandType = context.blockingCommandType;
+    this.commandState = context.commandState;
+    this.retryAfterMs = context.retryAfterMs;
+  }
+
+  readonly commandSequence: number;
+  readonly requestedCommandType: string;
+  readonly blockingCommandType: string;
+  readonly commandType: string;
+  readonly commandState: string;
+  readonly retryAfterMs: number;
 }
 
 export function isRuntimeError(error: unknown): error is RuntimeError {
