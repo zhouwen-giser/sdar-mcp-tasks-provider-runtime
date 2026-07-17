@@ -24,6 +24,6 @@ production Adapter and database before setting SLOs, and investigate any materia
 the same CI runner/topology even if correctness thresholds still pass.
 
 The v1.1 image report is `reports/image/runtime-v1.1.json`. The local Docker Desktop release
-gate measured 97,165,200 bytes against a 350,000,000-byte ceiling, non-root execution and an
+gate measured 99,772,087 bytes against a 350,000,000-byte ceiling, non-root execution and an
 identical filesystem/config shape across two builds. GitHub Actions repeats the measurement on
 Linux before merge.

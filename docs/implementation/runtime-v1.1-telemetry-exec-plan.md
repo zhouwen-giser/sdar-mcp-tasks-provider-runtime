@@ -73,6 +73,8 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | 2026-07-18 | H8 sanitizer/export privacy tests (10 focused)                    | PASS   |
 | 2026-07-18 | H9 repository boundary scan: no telemetry-dev/ClickHouse runtime  | PASS   |
 | 2026-07-18 | Docs/config/version drift review and regenerated v1.1 SBOM        | PASS   |
+| 2026-07-18 | `pnpm verify` after recovery scan ordering fix (268 seconds)      | PASS   |
+| 2026-07-18 | rc.2 red regressions (6), migration upgrades (4), races (2)       | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.
