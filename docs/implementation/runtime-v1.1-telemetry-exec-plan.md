@@ -1,6 +1,6 @@
 # Runtime v1.1 Provider Ops Telemetry ExecPlan
 
-Status: in progress
+Status: complete
 
 Base: verified rc.3 release head `24cd4e2550f4e0c7e3862d1ed871455d66e47327`
 
@@ -25,20 +25,20 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 
 ## Delivery phases
 
-| Phase   | Deliverable                                                 | Required evidence                       | Status      |
-| ------- | ----------------------------------------------------------- | --------------------------------------- | ----------- |
-| H0      | OTel SDK foundation, resource, lifecycle                    | init/resource/shutdown tests            | complete    |
-| H1      | stable Provider Ops envelope, UUIDv5 ID, RFC 8785 hash      | deterministic ID/hash tests             | complete    |
-| H2      | committed Task lifecycle audit events                       | commit/rollback integration tests       | complete    |
-| H3      | command dispatch events                                     | state/duplicate/retry/supersede tests   | complete    |
-| H4      | Adapter RPC spans                                           | success/error/no-payload tests          | complete    |
-| H5      | scheduler/recovery/TTL events                               | component event tests                   | complete    |
-| H6      | low-cardinality OTel metrics                                | value/cardinality/label tests           | complete    |
-| H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | complete    |
-| H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | complete    |
-| H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | complete    |
-| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | complete    |
-| Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | in progress |
+| Phase   | Deliverable                                                 | Required evidence                       | Status   |
+| ------- | ----------------------------------------------------------- | --------------------------------------- | -------- |
+| H0      | OTel SDK foundation, resource, lifecycle                    | init/resource/shutdown tests            | complete |
+| H1      | stable Provider Ops envelope, UUIDv5 ID, RFC 8785 hash      | deterministic ID/hash tests             | complete |
+| H2      | committed Task lifecycle audit events                       | commit/rollback integration tests       | complete |
+| H3      | command dispatch events                                     | state/duplicate/retry/supersede tests   | complete |
+| H4      | Adapter RPC spans                                           | success/error/no-payload tests          | complete |
+| H5      | scheduler/recovery/TTL events                               | component event tests                   | complete |
+| H6      | low-cardinality OTel metrics                                | value/cardinality/label tests           | complete |
+| H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | complete |
+| H8      | sanitizer and privacy policy                                | secret/argument/hash security tests     | complete |
+| H9      | optional CI-only telemetry dev stack                        | boundary decision and smoke evidence    | complete |
+| Docs    | boundary, catalog, configuration, privacy, failure handling | docs drift review                       | complete |
+| Release | full verification, evidence, push, PR                       | clean SHA and green CI                  | complete |
 
 ## Design decisions
 
@@ -75,6 +75,7 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | 2026-07-18 | Docs/config/version drift review and regenerated v1.1 SBOM        | PASS   |
 | 2026-07-18 | `pnpm verify` after recovery scan ordering fix (268 seconds)      | PASS   |
 | 2026-07-18 | rc.2 red regressions (6), migration upgrades (4), races (2)       | PASS   |
+| 2026-07-18 | PR #9 protected run 29602577183: runtime-ci and compose           | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.

@@ -44,6 +44,6 @@ aggregate gate was then rerun from the beginning and passed.
 - `reports/conformance/typescript.json` and `reports/conformance/python.json`: passed reference
   Adapter conformance evidence.
 
-Merged PR #8 remains the rc.3 publication record. The v1.1 PR and protected CI results are
-recorded in GitHub after this evidence commit is pushed; no tag is created by this evidence
-commit.
+Merged PR #8 remains the rc.3 publication record. Draft PR #9 targets `main`, GitHub reports it
+as mergeable, and protected run `29602577183` passed `runtime-ci` (3m41s) and `runtime-compose`
+(1m03s). No tag is created by this delivery task.

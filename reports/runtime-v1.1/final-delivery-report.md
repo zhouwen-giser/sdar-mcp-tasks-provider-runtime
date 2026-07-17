@@ -32,5 +32,6 @@ receiving durable watchdog stop intent, recovery scans at 100/500/1,000 candidat
 - Published rc.2/rc.3 tags, migrations and report directories were not rewritten.
 - Current v1.1 evidence is isolated under `reports/runtime-v1.1/`,
   `reports/image/runtime-v1.1.json` and `reports/capacity/capacity-v1.1.json`.
-- Merged PR #8 is the immutable rc.3 publication record. v1.1 uses a new PR from this branch;
-  merge and tag creation remain subject to protected CI.
+- Merged PR #8 is the immutable rc.3 publication record. Draft PR #9 is the v1.1 publication
+  vehicle and is conflict-free. Its initial protected run `29602577183` passed `runtime-ci` and
+  `runtime-compose`; merge and tag creation remain outside this delivery task.
