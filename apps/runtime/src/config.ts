@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const EnvironmentSchema = z
   .object({
+    RUNTIME_ENV: z.enum(["development", "test", "production"]).default("development"),
     HOST: z.string().default("0.0.0.0"),
     PORT: z.coerce.number().int().min(1).max(65_535).default(8080),
     LOG_LEVEL: z.string().default("info"),
@@ -28,9 +29,18 @@ const EnvironmentSchema = z
     IDEMPOTENCY_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
     IDEMPOTENCY_WAIT_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
     IDEMPOTENCY_POLL_MS: z.coerce.number().int().min(5).max(1_000).default(20),
+    COMMAND_CLAIM_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+    SCHEDULE_CLAIM_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+    RECOVERY_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
+    LEASE_SAFETY_MARGIN_MS: z.coerce.number().int().min(100).max(60_000).default(500),
+    DB_PUBLICATION_BUDGET_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
+    ALLOW_WEAK_LEASE_CONFIGURATION: z.coerce.boolean().default(false),
+    INTERNAL_ENDPOINTS_ENABLED: z.coerce.boolean().default(false),
+    INTERNAL_ADMIN_TOKEN: z.string().min(32).optional(),
     ADAPTER_HEALTH_POLL_MS: z.coerce.number().int().min(100).max(300_000).default(5_000),
     ADAPTER_HEALTH_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(10).default(2),
     SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
+    OUTBOX_CLEANER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(60_000),
     RECOVERY_POLL_MS: z.coerce.number().int().min(500).max(300_000).default(5_000),
     TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
     TTL_PURGE_GRACE_MS: z.coerce.number().int().min(1_000).max(604_800_000).default(86_400_000),
@@ -48,12 +58,61 @@ const EnvironmentSchema = z
     if (value.AUTH_MODE === "jwt_hs256" && value.JWT_HS256_SECRET === undefined) {
       context.addIssue({ code: "custom", message: "jwt_hs256 requires JWT_HS256_SECRET" });
     }
+    if (value.INTERNAL_ENDPOINTS_ENABLED === true && value.INTERNAL_ADMIN_TOKEN === undefined) {
+      context.addIssue({
+        code: "custom",
+        message: "INTERNAL_ENDPOINTS_ENABLED requires INTERNAL_ADMIN_TOKEN",
+      });
+    }
   });
 
-export type RuntimeConfig = z.infer<typeof EnvironmentSchema>;
+export type RuntimeConfig = z.infer<typeof EnvironmentSchema> & {
+  leaseValidationMode: "strict" | "degraded";
+  leaseValidationMessage: string | null;
+};
 
 export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env): RuntimeConfig {
-  return EnvironmentSchema.parse(environment);
+  const value = EnvironmentSchema.parse(environment);
+  const commandClaimLeaseMinimum =
+    2 * value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+  const scheduleClaimLeaseMinimum =
+    value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+  const recoveryLeaseMinimum =
+    value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+  const idempotencyLeaseMinimum =
+    2 * value.ADAPTER_RPC_TIMEOUT_MS + value.DB_PUBLICATION_BUDGET_MS + value.LEASE_SAFETY_MARGIN_MS;
+  const violations: string[] = [];
+  if (value.COMMAND_CLAIM_LEASE_MS < commandClaimLeaseMinimum) {
+    violations.push(
+      `COMMAND_CLAIM_LEASE_MS must be >= ${commandClaimLeaseMinimum} for current timeout and budget`,
+    );
+  }
+  if (value.SCHEDULE_CLAIM_LEASE_MS < scheduleClaimLeaseMinimum) {
+    violations.push(
+      `SCHEDULE_CLAIM_LEASE_MS must be >= ${scheduleClaimLeaseMinimum} for current timeout and budget`,
+    );
+  }
+  if (value.RECOVERY_LEASE_MS < recoveryLeaseMinimum) {
+    violations.push(
+      `RECOVERY_LEASE_MS must be >= ${recoveryLeaseMinimum} for current timeout and budget`,
+    );
+  }
+  if (value.IDEMPOTENCY_LEASE_MS < idempotencyLeaseMinimum) {
+    violations.push(
+      `IDEMPOTENCY_LEASE_MS must be >= ${idempotencyLeaseMinimum} for current timeout and budget`,
+    );
+  }
+  if (violations.length > 0) {
+    if (value.RUNTIME_ENV === "production" || !value.ALLOW_WEAK_LEASE_CONFIGURATION) {
+      throw new Error(violations.join("; "));
+    }
+    return {
+      ...value,
+      leaseValidationMode: "degraded",
+      leaseValidationMessage: violations.join("; "),
+    };
+  }
+  return { ...value, leaseValidationMode: "strict", leaseValidationMessage: null };
 }
 
 function validAdapterEndpoint(value: string): boolean {

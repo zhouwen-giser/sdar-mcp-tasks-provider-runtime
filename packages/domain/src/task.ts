@@ -66,6 +66,34 @@ export interface TaskRecord {
   lastReconciledAt: Date | null;
 }
 
+export const RESERVED_RESULT_FIELDS = [
+  "outcome",
+  "reasonCode",
+  "retryable",
+  "completedAt",
+] as const;
+
+export const STANDARD_RESULT_FIELDS = {
+  outcome: true,
+  reasonCode: true,
+  retryable: true,
+  completedAt: true,
+};
+
+export function sanitizeResultPayload(snapshot: AdapterSnapshotLike): Record<string, unknown> {
+  const source = snapshot.result ?? {};
+  if (source === null || typeof source !== "object" || Array.isArray(source)) {
+    return snapshot.result === null || snapshot.result === undefined ? {} : { value: source };
+  }
+  const filtered: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+    if (!STANDARD_RESULT_FIELDS[key as keyof typeof STANDARD_RESULT_FIELDS]) {
+      filtered[key] = value;
+    }
+  }
+  return filtered;
+}
+
 export interface SnapshotTransition {
   internalState: InternalTaskState;
   mcpStatus: McpTaskStatus;
@@ -90,18 +118,19 @@ function businessResult(
   outcome: "success" | "business_failure" | "partial_completion",
   isError: boolean,
 ): Record<string, unknown> {
+  const filtered = sanitizeResultPayload(snapshot);
   return {
     content: [{ type: "text", text: snapshot.message || outcome }],
     isError,
     structuredContent:
       outcome === "success"
-        ? (snapshot.result ?? {})
+        ? filtered
         : {
             outcome,
             reasonCode: snapshot.reasonCode || outcome.toUpperCase(),
             retryable: snapshot.retryable,
             completedAt: new Date().toISOString(),
-            ...(snapshot.result ?? {}),
+            ...filtered,
           },
   };
 }
@@ -109,8 +138,9 @@ function businessResult(
 export function mapAdapterSnapshot(snapshot: AdapterSnapshotLike): SnapshotTransition {
   switch (snapshot.state) {
     case "ACCEPTED":
+      return working("QUEUED", "accepted", snapshot, "task.accepted");
     case "SCHEDULED":
-      return working("SCHEDULED", "scheduled", snapshot, "task.accepted");
+      return working("QUEUED", "scheduled", snapshot, "task.accepted");
     case "QUEUED":
       return working("QUEUED", "queued", snapshot, "task.accepted");
     case "RUNNING":

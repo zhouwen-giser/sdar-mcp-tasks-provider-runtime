@@ -20,6 +20,7 @@ import {
   AdapterContractError,
   CapabilityNotSupportedError,
   InvalidParamsError,
+  CommandInProgressError,
   isRuntimeError,
   TaskExpiredError,
   TaskNotFoundOrUnauthorizedError,
@@ -295,6 +296,15 @@ function mapProtocolError(error: unknown): McpError {
       reasonCode: error.reasonCode,
     });
   }
+  if (error instanceof CommandInProgressError) {
+    return wireMcpError(-32009, error.safeMessage, {
+      reasonCode: error.reasonCode,
+      commandSequence: error.commandSequence,
+      commandType: error.commandType,
+      commandState: error.commandState,
+      ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
+    });
+  }
   if (isRuntimeError(error)) {
     return wireMcpError(ErrorCode.InternalError, error.safeMessage, {
       reasonCode:
@@ -337,7 +347,7 @@ function mapProtocolError(error: unknown): McpError {
   });
 }
 
-function wireMcpError(code: ErrorCode, message: string, data: Record<string, unknown>): McpError {
+function wireMcpError(code: ErrorCode | number, message: string, data: Record<string, unknown>): McpError {
   const error = new McpError(code, message, data);
   // The low-level SDK serializes Error.message verbatim, while McpError's
   // constructor prefixes it for local display. Restore the protocol message so
