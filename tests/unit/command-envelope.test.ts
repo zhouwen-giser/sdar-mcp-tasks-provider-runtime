@@ -24,7 +24,13 @@ describe("command dispatch telemetry envelope", () => {
       attributes: { commandEvent: eventType },
       taskId: "task-1",
       commandSequence: 3,
-      payload: { commandType: "UPDATE", commandState, attemptCount: 2 },
+      payload: {
+        commandType: "UPDATE",
+        previousState: "CLAIMED",
+        currentState: commandState,
+        attempt: 2,
+        adapterRpcStatus: "success",
+      },
     });
     expect(JSON.stringify(envelope)).not.toContain("secret-answer");
   });
@@ -37,9 +43,11 @@ function event(eventType: string, commandState: string): OutboxRecord {
     eventType,
     payload: {
       commandType: "UPDATE",
-      commandState,
+      previousState: "CLAIMED",
+      currentState: commandState,
       commandSequence: 3,
-      attemptCount: 2,
+      attempt: 2,
+      adapterRpcStatus: "success",
       answers: { field: "secret-answer" },
     },
     createdAt: new Date("2026-07-18T00:00:00.000Z"),

@@ -3344,8 +3344,20 @@ describe("durable task lifecycle", () => {
       "task.command.acknowledged",
     ]);
     expect(commandEvents.rows.map((row) => row.payload)).toEqual([
-      expect.objectContaining({ commandType: "CANCEL", commandState: "CLAIMED" }),
-      expect.objectContaining({ commandType: "CANCEL", commandState: "ACKNOWLEDGED" }),
+      expect.objectContaining({
+        commandType: "CANCEL",
+        previousState: "PENDING",
+        currentState: "CLAIMED",
+        attempt: 1,
+        adapterRpcStatus: "not_started",
+      }),
+      expect.objectContaining({
+        commandType: "CANCEL",
+        previousState: "CLAIMED",
+        currentState: "ACKNOWLEDGED",
+        attempt: 1,
+        adapterRpcStatus: "success",
+      }),
     ]);
   });
 

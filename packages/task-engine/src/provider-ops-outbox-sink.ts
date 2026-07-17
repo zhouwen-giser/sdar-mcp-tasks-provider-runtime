@@ -46,13 +46,17 @@ export class ProviderOpsOutboxSink implements OutboxSink {
   async publish(events: OutboxRecord[]): Promise<void> {
     await this.downstream.publish(events);
     for (const event of events) {
-      const envelope =
-        lifecycleEnvelope(event, this.context) ?? commandEnvelope(event, this.context);
-      if (envelope === null) continue;
-      try {
-        this.emitter.emitEnvelope(envelope);
-      } catch {
-        // Telemetry must never change Outbox delivery or Task lifecycle behavior.
+      const envelopes = [
+        lifecycleEnvelope(event, this.context),
+        commandEnvelope(event, this.context),
+      ];
+      for (const envelope of envelopes) {
+        if (envelope === null) continue;
+        try {
+          this.emitter.emitEnvelope(envelope);
+        } catch {
+          // Telemetry must never change Outbox delivery or Task lifecycle behavior.
+        }
       }
     }
   }
@@ -62,15 +66,15 @@ export function commandEnvelope(
   event: OutboxRecord,
   context: ProviderOpsOutboxContext,
 ): ProviderOpsEnvelope | null {
-  if (!event.eventType.startsWith("task.command")) return null;
   const sequence = numericField(event.payload, "commandSequence");
-  if (sequence === undefined) return null;
-  const payload = allowlistedPayload(event.payload, [
-    "commandType",
-    "commandState",
-    "attemptCount",
-    "reasonCode",
-  ]);
+  const commandType = event.payload.commandType;
+  if (
+    sequence === undefined ||
+    (typeof commandType !== "string" && !event.eventType.startsWith("task.command"))
+  ) {
+    return null;
+  }
+  const payload = commandPayload(event.payload);
   return createProviderOpsEnvelope({
     recordType: "provider.command_dispatch",
     eventCategory: "command.dispatch",
@@ -88,6 +92,28 @@ export function commandEnvelope(
     attributes: { source: "committed_outbox", commandEvent: event.eventType },
     payload,
   });
+}
+
+function commandPayload(payload: Record<string, unknown>): Record<string, CanonicalJsonValue> {
+  const result: Record<string, CanonicalJsonValue> = {};
+  for (const key of [
+    "commandType",
+    "previousState",
+    "currentState",
+    "attempt",
+    "retryAfterMs",
+    "reasonCode",
+    "adapterRpcStatus",
+  ] as const) {
+    const prefixedKey = `command${key[0]?.toUpperCase() ?? ""}${key.slice(1)}`;
+    const value = Object.hasOwn(payload, prefixedKey) ? payload[prefixedKey] : payload[key];
+    if (value === null || typeof value === "string" || typeof value === "boolean") {
+      result[key] = value;
+    } else if (typeof value === "number" && Number.isFinite(value)) {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 export function lifecycleEnvelope(
