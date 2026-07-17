@@ -77,6 +77,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
   const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
+  let telemetry: ProviderTelemetry | undefined;
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
   const gateway = new GrpcAdapterGateway({
@@ -84,7 +85,10 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     providerId: config.PROVIDER_ID,
     credentials: adapterCredentials(config),
     timeoutMs: config.ADAPTER_RPC_TIMEOUT_MS,
-    onRpc: (method, outcome) => metrics.increment("sdar_adapter_rpc_total", { method, outcome }),
+    onRpc: (method, outcome, durationMs) => {
+      metrics.increment("sdar_adapter_rpc_total", { method, outcome });
+      telemetry?.adapterRpc(method, outcome, durationMs);
+    },
   });
   const dependencies: RuntimeDependencies = {
     database: "starting",
@@ -98,7 +102,6 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     outboxCleaner: "starting",
   };
   let manifest: ProviderManifest | undefined;
-  let telemetry: ProviderTelemetry | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
   let schedulerTimer: NodeJS.Timeout | undefined;
   let recoveryTimer: NodeJS.Timeout | undefined;

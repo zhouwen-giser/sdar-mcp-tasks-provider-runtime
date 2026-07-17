@@ -115,6 +115,30 @@ export class ProviderTelemetry {
     });
   }
 
+  adapterRpc(method: string, outcome: "success" | "error", durationMs: number): void {
+    if (!this.#started || this.#tracerProvider === undefined) return;
+    try {
+      const endTime = Date.now();
+      const span = this.#tracerProvider
+        .getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION)
+        .startSpan(`adapter.${method}`, {
+          attributes: {
+            "rpc.system": "grpc",
+            "rpc.method": method,
+            "sdar.rpc.outcome": outcome,
+            "sdar.rpc.duration_ms": durationMs,
+          },
+          startTime: new Date(endTime - Math.max(0, durationMs)),
+        });
+      span.setStatus({
+        code: outcome === "success" ? SpanStatusCode.OK : SpanStatusCode.ERROR,
+      });
+      span.end(endTime);
+    } catch {
+      // Instrumentation must never alter Adapter RPC behavior.
+    }
+  }
+
   event(name: string, body: unknown, attributes: Attributes = {}): void {
     if (!this.#started || this.#loggerProvider === undefined) return;
     this.#loggerProvider.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION).emit({
