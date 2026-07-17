@@ -3691,6 +3691,90 @@ describe("durable task lifecycle", () => {
     );
     expect(await repository.getById(taskId)).toEqual(before);
   });
+
+  it("retry_wait_command_not_claimed_before_due", async () => {
+    const now = new Date();
+    const due = new Date(now.getTime() + 60_000);
+    const taskId = await createRetryWaitCommand("PAUSE", due);
+    const claimed = await new TaskRepository(pool).claimDueCommands(now, "backoff-before");
+    expect(claimed.filter((command) => command.taskId === taskId)).toHaveLength(0);
+  });
+
+  it("retry_wait_command_claimed_at_due_time", async () => {
+    const now = new Date();
+    const due = new Date(now.getTime() + 60_000);
+    const taskId = await createRetryWaitCommand("PAUSE", due);
+    const claimed = await new TaskRepository(pool).claimDueCommands(due, "backoff-due");
+    expect(claimed.filter((command) => command.taskId === taskId)).toEqual([
+      expect.objectContaining({ taskId, commandType: "PAUSE", state: "CLAIMED" }),
+    ]);
+  });
+
+  it("normal_retry_wait_respects_backoff", async () => {
+    const now = new Date();
+    const due = new Date(now.getTime() + 60_000);
+    const taskId = await createRetryWaitCommand("RESUME", due);
+    const repository = new TaskRepository(pool);
+    expect(
+      (await repository.claimDueCommands(now, "normal-before")).filter(
+        (command) => command.taskId === taskId,
+      ),
+    ).toHaveLength(0);
+    expect(
+      (await repository.claimDueCommands(due, "normal-due")).filter(
+        (command) => command.taskId === taskId,
+      ),
+    ).toEqual([
+      expect.objectContaining({ taskId, commandType: "RESUME" }),
+    ]);
+  });
+
+  it("cancel_retry_wait_respects_backoff", async () => {
+    const now = new Date();
+    const due = new Date(now.getTime() + 60_000);
+    const taskId = await createRetryWaitCommand("CANCEL", due);
+    const repository = new TaskRepository(pool);
+    expect(
+      (await repository.claimDueCommands(now, "cancel-before")).filter(
+        (command) => command.taskId === taskId,
+      ),
+    ).toHaveLength(0);
+    expect(
+      (await repository.claimDueCommands(due, "cancel-due")).filter(
+        (command) => command.taskId === taskId,
+      ),
+    ).toEqual([
+      expect.objectContaining({ taskId, commandType: "CANCEL" }),
+    ]);
+  });
+
+  it("multiple_ticks_before_due_do_not_call_adapter", async () => {
+    const now = new Date();
+    const due = new Date(now.getTime() + 60_000);
+    await createRetryWaitCommand("PAUSE", due);
+    const before = controlSideEffectCount;
+    const clock = new FakeClock(now);
+    const dispatcher = new DurableCommandDispatcher(
+      gateway,
+      new TaskRepository(pool),
+      clock,
+      "backoff-ticks",
+    );
+    expect(await dispatcher.tick()).toMatchObject({ claimed: 0 });
+    expect(await dispatcher.tick()).toMatchObject({ claimed: 0 });
+    expect(controlSideEffectCount).toBe(before);
+  });
+
+  it("retry_attempt_count_increments_only_when_due", async () => {
+    const now = new Date();
+    const due = new Date(now.getTime() + 60_000);
+    const taskId = await createRetryWaitCommand("PAUSE", due);
+    const repository = new TaskRepository(pool);
+    await repository.claimDueCommands(now, "attempt-before");
+    expect(await commandAttemptCount(taskId, "PAUSE")).toBe(0);
+    await repository.claimDueCommands(due, "attempt-due");
+    expect(await commandAttemptCount(taskId, "PAUSE")).toBe(1);
+  });
 });
 
 function requiredOperation(name: string) {
@@ -3793,4 +3877,40 @@ async function commandAttempts(
     [taskId, commandType],
   );
   return result.rows[0]?.count ?? "0";
+}
+
+async function createRetryWaitCommand(
+  commandType: "CANCEL" | "PAUSE" | "RESUME",
+  nextAttemptAt: Date,
+): Promise<string> {
+  const created = await engine.callOperation(
+    requiredOperation("durable_task"),
+    { resourceId: `backoff-${commandType.toLowerCase()}-${randomUUID()}` },
+    authorization,
+  );
+  if (created.kind !== "task") throw new Error("Expected backoff Task");
+  const taskId = String(created.task.taskId);
+  if (commandType === "CANCEL") {
+    await engine.cancelTask(taskId, authorization);
+  } else {
+    await engine.controlTask(taskId, commandType, authorization);
+  }
+  await pool.query(
+    `UPDATE task_command
+       SET state='RETRY_WAIT', next_attempt_at=$3, claim_owner=NULL, claim_until=NULL
+     WHERE task_id=$1 AND command_type=$2`,
+    [taskId, commandType, nextAttemptAt],
+  );
+  return taskId;
+}
+
+async function commandAttemptCount(
+  taskId: string,
+  commandType: "CANCEL" | "UPDATE" | "PAUSE" | "RESUME",
+): Promise<number> {
+  const result = await pool.query<{ attempt_count: number }>(
+    `SELECT attempt_count FROM task_command WHERE task_id=$1 AND command_type=$2`,
+    [taskId, commandType],
+  );
+  return result.rows[0]?.attempt_count ?? -1;
 }

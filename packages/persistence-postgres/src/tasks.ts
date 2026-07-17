@@ -603,6 +603,7 @@ export class TaskRepository {
          WHERE task_command.command_type IN ('CANCEL','UPDATE','PAUSE','RESUME')
            AND (
              (task_command.state IN ('PENDING','RETRY_WAIT')
+              AND task_command.next_attempt_at <= GREATEST($1,clock_timestamp())
               AND (task_command.command_type='CANCEL' OR provider_task.cancel_requested IS NOT TRUE))
              OR (
                task_command.state='CLAIMED'
@@ -631,7 +632,8 @@ export class TaskRepository {
          INNER JOIN candidates
            ON candidates.task_id = task_command.task_id
           AND candidates.command_sequence = task_command.command_sequence
-         WHERE task_command.state IN ('PENDING','RETRY_WAIT')
+         WHERE (task_command.state IN ('PENDING','RETRY_WAIT')
+                AND task_command.next_attempt_at <= GREATEST($1,clock_timestamp()))
             OR (
               task_command.state = 'CLAIMED'
               AND task_command.claim_until <= GREATEST($1,clock_timestamp())
@@ -645,7 +647,8 @@ export class TaskRepository {
          AND command.command_sequence=due.command_sequence
        RETURNING command.task_id, command.command_sequence, command.command_type,
          command.payload, command.state, command.attempt_count, command.claim_owner,
-         command.stop_reason, command.adapter_ack, command.claim_until`,
+         command.stop_reason, command.adapter_ack, command.next_attempt_at,
+         command.last_error_code, command.last_error_message, command.claim_until`,
       [now, ownerId, leaseMilliseconds, limit],
     );
     return result.rows.map((row) => ({
