@@ -1,6 +1,7 @@
 # ADR-005: Start-window enforcement and scheduled retry
 
-Status: accepted  
+Status: accepted
+
 Date: 2026-07-16
 
 ## Context
@@ -34,6 +35,16 @@ window. If an external execution exists, Runtime first commits a high-priority
 `START_WINDOW_MISSED` stop command. A late Start response follows the same compensation path in
 the publication transaction. Only a later `CANCELLED` Snapshot publishes the completed
 `start_window_missed` result; an Ack alone remains insufficient proof.
+
+### rc.3 amendment
+
+Migration 014 replaces the immediate-only stop scan with one `BoundExecutionWatchdog` for every
+bound execution, regardless of immediate or scheduled origin. Once the confirmation deadline
+passes, the worker claims `WAITING_START_CONFIRMATION`, renews the claim around Reconcile, and
+uses the Adapter snapshot as authority. A snapshot at RUNNING or later records
+`actualStartedAt`; a definitive not-started snapshot or `NOT_FOUND` enqueues the durable stop.
+Transient reconciliation releases the claim with bounded backoff. Claim-owner checks and an
+attempt counter make repeated or multi-replica watchdog ticks idempotent.
 
 When optional SDAR timing metadata is absent, Runtime uses an immediate 30-second compatibility
 window and no elapsed deadline. Explicit timing, including a zero tolerance, is preserved

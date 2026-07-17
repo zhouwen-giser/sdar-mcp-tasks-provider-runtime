@@ -112,6 +112,8 @@ interface TaskTransitionUpdate {
   cancelRequested?: boolean;
   stopReason?: string | null;
   startStopRequestedAt?: Date | null;
+  startConfirmationDeadline?: Date | null;
+  startConfirmationAttempts?: number;
   scheduleClaimOwner?: string | null;
   scheduleClaimUntil?: Date | null;
   nextStartAttemptAt?: Date | null;
@@ -164,6 +166,8 @@ interface TaskRow {
   latest_start_at: Date | null;
   actual_started_at: Date | null;
   start_stop_requested_at: Date | null;
+  start_confirmation_deadline: Date | null;
+  start_confirmation_attempts: number;
   invocation_attempt: number;
   next_start_attempt_at: Date | null;
   schedule_claim_owner: string | null;
@@ -1256,33 +1260,173 @@ export class TaskRepository {
     }
   }
 
-  async claimOverdueImmediateStarts(now: Date, limit = 32): Promise<TaskRecord[]> {
+  async claimBoundStartConfirmations(
+    now: Date,
+    ownerId: string,
+    limit = 32,
+    leaseMilliseconds = 30_000,
+  ): Promise<TaskRecord[]> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       const due = await client.query<TaskRow>(
         `SELECT * FROM provider_task
          WHERE internal_state NOT LIKE 'TERMINAL_%'
-           AND actual_started_at IS NULL AND latest_start_at <= $1
-           AND timing->'start'->>'mode'='immediate'
+           AND actual_started_at IS NULL
+           AND COALESCE(start_confirmation_deadline,latest_start_at) <= $1
            AND external_execution_id IS NOT NULL
            AND stop_reason IS NULL
-         ORDER BY latest_start_at, task_id
+           AND (schedule_claim_owner IS NULL OR schedule_claim_until <= $1)
+         ORDER BY COALESCE(start_confirmation_deadline,latest_start_at), task_id
          FOR UPDATE SKIP LOCKED LIMIT $2`,
         [now, limit],
       );
       const claimed: TaskRecord[] = [];
       for (const row of due.rows) {
-        await persistStartWindowStop(client, row.task_id, now);
-        const updated = await client.query<TaskRow>(
-          "SELECT * FROM provider_task WHERE task_id=$1",
-          [row.task_id],
-        );
-        const updatedRow = updated.rows[0];
-        if (updatedRow !== undefined) claimed.push(fromRow(updatedRow));
+        const attempt = row.start_confirmation_attempts + 1;
+        const applied = await transitionTask(client, {
+          taskId: row.task_id,
+          expectedVersion: Number(row.version),
+          update: {
+            internalState: "WAITING_START_CONFIRMATION",
+            mcpStatus: "working",
+            statusMessage: "Reconciling bound execution start confirmation.",
+            startConfirmationDeadline: row.start_confirmation_deadline ?? row.latest_start_at,
+            startConfirmationAttempts: attempt,
+            scheduleClaimOwner: ownerId,
+            scheduleClaimUntil: new Date(now.getTime() + leaseMilliseconds),
+          },
+          observation: {
+            type: "task.start_confirmation",
+            occurredAt: now,
+            reasonCode: "START_CONFIRMATION_CLAIMED",
+            message: "Reconciling bound execution start confirmation.",
+            substate: row.substate,
+            source: "runtime",
+            payload: { attempt },
+          },
+          outboxType: "task.start_confirmation",
+          eventKey: `${row.task_id}:start-confirmation:${String(attempt)}`,
+          outboxPayload: { attempt },
+        });
+        claimed.push(fromRow(applied.row));
       }
       await client.query("COMMIT");
       return claimed;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async renewStartConfirmationClaim(
+    taskId: string,
+    claimOwner: string,
+    leaseMilliseconds = 30_000,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE provider_task
+       SET schedule_claim_until=clock_timestamp() + ($3::text || ' milliseconds')::interval,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='WAITING_START_CONFIRMATION'
+         AND schedule_claim_owner=$2`,
+      [taskId, claimOwner, leaseMilliseconds],
+    );
+    if (result.rowCount !== 1) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+  }
+
+  async deferStartConfirmation(
+    taskId: string,
+    claimOwner: string,
+    retryAt: Date,
+    message: string,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE provider_task
+       SET schedule_claim_owner=NULL, schedule_claim_until=$3, status_message=$4,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='WAITING_START_CONFIRMATION'
+         AND schedule_claim_owner=$2`,
+      [taskId, claimOwner, retryAt, message],
+    );
+    if (result.rowCount !== 1) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+  }
+
+  async confirmBoundExecutionStarted(
+    taskId: string,
+    claimOwner: string,
+    adapterRevision: number,
+    transition: SnapshotTransition,
+    confirmedAt: Date,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1
+         AND internal_state='WAITING_START_CONFIRMATION' AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
+      );
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+      const applied = await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: transition.substate,
+          statusMessage: transition.statusMessage,
+          result: transition.result,
+          error: transition.error,
+          adapterRevision: Math.max(adapterRevision, Number(row.adapter_revision)),
+          actualStartedAt: confirmedAt,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: null,
+        },
+        observation: {
+          type: "task.started",
+          occurredAt: confirmedAt,
+          reasonCode: "START_CONFIRMED",
+          message: transition.statusMessage,
+          substate: transition.substate,
+          source: "adapter",
+          adapterRevision,
+        },
+        outboxType: "task.started",
+        eventKey: `${taskId}:start-confirmed:${String(adapterRevision)}`,
+      });
+      await client.query("COMMIT");
+      return fromRow(applied.row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async stopUnconfirmedBoundExecution(
+    taskId: string,
+    claimOwner: string,
+    requestedAt: Date,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1
+         AND internal_state='WAITING_START_CONFIRMATION' AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
+      );
+      if (locked.rows[0] === undefined) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+      await persistStartWindowStop(client, taskId, requestedAt);
+      await client.query("COMMIT");
+      const updated = await selectTaskById(client, taskId);
+      if (updated === null) throw new Error("TASK_NOT_FOUND");
+      return updated;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -1957,6 +2101,12 @@ async function transitionTask(
   if (update.startStopRequestedAt !== undefined) {
     add("start_stop_requested_at", update.startStopRequestedAt);
   }
+  if (update.startConfirmationDeadline !== undefined) {
+    add("start_confirmation_deadline", update.startConfirmationDeadline);
+  }
+  if (update.startConfirmationAttempts !== undefined) {
+    add("start_confirmation_attempts", update.startConfirmationAttempts);
+  }
   if (update.scheduleClaimOwner !== undefined)
     add("schedule_claim_owner", update.scheduleClaimOwner);
   if (update.scheduleClaimUntil !== undefined)
@@ -2339,6 +2489,8 @@ function fromRow(row: TaskRow): TaskRecord {
     latestStartAt: row.latest_start_at,
     actualStartedAt: row.actual_started_at,
     startStopRequestedAt: row.start_stop_requested_at,
+    startConfirmationDeadline: row.start_confirmation_deadline,
+    startConfirmationAttempts: row.start_confirmation_attempts,
     invocationAttempt: row.invocation_attempt,
     nextStartAttemptAt: row.next_start_attempt_at,
     scheduleClaimOwner: row.schedule_claim_owner,

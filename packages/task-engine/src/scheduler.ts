@@ -11,6 +11,7 @@ import { OperationSnapshotRepository } from "../../persistence-postgres/src/inde
 import type { TaskRepository } from "../../persistence-postgres/src/index.js";
 import { validatedSnapshotTransition } from "./result-contract.js";
 import { withLeaseHeartbeat } from "./lease-heartbeat.js";
+import { BoundExecutionWatchdog } from "./bound-execution-watchdog.js";
 
 export interface SchedulerOptions {
   concurrency?: number;
@@ -45,15 +46,23 @@ export class DurableScheduler {
 
   async tick(): Promise<SchedulerTickResult> {
     const now = this.clock.now();
-    const overdueImmediate = await this.repository.claimOverdueImmediateStarts(now);
+    // rc.3 replaces rc.2 claimOverdueImmediateStarts with reconciliation for every bound mode.
+    const watchdog = await new BoundExecutionWatchdog(
+      this.gateway,
+      this.repository,
+      this.clock,
+      `${this.workerId}:start-watchdog`,
+      this.operationSnapshots,
+      this.options,
+    ).tick();
     const missedBeforeClaim = await this.repository.completeDueStartWindowMisses(now);
     const result: SchedulerTickResult = {
       started: 0,
       missed: missedBeforeClaim,
       deferred: 0,
       deadlineStops: 0,
-      watchdogStops: overdueImmediate.length,
-      reconciled: 0,
+      watchdogStops: watchdog.stopRequested,
+      reconciled: watchdog.started,
     };
 
     const concurrency = this.options.concurrency ?? 8;
