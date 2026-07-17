@@ -287,7 +287,10 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       const second = await engine.getTask(taskId, authorization);
       assert(second.status === "input_required", "second input round missing");
       await engine.updateTask(taskId, { comment: "approved" }, authorization);
-      assert((await dispatcher.tick()).acknowledged === 1, "second input update was not dispatched");
+      assert(
+        (await dispatcher.tick()).acknowledged === 1,
+        "second input update was not dispatched",
+      );
       assert(
         (await engine.getTask(taskId, authorization)).status === "completed",
         "input Task incomplete",
