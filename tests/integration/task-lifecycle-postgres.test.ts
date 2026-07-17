@@ -3294,7 +3294,8 @@ describe("durable task lifecycle", () => {
       payload: Record<string, unknown>;
     }>(
       `SELECT event_key, event_type, payload FROM outbox_event
-       WHERE aggregate_id=$1 ORDER BY created_at, event_key`,
+       WHERE aggregate_id=$1 AND event_type NOT LIKE 'task.command.%'
+       ORDER BY created_at, event_key`,
       [taskId],
     );
     expect(events.rows).toHaveLength(3);
@@ -3312,6 +3313,23 @@ describe("durable task lifecycle", () => {
       });
       expect(typeof event.payload.status).toBe("string");
     }
+    const commandEvents = await pool.query<{
+      event_type: string;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT event_type, payload FROM outbox_event
+       WHERE aggregate_id=$1 AND event_type LIKE 'task.command.%'
+       ORDER BY created_at, event_key`,
+      [taskId],
+    );
+    expect(commandEvents.rows.map((row) => row.event_type)).toEqual([
+      "task.command.claimed",
+      "task.command.acknowledged",
+    ]);
+    expect(commandEvents.rows.map((row) => row.payload)).toEqual([
+      expect.objectContaining({ commandType: "CANCEL", commandState: "CLAIMED" }),
+      expect.objectContaining({ commandType: "CANCEL", commandState: "ACKNOWLEDGED" }),
+    ]);
   });
 
   it("T-016 rolls back task, observation, and outbox together on event write failure", async () => {

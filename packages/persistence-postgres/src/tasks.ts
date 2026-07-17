@@ -682,9 +682,15 @@ export class TaskRepository {
          command.last_error_code, command.last_error_message, command.claim_until`,
         [now, ownerId, leaseMilliseconds, limit],
       );
-      return result.rows.map((row) => ({
+      const commands = result.rows.map((row) => ({
         ...mapPendingCommandRecord(row),
       }));
+      await Promise.all(
+        commands.map((command) =>
+          recordCommandFact(this.pool, command, "task.command.claimed", "CLAIMED"),
+        ),
+      );
+      return commands;
     } catch (error) {
       const databaseError = error as { code?: string; constraint?: string };
       if (
@@ -741,6 +747,9 @@ export class TaskRepository {
       ],
     );
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+    await recordCommandFact(this.pool, command, "task.command.retry_scheduled", "RETRY_WAIT", {
+      reasonCode: errorCode,
+    });
   }
 
   async renewCommandClaim(
@@ -769,6 +778,9 @@ export class TaskRepository {
       [command.taskId, command.commandSequence, command.claimOwner, errorCode, errorMessage],
     );
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+    await recordCommandFact(this.pool, command, "task.command.rejected", "REJECTED", {
+      reasonCode: errorCode,
+    });
   }
 
   async noteRecovery(taskId: string): Promise<void> {
@@ -1806,11 +1818,13 @@ export class TaskRepository {
       );
       if (existing.rows[0] !== undefined) {
         await client.query("COMMIT");
-        return {
+        const duplicate = {
           ...mapCommandResolution(existing.rows[0]),
           duplicate: true,
           disposition: "existing",
-        };
+        } as const;
+        await recordCommandResolutionFact(this.pool, taskId, duplicate, "task.command.duplicate");
+        return duplicate;
       }
       if (isTerminalState(previous.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
@@ -1922,11 +1936,13 @@ export class TaskRepository {
       );
       if (existing.rows[0] !== undefined) {
         await client.query("COMMIT");
-        return {
+        const duplicate = {
           ...mapCommandResolution(existing.rows[0]),
           duplicate: true,
           disposition: "existing",
-        };
+        } as const;
+        await recordCommandResolutionFact(this.pool, taskId, duplicate, "task.command.duplicate");
+        return duplicate;
       }
 
       if (
@@ -2088,6 +2104,9 @@ export class TaskRepository {
     if (result.rowCount !== 1) {
       throw new Error("COMMAND_CLAIM_LOST");
     }
+    await recordCommandFact(this.pool, command, "task.command.superseded", "EXHAUSTED", {
+      reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+    });
   }
 
   async supersedeExpiredClaimedNormalCommandsForSafeStop(taskId: string): Promise<number> {
@@ -2131,6 +2150,7 @@ export class TaskRepository {
       [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
     );
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+    await recordCommandFact(this.pool, command, "task.command.acknowledged", "ACKNOWLEDGED");
   }
 
   async acknowledgeUpdateAndCompleteInputAnswers(
@@ -2179,6 +2199,9 @@ export class TaskRepository {
       if (isTerminalState(task.internal_state)) {
         await exhaust("TASK_TERMINAL");
         await client.query("COMMIT");
+        await recordCommandFact(this.pool, command, "task.command.rejected", "EXHAUSTED", {
+          reasonCode: "TASK_TERMINAL",
+        });
         return "task_terminal";
       }
       if (
@@ -2188,6 +2211,9 @@ export class TaskRepository {
       ) {
         await exhaust("SUPERSEDED_BY_SAFE_STOP");
         await client.query("COMMIT");
+        await recordCommandFact(this.pool, command, "task.command.superseded", "EXHAUSTED", {
+          reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+        });
         return "superseded_by_safe_stop";
       }
 
@@ -2231,6 +2257,7 @@ export class TaskRepository {
       );
       if (acknowledged.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
       await client.query("COMMIT");
+      await recordCommandFact(this.pool, command, "task.command.acknowledged", "ACKNOWLEDGED");
       return "acknowledged";
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -2867,6 +2894,67 @@ async function insertOutbox(
      VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING`,
     [randomUUID(), eventKey, taskId, type, JSON.stringify(completePayload)],
   );
+}
+
+async function recordCommandFact(
+  pool: Pool,
+  command: Pick<
+    PendingCommandRecord,
+    "taskId" | "commandSequence" | "commandType" | "attemptCount"
+  >,
+  eventType: string,
+  commandState: PendingCommandRecord["state"],
+  extra: { reasonCode?: string } = {},
+): Promise<void> {
+  await recordCommandResolutionFact(
+    pool,
+    command.taskId,
+    {
+      sequence: command.commandSequence,
+      commandType: command.commandType,
+      state: commandState,
+      attemptCount: command.attemptCount,
+    },
+    eventType,
+    extra,
+  );
+}
+
+async function recordCommandResolutionFact(
+  pool: Pool,
+  taskId: string,
+  command: {
+    sequence: number;
+    commandType: PendingCommandRecord["commandType"];
+    state: PendingCommandRecord["state"];
+    attemptCount?: number;
+  },
+  eventType: string,
+  extra: { reasonCode?: string } = {},
+): Promise<void> {
+  try {
+    const eventId = randomUUID();
+    await pool.query(
+      `INSERT INTO outbox_event(event_id,event_key,aggregate_id,event_type,payload)
+       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+      [
+        eventId,
+        `${taskId}:command:${String(command.sequence)}:${eventType}:${eventId}`,
+        taskId,
+        eventType,
+        JSON.stringify({
+          taskId,
+          commandSequence: command.sequence,
+          commandType: command.commandType,
+          commandState: command.state,
+          ...(command.attemptCount === undefined ? {} : { attemptCount: command.attemptCount }),
+          ...extra,
+        }),
+      ],
+    );
+  } catch {
+    // Operational telemetry persistence is best effort and cannot fail command processing.
+  }
 }
 
 function stableObservationType(transition: SnapshotTransition): string {

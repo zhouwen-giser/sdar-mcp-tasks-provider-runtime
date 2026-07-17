@@ -30,8 +30,8 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | H0      | OTel SDK foundation, resource, lifecycle                    | init/resource/shutdown tests            | complete    |
 | H1      | stable Provider Ops envelope, UUIDv5 ID, RFC 8785 hash      | deterministic ID/hash tests             | complete    |
 | H2      | committed Task lifecycle audit events                       | commit/rollback integration tests       | complete    |
-| H3      | command dispatch events                                     | state/duplicate/retry/supersede tests   | in progress |
-| H4      | Adapter RPC spans                                           | success/error/no-payload tests          | pending     |
+| H3      | command dispatch events                                     | state/duplicate/retry/supersede tests   | complete    |
+| H4      | Adapter RPC spans                                           | success/error/no-payload tests          | in progress |
 | H5      | scheduler/recovery/TTL events                               | component event tests                   | pending     |
 | H6      | low-cardinality OTel metrics                                | value/cardinality/label tests           | pending     |
 | H7      | bounded failure isolation                                   | collector down/timeout/queue full tests | pending     |
@@ -60,6 +60,7 @@ Task IDs, argument hashes, authorization hashes, user IDs, execution IDs, or cor
 | 2026-07-18 | H0 format, typecheck, lint and unit (33 tests)                    | PASS   |
 | 2026-07-18 | H1 format, typecheck, lint and unit (38 tests)                    | PASS   |
 | 2026-07-18 | H2 unit (39), focused integration (5), commit/rollback PostgreSQL | PASS   |
+| 2026-07-18 | H3 unit (45) and full PostgreSQL integration (162)                | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.

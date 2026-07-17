@@ -40,7 +40,8 @@ export class ProviderOpsOutboxSink implements OutboxSink {
   async publish(events: OutboxRecord[]): Promise<void> {
     await this.downstream.publish(events);
     for (const event of events) {
-      const envelope = lifecycleEnvelope(event, this.context);
+      const envelope =
+        lifecycleEnvelope(event, this.context) ?? commandEnvelope(event, this.context);
       if (envelope === null) continue;
       try {
         this.emitter.emitEnvelope(envelope);
@@ -49,6 +50,37 @@ export class ProviderOpsOutboxSink implements OutboxSink {
       }
     }
   }
+}
+
+export function commandEnvelope(
+  event: OutboxRecord,
+  context: ProviderOpsOutboxContext,
+): ProviderOpsEnvelope | null {
+  if (!event.eventType.startsWith("task.command")) return null;
+  const sequence = numericField(event.payload, "commandSequence");
+  if (sequence === undefined) return null;
+  const payload = allowlistedPayload(event.payload, [
+    "commandType",
+    "commandState",
+    "attemptCount",
+    "reasonCode",
+  ]);
+  return createProviderOpsEnvelope({
+    recordType: event.eventType,
+    eventCategory: "command.dispatch",
+    deliveryClass: "operational",
+    providerId: context.providerId,
+    runtimeVersion: context.runtimeVersion,
+    instanceId: context.instanceId,
+    taskId: event.aggregateId,
+    commandSequence: sequence,
+    stableAggregateIdentity: event.aggregateId,
+    eventIdentity: event.eventId,
+    revision: sequence,
+    occurredAt: event.createdAt,
+    attributes: { source: "committed_outbox" },
+    payload,
+  });
 }
 
 export function lifecycleEnvelope(
@@ -78,8 +110,15 @@ export function lifecycleEnvelope(
 function allowlistedLifecyclePayload(
   payload: Record<string, unknown>,
 ): Record<string, CanonicalJsonValue> {
+  return allowlistedPayload(payload, ["internalState", "status", "substate", "reasonCode"]);
+}
+
+function allowlistedPayload(
+  payload: Record<string, unknown>,
+  keys: readonly string[],
+): Record<string, CanonicalJsonValue> {
   const result: Record<string, CanonicalJsonValue> = {};
-  for (const key of ["internalState", "status", "substate", "reasonCode"] as const) {
+  for (const key of keys) {
     const value = payload[key];
     if (value === null || typeof value === "string" || typeof value === "boolean") {
       result[key] = value;
