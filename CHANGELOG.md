@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0-rc.3 - 2026-07-17
+
+- Reliability hardening for multi-instance lease ownership, start-window correctness,
+  production safety and complete Runtime worker lifecycles.
+- Added command lease renewal and two-replica dispatch safety, a unified bound-execution start
+  watchdog, STOPPING protection, fail-closed production configuration and Manifest drift health.
+- Completed Outbox publication, bounded Observation pagination, fair recovery backoff and the
+  sanitized Adapter result contract; appended migrations 013 through 015.
+- No new product features; v1.0.0-rc.2 migrations and release evidence remain immutable.
+
 ## 1.0.0-rc.2 - 2026-07-17
 
 - Hardened durable commands, timing windows, observation revisions, immutable

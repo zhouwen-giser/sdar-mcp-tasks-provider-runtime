@@ -69,9 +69,13 @@ export class RecoveryManager {
         if (outcome === null) result.lockSkipped += 1;
         else if (outcome === "found") result.tasksReconciled += 1;
         else if (outcome === "not_found") result.notFound += 1;
-        else if (outcome === "deferred") result.deferred += 1;
+        else if (outcome === "deferred") {
+          result.deferred += 1;
+          await this.repository.noteRecoveryFailure(candidate.taskId);
+        }
       } catch (error) {
         result.deferred += 1;
+        await this.repository.noteRecoveryFailure(candidate.taskId).catch(() => undefined);
         this.onTaskError(error, candidate.taskId);
       }
     }

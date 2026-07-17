@@ -31,5 +31,5 @@ Both examples store execution binding, full Snapshot, terminal proof, input roun
 
 The rc.2 release gate validates both JSON reports against the executable schema, requires at
 least 17 cases per language and rejects a report that promotes Runtime Profile or resource safety
-beyond these scopes. `pnpm verify:rc2` also runs the independent Runtime integration, recovery,
+beyond these scopes. `pnpm verify:rc3` also runs the independent Runtime integration, recovery,
 security, wire and capacity matrix.

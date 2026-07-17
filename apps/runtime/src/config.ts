@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+const BooleanEnvironmentSchema = z
+  .union([z.string(), z.boolean()])
+  .transform((value) => parseBooleanEnv(value));
+
 const EnvironmentSchema = z
   .object({
     RUNTIME_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -34,12 +38,15 @@ const EnvironmentSchema = z
     RECOVERY_LEASE_MS: z.coerce.number().int().min(1_000).max(300_000).default(30_000),
     LEASE_SAFETY_MARGIN_MS: z.coerce.number().int().min(100).max(60_000).default(500),
     DB_PUBLICATION_BUDGET_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
-    ALLOW_WEAK_LEASE_CONFIGURATION: z.coerce.boolean().default(false),
-    INTERNAL_ENDPOINTS_ENABLED: z.coerce.boolean().default(false),
+    ALLOW_WEAK_LEASE_CONFIGURATION: BooleanEnvironmentSchema.default(false),
+    INTERNAL_ENDPOINTS_ENABLED: BooleanEnvironmentSchema.default(false),
     INTERNAL_ADMIN_TOKEN: z.string().min(32).optional(),
     ADAPTER_HEALTH_POLL_MS: z.coerce.number().int().min(100).max(300_000).default(5_000),
     ADAPTER_HEALTH_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(10).default(2),
+    ADAPTER_MANIFEST_POLL_MS: z.coerce.number().int().min(100).max(3_600_000).default(60_000),
     SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
+    COMMAND_DISPATCH_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
+    SCHEDULER_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
     OUTBOX_CLEANER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(60_000),
     RECOVERY_POLL_MS: z.coerce.number().int().min(500).max(300_000).default(5_000),
     TTL_CLEANER_POLL_MS: z.coerce.number().int().min(500).max(3_600_000).default(60_000),
@@ -51,6 +58,11 @@ const EnvironmentSchema = z
       .max(7_776_000_000)
       .default(86_400_000),
     TTL_CLEANER_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(128),
+    OUTBOX_SINK: z.enum(["internal_noop", "webhook"]).default("internal_noop"),
+    OUTBOX_WEBHOOK_URL: z.url().optional(),
+    OUTBOX_POLL_MS: z.coerce.number().int().min(100).max(300_000).default(1_000),
+    OUTBOX_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(100),
+    OUTBOX_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(5_000),
   })
   .superRefine((value, context) => {
     if (
@@ -63,6 +75,30 @@ const EnvironmentSchema = z
     }
     if (value.AUTH_MODE === "jwt_hs256" && value.JWT_HS256_SECRET === undefined) {
       context.addIssue({ code: "custom", message: "jwt_hs256 requires JWT_HS256_SECRET" });
+    }
+    if (value.RUNTIME_ENV === "production") {
+      if (value.AUTH_MODE === "development") {
+        context.addIssue({ code: "custom", message: "production forbids development auth" });
+      }
+      if (value.ADAPTER_TLS_MODE !== "required") {
+        context.addIssue({ code: "custom", message: "production requires Adapter mTLS" });
+      }
+      if (value.ALLOW_WEAK_LEASE_CONFIGURATION) {
+        context.addIssue({
+          code: "custom",
+          message: "production forbids weak lease configuration",
+        });
+      }
+    }
+    if (value.OUTBOX_SINK === "webhook" && value.OUTBOX_WEBHOOK_URL === undefined) {
+      context.addIssue({ code: "custom", message: "webhook Outbox requires OUTBOX_WEBHOOK_URL" });
+    }
+    if (
+      value.RUNTIME_ENV === "production" &&
+      value.OUTBOX_WEBHOOK_URL !== undefined &&
+      !value.OUTBOX_WEBHOOK_URL.startsWith("https://")
+    ) {
+      context.addIssue({ code: "custom", message: "production Outbox webhook requires HTTPS" });
     }
     if (value.INTERNAL_ENDPOINTS_ENABLED && value.INTERNAL_ADMIN_TOKEN === undefined) {
       context.addIssue({
@@ -131,6 +167,20 @@ export function loadRuntimeConfig(environment: NodeJS.ProcessEnv = process.env):
     };
   }
   return { ...value, leaseValidationMode: "strict", leaseValidationMessage: null };
+}
+
+export function parseBooleanEnv(value: string | boolean): boolean {
+  if (typeof value === "boolean") return value;
+  switch (value.toLowerCase()) {
+    case "true":
+    case "1":
+      return true;
+    case "false":
+    case "0":
+      return false;
+    default:
+      throw new Error(`INVALID_BOOLEAN_ENV:${value}`);
+  }
 }
 
 function validAdapterEndpoint(value: string): boolean {

@@ -9,6 +9,7 @@
     "HOST": "0.0.0.0",
     "PORT": "8080",
     "LOG_LEVEL": "info",
+    "RUNTIME_ENV": "production",
     "PROVIDER_ID": "replace-provider-id",
     "ADAPTER_ENDPOINT": "replace-adapter-service:7001",
     "ADAPTER_TLS_MODE": "required",
@@ -25,6 +26,13 @@
     "RATE_LIMIT_MAX": "300",
     "RATE_LIMIT_WINDOW_MS": "60000",
     "SCHEDULER_POLL_MS": "1000",
+    "COMMAND_DISPATCH_CONCURRENCY": "8",
+    "SCHEDULER_CONCURRENCY": "8",
+    "ALLOW_WEAK_LEASE_CONFIGURATION": "false",
+    "ADAPTER_MANIFEST_POLL_MS": "60000",
+    "OUTBOX_SINK": "internal_noop",
+    "OUTBOX_POLL_MS": "1000",
+    "OUTBOX_BATCH_SIZE": "100",
     "RECOVERY_POLL_MS": "5000",
     "OUTBOX_PUBLISHED_RETENTION_MS": "86400000"
   }

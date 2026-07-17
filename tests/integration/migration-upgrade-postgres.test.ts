@@ -36,8 +36,8 @@ afterAll(async () => {
   await rm(rc1Migrations, { recursive: true, force: true });
 });
 
-describe("rc.1 database forward upgrade", () => {
-  it("upgrades old PENDING and COMPLETE idempotency rows through migration 012", async () => {
+describe("pre-012 database forward upgrade", () => {
+  it("upgrades old idempotency rows and applies the complete rc.3 migration set", async () => {
     await runMigrations(upgradePool, rc1Migrations);
     const pendingTaskId = "00000000-0000-4000-8000-000000000012";
     await upgradePool.query(
@@ -91,5 +91,9 @@ describe("rc.1 database forward upgrade", () => {
       "SELECT 1 FROM runtime_schema_migration WHERE version = '012_idempotency_claim_lease.sql'",
     );
     expect(applied.rowCount).toBe(1);
+    const current = await upgradePool.query<{ count: string }>(
+      "SELECT count(*) FROM runtime_schema_migration",
+    );
+    expect(current.rows[0]?.count).toBe("17");
   });
 });

@@ -2974,7 +2974,7 @@ describe("durable task lifecycle", () => {
       "io.sdar/taskExecution"
     ]?.observations ?? []) as { revision: number; type: string }[];
     expect(observations.map((observation) => observation.revision)).toEqual(
-      [...new Set(observations.map((observation) => observation.revision))].sort((a, b) => a - b),
+      [...new Set(observations.map((observation) => observation.revision))].sort((a, b) => b - a),
     );
     expect(observations.some((observation) => observation.type === "task.paused")).toBe(true);
 
@@ -3591,13 +3591,15 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(expiryEvents.rows[0]?.count).toBe("1");
+    await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
+      taskId,
+    ]);
+    const blocked = await first.tick(new Date("2000-01-03T00:00:00Z"));
+    expect(blocked.purged).toBe(0);
     await pool.query(
       "UPDATE outbox_event SET published_at=clock_timestamp() WHERE aggregate_id=$1",
       [taskId],
     );
-    await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
-      taskId,
-    ]);
     const purged = await Promise.all([
       first.tick(new Date("2000-01-03T00:00:00Z")),
       second.tick(new Date("2000-01-03T00:00:00Z")),
@@ -3990,7 +3992,13 @@ describe("durable task lifecycle", () => {
   it("database_rejects_two_claimed_commands_for_same_task", async () => {
     const taskId = await createTwoPendingCommands("unique-claimed");
     await expect(
-      pool.query("UPDATE task_command SET state='CLAIMED' WHERE task_id=$1", [taskId]),
+      pool.query(
+        `UPDATE task_command
+         SET state='CLAIMED', claim_owner='unique-claim-test',
+             claim_until=clock_timestamp()+interval '30 seconds'
+         WHERE task_id=$1`,
+        [taskId],
+      ),
     ).rejects.toMatchObject({ code: "23505" });
   });
 

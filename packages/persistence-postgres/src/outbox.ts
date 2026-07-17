@@ -50,4 +50,13 @@ export class OutboxRepository {
       [eventId],
     );
   }
+
+  async recordAttempts(eventIds: string[]): Promise<void> {
+    if (eventIds.length === 0) return;
+    await this.pool.query(
+      `UPDATE outbox_event SET delivery_attempts=delivery_attempts+1
+       WHERE event_id = ANY($1::uuid[]) AND published_at IS NULL`,
+      [eventIds],
+    );
+  }
 }

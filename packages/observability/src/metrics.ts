@@ -10,7 +10,7 @@ export class RuntimeMetrics {
     const lines = [
       "# HELP sdar_runtime_info Runtime build information.",
       "# TYPE sdar_runtime_info gauge",
-      'sdar_runtime_info{version="1.0.0-rc.2"} 1',
+      'sdar_runtime_info{version="1.0.0-rc.3"} 1',
     ];
     for (const [key, value] of [...this.#counters].sort(([left], [right]) =>
       left.localeCompare(right),

@@ -9,7 +9,9 @@ scan, and only then listens. `/health/live` proves the event loop can respond;
 `commandDispatcher`, and `ttlCleaner` independently.
 Remove a replica from traffic on any non-ready dependency.
 
-Adapter readiness is a continuous identity-checked probe, not a startup latch. An Adapter outage
+Adapter readiness is a continuous identity-checked probe, not a startup latch. Adapter Manifest
+readiness separately compares the current validated hash with the startup hash and latches drift
+as failed until restart. An Adapter outage
 must change only `adapter` to failed while a successful PostgreSQL probe keeps `database` ready;
 recovery is automatic after a valid probe. Scheduler/dispatcher/cleaner failures retain their
 own component label. Liveness remains 200 during ordinary dependency outages.
@@ -19,6 +21,10 @@ growth in `sdar_outbox_pending`, Adapter RPC error outcomes, recovery errors,
 rate limiting, and unexpected terminal-failed growth. Correlate structured logs
 by `providerId`, `taskId`, `operationName`, execution mode and correlation id;
 arguments, credentials and bearer tokens are intentionally absent/redacted.
+
+An Outbox publisher readiness failure means committed lifecycle events remain pending. Restore
+the webhook or intentionally select the internal sink; do not bypass unpublished rows to force
+TTL purge.
 
 ## Routine operations
 
@@ -33,7 +39,7 @@ arguments, credentials and bearer tokens are intentionally absent/redacted.
   tasks; another replica or restarted process scans them.
 - Streamable HTTP is stateless: do not configure sticky sessions, expect an
   `Mcp-Session-Id`, or depend on GET/DELETE/resumable notifications in rc.2.
-- Before rc.2 rollout, run `pnpm verify:rc2`, Buf breaking against `v1.0.0-rc.1`, and the
+- Before rc.3 rollout, run `pnpm verify:rc3`, Buf breaking against `v1.0.0-rc.1`, and the
   three-image Compose build. Archive conformance, capacity, SBOM and image JSON as evidence.
 - Size `DATABASE_POOL_MAX` for replicas and probes. The capacity gate proves a max-one pool can
   make SQL progress during a slow Adapter RPC; rising pool waiters still require investigation.

@@ -2,14 +2,15 @@ name: runtime-ci
 
 on:
   push:
-    branches: [main, feature/mcp-tasks-provider-runtime-v1]
+    branches: [main, "release/**"]
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  quality:
+  runtime-ci:
+    name: runtime-ci
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     services:
@@ -43,7 +44,7 @@ jobs:
         with:
           version: 1.57.2
       - run: pnpm install --frozen-lockfile
-      - run: pnpm verify:rc2
+      - run: pnpm verify:rc3
       - run: buf lint proto
       - name: Check Protobuf compatibility against rc.1
         run: buf breaking proto --against '.git#tag=v1.0.0-rc.1,subdir=proto'
@@ -62,7 +63,8 @@ jobs:
             reports/sbom/*.json
           if-no-files-found: warn
 
-  compose-smoke:
+  runtime-compose:
+    name: runtime-compose
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

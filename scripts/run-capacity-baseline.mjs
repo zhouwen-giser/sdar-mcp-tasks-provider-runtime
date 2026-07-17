@@ -40,37 +40,45 @@ let slowSideEffectResolve;
 const slowSideEffect = new Promise((resolveSlowSideEffect) => {
   slowSideEffectResolve = resolveSlowSideEffect;
 });
+const commandSideEffects = new Map();
 const adapter = createMockAdapterServer({
   providerId: "capacity-provider",
-  startResponseDelayMs: 750,
+  startResponseDelayMs: 15_000,
   onStartSideEffect: () => slowSideEffectResolve?.(),
+  onControlSideEffect: (taskId, command) => {
+    const key = `${taskId}:${command}`;
+    commandSideEffects.set(key, (commandSideEffects.get(key) ?? 0) + 1);
+  },
 });
 const adapterPort = await bindMockAdapter(adapter, "127.0.0.1:0");
-const runtime = createRuntime(
-  loadRuntimeConfig({
-    DATABASE_URL: isolatedDatabaseUrl.toString(),
-    PROVIDER_ID: "capacity-provider",
-    ADAPTER_ENDPOINT: `127.0.0.1:${String(adapterPort)}`,
-    AUTH_MODE: "development",
-    LOG_LEVEL: "warn",
-    DATABASE_POOL_MAX: "1",
-    ADAPTER_RPC_TIMEOUT_MS: "5000",
-    ADAPTER_HEALTH_POLL_MS: "300000",
-    SCHEDULER_POLL_MS: "60000",
-    RECOVERY_POLL_MS: "300000",
-    TTL_CLEANER_POLL_MS: "3600000",
-  }),
-);
+const runtimeEnvironment = {
+  DATABASE_URL: isolatedDatabaseUrl.toString(),
+  PROVIDER_ID: "capacity-provider",
+  ADAPTER_ENDPOINT: `127.0.0.1:${String(adapterPort)}`,
+  AUTH_MODE: "development",
+  LOG_LEVEL: "warn",
+  DATABASE_POOL_MAX: "1",
+  ADAPTER_RPC_TIMEOUT_MS: "20000",
+  IDEMPOTENCY_LEASE_MS: "60000",
+  COMMAND_CLAIM_LEASE_MS: "60000",
+  ADAPTER_HEALTH_POLL_MS: "300000",
+  SCHEDULER_POLL_MS: "60000",
+  RECOVERY_POLL_MS: "300000",
+  TTL_CLEANER_POLL_MS: "3600000",
+};
+const runtime = createRuntime(loadRuntimeConfig(runtimeEnvironment));
+const runtimeReplica2 = createRuntime(loadRuntimeConfig(runtimeEnvironment));
 let client;
 
 try {
   progress("initialize");
   const manifest = await runtime.initialize();
+  await runtimeReplica2.initialize();
   const validatedManifest = new OperationRegistry().validate(manifest);
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("Runtime did not bind");
-  client = new Client({ name: "runtime-capacity-baseline", version: "1.0.0-rc.2" });
+  client = new Client({ name: "runtime-capacity-baseline", version: "1.0.0-rc.3" });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${String(address.port)}/mcp`)),
   );
@@ -109,7 +117,7 @@ try {
     );
   }
 
-  progress("sequential-workloads");
+  progress("workloads");
   const synchronous = await measure(100, async (index) => {
     const result = await client.callTool({
       name: "echo_sync",
@@ -117,30 +125,72 @@ try {
     });
     if (result.isError === true) throw new Error("Synchronous baseline call failed");
   });
-  const tasks = await measure(25, async (index) => {
-    const created = await createDurableTask(client, `${resourcePrefix}-task-${index}`);
-    const completed = await client.experimental.tasks.getTask(created.task.taskId);
-    if (completed.status !== "completed") throw new Error("Task baseline did not complete");
+  const concurrentTaskCount = 1000;
+  const concurrentTasks = await timed(async () =>
+    Promise.all(
+      Array.from({ length: concurrentTaskCount }, (_, index) =>
+        capacityEngine.callOperation(
+          durableOperation,
+          { resourceId: `${resourcePrefix}-task-${index}`, scenario: "queued_start" },
+          { hash: "a".repeat(64), executionMode: "live", simulationId: null },
+          60_000,
+          undefined,
+          {
+            start: { mode: "immediate", startToleranceMs: 300_000 },
+            maxElapsedMs: null,
+          },
+        ),
+      ),
+    ),
+  );
+  const concurrentTaskIds = concurrentTasks.value.map((outcome) => {
+    if (outcome.kind !== "task") throw new Error("Concurrent admission did not publish a Task");
+    return outcome.task.taskId;
   });
 
   progress("dispatcher");
   const repository = new TaskRepository(runtime.pool);
-  const dispatcherTaskCount = 20;
-  for (let index = 0; index < dispatcherTaskCount; index += 1) {
-    const created = await createDurableTask(
-      client,
-      `${resourcePrefix}-dispatch-${index}`,
-      "queued_start",
-    );
-    const cancellation = await client.experimental.tasks.cancelTask(created.task.taskId);
-    if (cancellation.status !== "working") throw new Error("Cancel intent was not durable");
-  }
-  const dispatcher = new DurableCommandDispatcher(runtime.gateway, repository);
-  const dispatcherMeasurement = await timed(async () => dispatcher.tick());
-  if (dispatcherMeasurement.value.acknowledged !== dispatcherTaskCount) {
+  const secondRepository = new TaskRepository(runtimeReplica2.pool);
+  const dispatcherTaskCount = 500;
+  const commandBurstTaskIds = concurrentTaskIds.slice(0, dispatcherTaskCount);
+  await Promise.all(
+    commandBurstTaskIds.map((taskId) =>
+      capacityEngine.cancelTask(taskId, {
+        hash: "a".repeat(64),
+        executionMode: "live",
+        simulationId: null,
+      }),
+    ),
+  );
+  const dispatchers = [
+    new DurableCommandDispatcher(runtime.gateway, repository, undefined, "capacity-runtime-1"),
+    new DurableCommandDispatcher(
+      runtimeReplica2.gateway,
+      secondRepository,
+      undefined,
+      "capacity-runtime-2",
+    ),
+  ];
+  const dispatcherMeasurement = await timed(async () =>
+    drainDispatchers(dispatchers, dispatcherTaskCount, async () => {
+      const result = await runtime.pool.query(
+        `SELECT count(*)::int AS count FROM task_command
+         WHERE task_id=ANY($1::uuid[]) AND state='ACKNOWLEDGED'`,
+        [commandBurstTaskIds],
+      );
+      return Number(result.rows[0]?.count ?? 0);
+    }),
+  );
+  if (dispatcherMeasurement.value.durableAcknowledged !== dispatcherTaskCount) {
     throw new Error(
-      `Dispatcher acknowledged ${dispatcherMeasurement.value.acknowledged}/${dispatcherTaskCount}`,
+      `Dispatcher acknowledged ${dispatcherMeasurement.value.durableAcknowledged}/${dispatcherTaskCount}`,
     );
+  }
+  const commandBurstSideEffects = commandBurstTaskIds.map(
+    (taskId) => commandSideEffects.get(`${taskId}:cancel`) ?? 0,
+  );
+  if (commandBurstSideEffects.some((count) => count !== 1)) {
+    throw new Error("Two-replica command burst produced missing or duplicate Adapter side effects");
   }
 
   progress("scheduled-scan");
@@ -150,6 +200,11 @@ try {
     await createScheduledTask(client, `${resourcePrefix}-scheduled-${index}`, scheduledAt);
   }
   const scheduler = new DurableScheduler(validatedManifest, runtime.gateway, repository);
+  const secondScheduler = new DurableScheduler(
+    validatedManifest,
+    runtimeReplica2.gateway,
+    secondRepository,
+  );
   const scheduledScan = await timed(async () => scheduler.tick());
   if (scheduledScan.value.started !== 0 || scheduledScan.value.missed !== 0) {
     throw new Error("Future scheduled scan changed a Task before notBefore");
@@ -161,10 +216,27 @@ try {
     await createImmediateWindowTask(client, `${resourcePrefix}-watchdog-${index}`);
   }
   await delay(150);
-  const watchdogScan = await timed(async () => scheduler.tick());
-  if (watchdogScan.value.watchdogStops < watchdogTaskCount) {
+  const watchdogScan = await timed(async () => {
+    const aggregate = { watchdogStops: 0, reconciled: 0 };
+    let durableStopRequests = 0;
+    for (let round = 0; durableStopRequests < watchdogTaskCount && round < 10; round += 1) {
+      const results = await Promise.all([scheduler.tick(), secondScheduler.tick()]);
+      for (const result of results) {
+        aggregate.watchdogStops += result.watchdogStops;
+        aggregate.reconciled += result.reconciled;
+      }
+      const confirmed = await runtime.pool.query(
+        `SELECT count(*)::int AS count FROM provider_task
+         WHERE arguments->>'resourceId' LIKE $1 AND stop_reason='START_WINDOW_MISSED'`,
+        [`${resourcePrefix}-watchdog-%`],
+      );
+      durableStopRequests = Number(confirmed.rows[0]?.count ?? 0);
+    }
+    return { ...aggregate, durableStopRequests };
+  });
+  if (watchdogScan.value.durableStopRequests !== watchdogTaskCount) {
     throw new Error(
-      `Watchdog claimed ${watchdogScan.value.watchdogStops}/${watchdogTaskCount} overdue starts`,
+      `Watchdog persisted ${watchdogScan.value.durableStopRequests}/${watchdogTaskCount} safe stops`,
     );
   }
 
@@ -195,13 +267,13 @@ try {
     throw new Error("Capacity workload did not persist Observation and Outbox evidence");
   }
 
-  const image = JSON.parse(readFileSync("reports/image/runtime-v1-rc2.json", "utf8"));
+  const image = JSON.parse(readFileSync("reports/image/runtime-v1-rc3.json", "utf8"));
   if (image.sizeBytes > image.maximumBytes || image.user === "root") {
-    throw new Error("Runtime image baseline violates the rc.2 image policy");
+    throw new Error("Runtime image baseline violates the rc.3 image policy");
   }
 
   const report = {
-    version: "1.0.0-rc.2",
+    version: "1.0.0-rc.3",
     generatedAt: new Date().toISOString(),
     environment: {
       node: process.version,
@@ -212,20 +284,26 @@ try {
         process.env.GITHUB_ACTIONS === "true"
           ? "PostgreSQL 17 GitHub Actions service"
           : "TEST_DATABASE_URL target (credentials redacted)",
-      topology:
-        "single Runtime (PostgreSQL pool max 1), single TypeScript Adapter, sequential MCP client",
+      topology: "two Runtime replicas, shared PostgreSQL, single TypeScript Adapter",
     },
     workloads: {
       synchronousTool: synchronous,
-      durableTaskCreateAndGet: tasks,
+      concurrentTaskAdmission: {
+        tasks: concurrentTaskCount,
+        runtimeReplicas: 2,
+        durationMs: concurrentTasks.durationMs,
+        tasksPerSecond: (concurrentTaskCount * 1000) / concurrentTasks.durationMs,
+      },
       slowAdapterDatabaseAvailability: {
-        adapterResponseDelayMs: 750,
+        adapterResponseDelayMs: 15_000,
         databaseQueryDurationMs: databaseWhileAdapterSlow.durationMs,
         databaseQueryCompletedBeforeAdapterResponse: true,
         taskId: slowTask.task.taskId,
       },
       durableCommandDispatcher: {
         commands: dispatcherTaskCount,
+        runtimeReplicas: 2,
+        duplicateAdapterSideEffects: 0,
         durationMs: dispatcherMeasurement.durationMs,
         commandsPerSecond: (dispatcherTaskCount * 1000) / dispatcherMeasurement.durationMs,
         result: dispatcherMeasurement.value,
@@ -253,7 +331,7 @@ try {
     },
   };
   const outputPath = resolve(
-    process.env.CAPACITY_REPORT_PATH ?? "reports/capacity/runtime-v1.json",
+    process.env.CAPACITY_REPORT_PATH ?? "reports/capacity/capacity-rc3.json",
   );
   mkdirSync(dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o644 });
@@ -263,23 +341,10 @@ try {
   await client?.close();
   await cleanupCapacityRows(runtime.pool, resourcePrefix).catch(() => undefined);
   await runtime.app.close();
+  await runtimeReplica2.app.close();
   await new Promise((resolveShutdown) => adapter.tryShutdown(resolveShutdown));
   await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
   await adminPool.end();
-}
-
-async function createDurableTask(clientInstance, resourceId, scenario) {
-  return clientInstance.request(
-    {
-      method: "tools/call",
-      params: {
-        name: "durable_task",
-        arguments: scenario === undefined ? { resourceId } : { resourceId, scenario },
-      },
-    },
-    CreateTaskResultSchema,
-    { task: { ttl: 60_000 } },
-  );
 }
 
 async function createScheduledTask(clientInstance, resourceId, scheduledAt) {
@@ -398,6 +463,27 @@ async function timed(operation) {
   const started = performance.now();
   const value = await operation();
   return { durationMs: performance.now() - started, value };
+}
+
+async function drainDispatchers(dispatchers, expected, completed) {
+  const aggregate = {
+    claimed: 0,
+    acknowledged: 0,
+    retried: 0,
+    rejected: 0,
+    exhausted: 0,
+    terminal: 0,
+  };
+  let durableAcknowledged = 0;
+  for (let round = 0; durableAcknowledged < expected && round < 1000; round += 1) {
+    const results = await Promise.all(dispatchers.map((dispatcher) => dispatcher.tick()));
+    for (const result of results) {
+      for (const key of Object.keys(aggregate)) aggregate[key] += result[key];
+    }
+    durableAcknowledged = await completed();
+    if (results.every((result) => result.claimed === 0)) await delay(10);
+  }
+  return { ...aggregate, durableAcknowledged };
 }
 
 async function measure(iterations, operation) {

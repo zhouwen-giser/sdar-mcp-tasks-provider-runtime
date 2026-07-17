@@ -8,8 +8,14 @@ import type { Clock, ExecutionMode } from "../../domain/src/index.js";
 import { isTerminalState, systemClock } from "../../domain/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
 import type { PendingCommandRecord, TaskRepository } from "../../persistence-postgres/src/index.js";
-import { validatedSnapshotTransition } from "./result-contract.js";
 import type { ValidatedOperation } from "../../operation-registry/src/index.js";
+import { withLeaseHeartbeat } from "./lease-heartbeat.js";
+import { validatedSnapshotTransition } from "./result-contract.js";
+
+export interface CommandDispatcherOptions {
+  concurrency?: number;
+  leaseMilliseconds?: number;
+}
 
 export interface CommandDispatcherTickResult {
   claimed: number;
@@ -33,13 +39,21 @@ export class DurableCommandDispatcher {
     readonly operationSnapshots: OperationSnapshotRepository = new OperationSnapshotRepository(
       repository.pool,
     ),
+    readonly options: CommandDispatcherOptions = {},
   ) {
     this.workerId = workerId;
   }
 
   async tick(): Promise<CommandDispatcherTickResult> {
     const now = this.clock.now();
-    const commands = await this.repository.claimDueCommands(now, this.workerId, this.claimLeaseMs);
+    const concurrency = this.options.concurrency ?? 8;
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? this.claimLeaseMs;
+    const commands = await this.repository.claimDueCommands(
+      now,
+      this.workerId,
+      leaseMilliseconds,
+      concurrency,
+    );
     const result: CommandDispatcherTickResult = {
       claimed: commands.length,
       acknowledged: 0,
@@ -48,96 +62,82 @@ export class DurableCommandDispatcher {
       exhausted: 0,
       terminal: 0,
     };
-    for (const command of commands) {
-      const task = await this.repository.getById(command.taskId);
-      if (task === null || isTerminalState(task.internalState)) {
-        await this.repository.rejectClaimedCommand(
-          command,
-          "TASK_TERMINAL",
-          "Task transitioned to terminal while command was in progress.",
-        );
-        result.terminal += 1;
-        continue;
-      }
-      try {
-        const operation = (
-          await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
-        ).operation;
-        if (command.commandType === "CANCEL") {
-          await this.repository.supersedeExpiredClaimedNormalCommandsForSafeStop(command.taskId);
-          const outcome = await this.dispatchCancel(command, task, operation);
-          if (outcome === "acknowledged") result.acknowledged += 1;
-          else if (outcome === "retriable") result.retried += 1;
-          else if (outcome === "rejected") result.rejected += 1;
-          else result.exhausted += 1;
-          continue;
-        }
-        if (command.commandType === "UPDATE") {
-          const outcome = await this.dispatchUpdate(command, task, operation.name);
-          if (outcome === "acknowledged") {
-            result.acknowledged += 1;
-          } else if (outcome === "retriable") {
-            result.retried += 1;
-          } else if (outcome === "rejected") {
-            result.rejected += 1;
-          } else {
-            result.exhausted += 1;
-          }
-          continue;
-        }
-        const outcome = await this.dispatchPauseOrResume(
+    await Promise.all(commands.map((command) => this.executeClaimed(command, result)));
+    return result;
+  }
+
+  private async executeClaimed(
+    command: PendingCommandRecord,
+    result: CommandDispatcherTickResult,
+  ): Promise<void> {
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? this.claimLeaseMs;
+    const renew = () => this.repository.renewCommandClaim(command, leaseMilliseconds);
+    await renew();
+    const task = await this.repository.getById(command.taskId);
+    if (task === null || isTerminalState(task.internalState)) {
+      await this.repository.rejectClaimedCommand(
+        command,
+        "TASK_TERMINAL",
+        "Task transitioned to terminal while command was in progress.",
+      );
+      result.terminal += 1;
+      return;
+    }
+    try {
+      const operation = (
+        await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
+      ).operation;
+      let outcome: "acknowledged" | "retriable" | "rejected" | "exhausted";
+      if (command.commandType === "CANCEL") {
+        await this.repository.supersedeExpiredClaimedNormalCommandsForSafeStop(command.taskId);
+        outcome = await this.dispatchCancel(command, task, operation);
+      } else if (command.commandType === "UPDATE") {
+        outcome = await this.dispatchUpdate(command, task, operation.name);
+      } else {
+        outcome = await this.dispatchPauseOrResume(
           command,
           task,
           operation.name,
           command.commandType,
         );
-        if (outcome === "acknowledged") {
-          result.acknowledged += 1;
-        } else if (outcome === "retriable") {
-          result.retried += 1;
-        } else if (outcome === "rejected") {
-          result.rejected += 1;
-        } else {
-          result.exhausted += 1;
-        }
-      } catch (error) {
-        if (isIdentityError(error)) {
-          await this.repository.recordIdentityConflict(
-            command.taskId,
-            error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
-          );
-        }
-        if (
-          command.commandType === "CANCEL" &&
-          command.stopReason !== "USER_REQUESTED" &&
-          command.attemptCount >= this.maxSafeStopAttempts
-        ) {
-          await this.repository.failSafeStopUnconfirmed(
-            command,
-            error instanceof Error ? error.message : "Safe stop could not be confirmed.",
-          );
-          result.exhausted += 1;
-          continue;
-        }
-        if (
-          command.commandType !== "CANCEL" &&
-          (task.cancelRequested || task.stopReason !== null)
-        ) {
-          if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
-            result.exhausted += 1;
-            continue;
-          }
-        }
-        await this.repository.retryClaimedCommand(
-          command,
-          new Date(this.clock.now().getTime() + retryDelayMs(command)),
-          "ADAPTER_TRANSIENT_ERROR",
-          error instanceof Error ? error.message : "Adapter command failed.",
-        );
-        result.retried += 1;
       }
+      if (outcome === "acknowledged") result.acknowledged += 1;
+      else if (outcome === "retriable") result.retried += 1;
+      else if (outcome === "rejected") result.rejected += 1;
+      else result.exhausted += 1;
+    } catch (error) {
+      if (isIdentityError(error)) {
+        await this.repository.recordIdentityConflict(
+          command.taskId,
+          error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
+        );
+      }
+      if (
+        command.commandType === "CANCEL" &&
+        command.stopReason !== "USER_REQUESTED" &&
+        command.attemptCount >= this.maxSafeStopAttempts
+      ) {
+        await this.repository.failSafeStopUnconfirmed(
+          command,
+          error instanceof Error ? error.message : "Safe stop could not be confirmed.",
+        );
+        result.exhausted += 1;
+        return;
+      }
+      if (command.commandType !== "CANCEL" && (task.cancelRequested || task.stopReason !== null)) {
+        if (await this.trySupersedeClaimedCommandForSafeStop(command)) {
+          result.exhausted += 1;
+          return;
+        }
+      }
+      await this.repository.retryClaimedCommand(
+        command,
+        new Date(this.clock.now().getTime() + retryDelayMs(command)),
+        "ADAPTER_TRANSIENT_ERROR",
+        error instanceof Error ? error.message : "Adapter command failed.",
+      );
+      result.retried += 1;
     }
-    return result;
   }
 
   private async dispatchCancel(
@@ -160,16 +160,18 @@ export class DurableCommandDispatcher {
         : command.stopReason === "START_WINDOW_MISSED"
           ? "START_WINDOW_MISSED"
           : "USER_REQUESTED";
-    const ack = await this.gateway.requestCancel(
-      task.taskId,
-      operationName,
-      task.argumentHash,
-      stopReason,
-      command.commandSequence,
-      {
-        ...executionOptions(task),
-        externalExecutionId: task.externalExecutionId,
-      },
+    const ack = await this.withClaimHeartbeat(command, () =>
+      this.gateway.requestCancel(
+        task.taskId,
+        operationName,
+        task.argumentHash,
+        stopReason,
+        command.commandSequence,
+        {
+          ...executionOptions(task),
+          externalExecutionId: task.externalExecutionId,
+        },
+      ),
     );
     validateCommandAckIdentity(ack, {
       taskId: task.taskId,
@@ -203,16 +205,13 @@ export class DurableCommandDispatcher {
       );
       return "exhausted";
     }
-    const reconciled = await this.gateway.reconcileExecution(
-      task.taskId,
-      operationName,
-      task.argumentHash,
-      {
+    const reconciled = await this.withClaimHeartbeat(command, () =>
+      this.gateway.reconcileExecution(task.taskId, operationName, task.argumentHash, {
         authorizationContextHash: task.authorizationContextHash,
         executionMode: task.executionMode,
         simulationId: task.simulationId,
         externalExecutionId: task.externalExecutionId,
-      },
+      }),
     );
     if (reconciled.status !== "FOUND" || reconciled.snapshot === undefined) {
       await this.retry(
@@ -265,10 +264,12 @@ export class DurableCommandDispatcher {
       commandSequence: command.commandSequence,
     };
     try {
-      const ack = await this.gateway.updateExecution(identity, answers, {
-        ...executionOptions(task),
-        externalExecutionId: task.externalExecutionId,
-      });
+      const ack = await this.withClaimHeartbeat(command, () =>
+        this.gateway.updateExecution(identity, answers, {
+          ...executionOptions(task),
+          externalExecutionId: task.externalExecutionId,
+        }),
+      );
       validateCommandAckIdentity(ack, {
         taskId: task.taskId,
         externalExecutionId: task.externalExecutionId,
@@ -333,15 +334,17 @@ export class DurableCommandDispatcher {
       commandSequence: command.commandSequence,
     };
     try {
-      const ack = await (commandType === "PAUSE"
-        ? this.gateway.pauseExecution(identity, {
-            ...executionOptions(task),
-            externalExecutionId: task.externalExecutionId,
-          })
-        : this.gateway.resumeExecution(identity, {
-            ...executionOptions(task),
-            externalExecutionId: task.externalExecutionId,
-          }));
+      const ack = await this.withClaimHeartbeat(command, () =>
+        commandType === "PAUSE"
+          ? this.gateway.pauseExecution(identity, {
+              ...executionOptions(task),
+              externalExecutionId: task.externalExecutionId,
+            })
+          : this.gateway.resumeExecution(identity, {
+              ...executionOptions(task),
+              externalExecutionId: task.externalExecutionId,
+            }),
+      );
       validateCommandAckIdentity(ack, {
         taskId: task.taskId,
         externalExecutionId: task.externalExecutionId,
@@ -382,6 +385,15 @@ export class DurableCommandDispatcher {
       }
       throw error;
     }
+  }
+
+  private async withClaimHeartbeat<T>(
+    command: PendingCommandRecord,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const leaseMilliseconds = this.options.leaseMilliseconds ?? this.claimLeaseMs;
+    const renew = () => this.repository.renewCommandClaim(command, leaseMilliseconds);
+    return withLeaseHeartbeat(renew, leaseMilliseconds, operation);
   }
 
   private async retry(

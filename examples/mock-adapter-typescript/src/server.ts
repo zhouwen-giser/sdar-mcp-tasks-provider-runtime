@@ -686,7 +686,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
             state: "BUSINESS_FAILED",
             reasonCode: "BUSINESS_RULE_REJECTED",
             message: "Reference business rule rejected the operation.",
-            result: jsonToProtoStruct({ detail: "business rejection" }),
+            result: jsonToProtoStruct({ resourceId: result.resourceId, completed: false }),
           });
         } else if (result.scenario === "technical_failure") {
           Object.assign(initialSnapshot, {

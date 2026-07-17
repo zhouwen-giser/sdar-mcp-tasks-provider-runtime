@@ -100,6 +100,18 @@ const UpdateTaskRequestSchema = RequestSchema.extend({
   }),
 });
 
+const TaskObservationsRequestSchema = RequestSchema.extend({
+  method: z.literal("tasks/observations"),
+  params: z.object({
+    taskId: z.uuid(),
+    cursor: z
+      .string()
+      .regex(/^[1-9]\d*$/)
+      .optional(),
+    limit: z.number().int().min(1).max(100).default(100),
+  }),
+});
+
 const ControlTaskRequestSchema = (
   method: "io.sdar/taskExecution/tasks/pause" | "io.sdar/taskExecution/tasks/resume",
 ) =>
@@ -145,7 +157,7 @@ export class McpProtocolHandler {
     // validated Draft 2020-12 documents, not Zod schemas owned by the Runtime.
     // eslint-disable-next-line @typescript-eslint/no-deprecated
     const server = new Server(
-      { name: "sdar-mcp-tasks-provider-runtime", version: "1.0.0-rc.2" },
+      { name: "sdar-mcp-tasks-provider-runtime", version: "1.0.0-rc.3" },
       {
         capabilities,
       },
@@ -240,6 +252,18 @@ export class McpProtocolHandler {
           );
           return await taskEngine.updateTask(params.taskId, params.inputs, authorization);
         }),
+      );
+      server.setRequestHandler(
+        TaskObservationsRequestSchema,
+        ({ params }) =>
+          this.#protocolResult(authorization.correlationId ?? null, () =>
+            taskEngine.getTaskObservations(
+              params.taskId,
+              authorization,
+              params.cursor === undefined ? undefined : Number(params.cursor),
+              params.limit,
+            ),
+          ) as never,
       );
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/pause"),

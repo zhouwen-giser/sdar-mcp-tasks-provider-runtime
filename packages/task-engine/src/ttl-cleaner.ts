@@ -116,9 +116,9 @@ export class TtlCleaner {
            AND NOT EXISTS (
              SELECT 1
              FROM admission_intent admission
-             WHERE admission.task_id = provider_task.task_id
-               AND admission.state IN ('PENDING', 'ACCEPTED', 'UNCERTAIN')
-           )
+              WHERE admission.task_id = provider_task.task_id
+                AND admission.state IN ('PENDING', 'ACCEPTED', 'UNCERTAIN')
+             )
          ORDER BY purge_after, task_id
          FOR UPDATE SKIP LOCKED LIMIT $2`,
         [now, this.#batchSize],

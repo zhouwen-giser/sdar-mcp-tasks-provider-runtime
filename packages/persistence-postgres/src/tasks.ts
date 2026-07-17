@@ -150,6 +150,12 @@ export interface ObservationRecord {
   payload: Record<string, unknown>;
 }
 
+export interface ObservationPage {
+  observations: ObservationRecord[];
+  nextCursor: number | null;
+  hasMore: boolean;
+}
+
 export interface DeadlineStopRecord {
   task: TaskRecord;
   commandSequence: number;
@@ -180,11 +186,15 @@ interface TaskTransitionUpdate {
   cancelRequested?: boolean;
   stopReason?: string | null;
   startStopRequestedAt?: Date | null;
+  startConfirmationDeadline?: Date | null;
+  startConfirmationAttempts?: number;
   scheduleClaimOwner?: string | null;
   scheduleClaimUntil?: Date | null;
   nextStartAttemptAt?: Date | null;
   invocationAttempt?: number;
   recoveryAttempts?: number;
+  nextRecoveryAt?: Date;
+  recoveryFailureCount?: number;
   lastReconciledAt?: Date | null;
 }
 
@@ -232,6 +242,8 @@ interface TaskRow {
   latest_start_at: Date | null;
   actual_started_at: Date | null;
   start_stop_requested_at: Date | null;
+  start_confirmation_deadline: Date | null;
+  start_confirmation_attempts: number;
   invocation_attempt: number;
   next_start_attempt_at: Date | null;
   schedule_claim_owner: string | null;
@@ -242,6 +254,8 @@ interface TaskRow {
   next_command_sequence: string;
   timing: Record<string, unknown>;
   recovery_attempts: number;
+  next_recovery_at: Date;
+  recovery_failure_count: number;
   last_reconciled_at: Date | null;
 }
 
@@ -545,7 +559,8 @@ export class TaskRepository {
     const result = await this.pool.query<TaskRow>(
       `SELECT * FROM provider_task
        WHERE internal_state NOT LIKE 'TERMINAL_%' AND internal_state <> 'SCHEDULED'
-       ORDER BY updated_at, task_id LIMIT $1`,
+         AND next_recovery_at <= clock_timestamp()
+       ORDER BY next_recovery_at, last_reconciled_at NULLS FIRST, task_id LIMIT $1`,
       [limit],
     );
     return result.rows.map(fromRow);
@@ -728,6 +743,20 @@ export class TaskRepository {
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
   }
 
+  async renewCommandClaim(
+    command: PendingCommandRecord,
+    leaseMilliseconds = 30_000,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE task_command
+       SET claim_until=clock_timestamp() + ($4::text || ' milliseconds')::interval,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+      [command.taskId, command.commandSequence, command.claimOwner, leaseMilliseconds],
+    );
+    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+  }
+
   async rejectClaimedCommand(
     command: PendingCommandRecord,
     errorCode: string,
@@ -757,7 +786,12 @@ export class TaskRepository {
       await transitionTask(client, {
         taskId,
         expectedVersion: Number(row.version),
-        update: { recoveryAttempts: attempt, lastReconciledAt: now },
+        update: {
+          recoveryAttempts: attempt,
+          lastReconciledAt: now,
+          nextRecoveryAt: now,
+          recoveryFailureCount: 0,
+        },
         observation: {
           type: "task.recovery",
           occurredAt: now,
@@ -777,6 +811,22 @@ export class TaskRepository {
     } finally {
       client.release();
     }
+  }
+
+  async noteRecoveryFailure(taskId: string, failedAt = new Date()): Promise<void> {
+    const result = await this.pool.query<{ recovery_failure_count: number }>(
+      `UPDATE provider_task
+       SET recovery_failure_count=recovery_failure_count+1,
+           next_recovery_at=$2 + (
+             LEAST(300000, 1000 * power(2, LEAST(recovery_failure_count, 8))) +
+             mod(hashtext(task_id::text)::bigint + 2147483648, 251)
+           ) * interval '1 millisecond',
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
+       RETURNING recovery_failure_count`,
+      [taskId, failedAt],
+    );
+    if (result.rowCount === 0) return;
   }
 
   async recordIdentityConflict(taskId: string, detail: string): Promise<void> {
@@ -1029,6 +1079,21 @@ export class TaskRepository {
     } finally {
       client.release();
     }
+  }
+
+  async renewScheduleClaim(
+    taskId: string,
+    claimOwner: string,
+    leaseMilliseconds = 30_000,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE provider_task
+       SET schedule_claim_until=clock_timestamp() + ($3::text || ' milliseconds')::interval,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='STARTING' AND schedule_claim_owner=$2`,
+      [taskId, claimOwner, leaseMilliseconds],
+    );
+    if (result.rowCount !== 1) throw new Error("SCHEDULED_TASK_CLAIM_LOST");
   }
 
   async acceptScheduled(
@@ -1362,33 +1427,173 @@ export class TaskRepository {
     }
   }
 
-  async claimOverdueImmediateStarts(now: Date, limit = 32): Promise<TaskRecord[]> {
+  async claimBoundStartConfirmations(
+    now: Date,
+    ownerId: string,
+    limit = 32,
+    leaseMilliseconds = 30_000,
+  ): Promise<TaskRecord[]> {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
       const due = await client.query<TaskRow>(
         `SELECT * FROM provider_task
          WHERE internal_state NOT LIKE 'TERMINAL_%'
-           AND actual_started_at IS NULL AND latest_start_at <= $1
-           AND timing->'start'->>'mode'='immediate'
+           AND actual_started_at IS NULL
+           AND COALESCE(start_confirmation_deadline,latest_start_at) <= $1
            AND external_execution_id IS NOT NULL
            AND stop_reason IS NULL
-         ORDER BY latest_start_at, task_id
+           AND (schedule_claim_owner IS NULL OR schedule_claim_until <= $1)
+         ORDER BY COALESCE(start_confirmation_deadline,latest_start_at), task_id
          FOR UPDATE SKIP LOCKED LIMIT $2`,
         [now, limit],
       );
       const claimed: TaskRecord[] = [];
       for (const row of due.rows) {
-        await persistStartWindowStop(client, row.task_id, now);
-        const updated = await client.query<TaskRow>(
-          "SELECT * FROM provider_task WHERE task_id=$1",
-          [row.task_id],
-        );
-        const updatedRow = updated.rows[0];
-        if (updatedRow !== undefined) claimed.push(fromRow(updatedRow));
+        const attempt = row.start_confirmation_attempts + 1;
+        const applied = await transitionTask(client, {
+          taskId: row.task_id,
+          expectedVersion: Number(row.version),
+          update: {
+            internalState: "WAITING_START_CONFIRMATION",
+            mcpStatus: "working",
+            statusMessage: "Reconciling bound execution start confirmation.",
+            startConfirmationDeadline: row.start_confirmation_deadline ?? row.latest_start_at,
+            startConfirmationAttempts: attempt,
+            scheduleClaimOwner: ownerId,
+            scheduleClaimUntil: new Date(now.getTime() + leaseMilliseconds),
+          },
+          observation: {
+            type: "task.start_confirmation",
+            occurredAt: now,
+            reasonCode: "START_CONFIRMATION_CLAIMED",
+            message: "Reconciling bound execution start confirmation.",
+            substate: row.substate,
+            source: "runtime",
+            payload: { attempt },
+          },
+          outboxType: "task.start_confirmation",
+          eventKey: `${row.task_id}:start-confirmation:${String(attempt)}`,
+          outboxPayload: { attempt },
+        });
+        claimed.push(fromRow(applied.row));
       }
       await client.query("COMMIT");
       return claimed;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async renewStartConfirmationClaim(
+    taskId: string,
+    claimOwner: string,
+    leaseMilliseconds = 30_000,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE provider_task
+       SET schedule_claim_until=clock_timestamp() + ($3::text || ' milliseconds')::interval,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='WAITING_START_CONFIRMATION'
+         AND schedule_claim_owner=$2`,
+      [taskId, claimOwner, leaseMilliseconds],
+    );
+    if (result.rowCount !== 1) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+  }
+
+  async deferStartConfirmation(
+    taskId: string,
+    claimOwner: string,
+    retryAt: Date,
+    message: string,
+  ): Promise<void> {
+    const result = await this.pool.query(
+      `UPDATE provider_task
+       SET schedule_claim_owner=NULL, schedule_claim_until=$3, status_message=$4,
+           updated_at=clock_timestamp()
+       WHERE task_id=$1 AND internal_state='WAITING_START_CONFIRMATION'
+         AND schedule_claim_owner=$2`,
+      [taskId, claimOwner, retryAt, message],
+    );
+    if (result.rowCount !== 1) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+  }
+
+  async confirmBoundExecutionStarted(
+    taskId: string,
+    claimOwner: string,
+    adapterRevision: number,
+    transition: SnapshotTransition,
+    confirmedAt: Date,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1
+         AND internal_state='WAITING_START_CONFIRMATION' AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
+      );
+      const row = locked.rows[0];
+      if (row === undefined) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+      const applied = await transitionTask(client, {
+        taskId,
+        expectedVersion: Number(row.version),
+        update: {
+          internalState: transition.internalState,
+          mcpStatus: transition.mcpStatus,
+          substate: transition.substate,
+          statusMessage: transition.statusMessage,
+          result: transition.result,
+          error: transition.error,
+          adapterRevision: Math.max(adapterRevision, Number(row.adapter_revision)),
+          actualStartedAt: confirmedAt,
+          scheduleClaimOwner: null,
+          scheduleClaimUntil: null,
+        },
+        observation: {
+          type: "task.started",
+          occurredAt: confirmedAt,
+          reasonCode: "START_CONFIRMED",
+          message: transition.statusMessage,
+          substate: transition.substate,
+          source: "adapter",
+          adapterRevision,
+        },
+        outboxType: "task.started",
+        eventKey: `${taskId}:start-confirmed:${String(adapterRevision)}`,
+      });
+      await client.query("COMMIT");
+      return fromRow(applied.row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async stopUnconfirmedBoundExecution(
+    taskId: string,
+    claimOwner: string,
+    requestedAt: Date,
+  ): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const locked = await client.query<TaskRow>(
+        `SELECT * FROM provider_task WHERE task_id=$1
+         AND internal_state='WAITING_START_CONFIRMATION' AND schedule_claim_owner=$2 FOR UPDATE`,
+        [taskId, claimOwner],
+      );
+      if (locked.rows[0] === undefined) throw new Error("START_CONFIRMATION_CLAIM_LOST");
+      await persistStartWindowStop(client, taskId, requestedAt);
+      await client.query("COMMIT");
+      const updated = await selectTaskById(client, taskId);
+      if (updated === null) throw new Error("TASK_NOT_FOUND");
+      return updated;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -1515,7 +1720,30 @@ export class TaskRepository {
     }));
   }
 
-  async listObservations(taskId: string): Promise<ObservationRecord[]> {
+  async listObservations(
+    taskId: string,
+    beforeRevision?: number,
+    limit = 100,
+  ): Promise<ObservationRecord[]> {
+    return (await this.listObservationPage(taskId, beforeRevision, limit)).observations
+      .slice()
+      .reverse();
+  }
+
+  async listObservationPage(
+    taskId: string,
+    beforeRevision?: number,
+    limit = 100,
+  ): Promise<ObservationPage> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new RangeError("OBSERVATION_PAGE_SIZE_INVALID");
+    }
+    if (
+      beforeRevision !== undefined &&
+      (!Number.isSafeInteger(beforeRevision) || beforeRevision < 1)
+    ) {
+      throw new RangeError("OBSERVATION_CURSOR_INVALID");
+    }
     const result = await this.pool.query<{
       revision: string;
       type: string;
@@ -1530,10 +1758,14 @@ export class TaskRepository {
     }>(
       `SELECT revision, type, occurred_at, reason_code, message, substate, progress,
               source, adapter_revision, payload
-       FROM task_observation WHERE task_id=$1 ORDER BY revision`,
-      [taskId],
+        FROM task_observation
+        WHERE task_id=$1 AND ($2::bigint IS NULL OR revision < $2)
+        ORDER BY revision DESC LIMIT $3`,
+      [taskId, beforeRevision ?? null, limit + 1],
     );
-    return result.rows.map((row) => ({
+    const hasMore = result.rows.length > limit;
+    const rows = result.rows.slice(0, limit);
+    const observations = rows.map((row) => ({
       revision: Number(row.revision),
       type: row.type,
       occurredAt: row.occurred_at,
@@ -1545,6 +1777,11 @@ export class TaskRepository {
       adapterRevision: row.adapter_revision === null ? null : Number(row.adapter_revision),
       payload: row.payload,
     }));
+    return {
+      observations,
+      nextCursor: hasMore ? (observations.at(-1)?.revision ?? null) : null,
+      hasMore,
+    };
   }
 
   async beginCancel(taskId: string, requestHash: string): Promise<CommandResolution> {
@@ -2191,16 +2428,17 @@ export class TaskRepository {
         if (row === undefined) throw new Error("TASK_CONFIRMATION_NOT_RETURNED");
         return fromRow(row);
       }
+      const stateTransition = mergeStopState(existing, transition);
       const applied = await transitionTask(client, {
         taskId,
         expectedVersion: existing.version,
         update: {
-          internalState: transition.internalState,
-          mcpStatus: transition.mcpStatus,
-          substate: transition.substate,
-          statusMessage: transition.statusMessage,
-          result: transition.result,
-          error: transition.error,
+          internalState: stateTransition.internalState,
+          mcpStatus: stateTransition.mcpStatus,
+          substate: stateTransition.substate,
+          statusMessage: stateTransition.statusMessage,
+          result: stateTransition.result,
+          error: stateTransition.error,
           adapterRevision,
           ...(transitionHasStarted(transition) && existing.actualStartedAt === null
             ? { actualStartedAt: new Date() }
@@ -2236,6 +2474,24 @@ export class TaskRepository {
       client.release();
     }
   }
+}
+
+export function mergeStopState(
+  existing: TaskRecord,
+  adapterTransition: SnapshotTransition,
+): SnapshotTransition {
+  if ((!existing.cancelRequested && existing.stopReason === null) || adapterTransition.terminal) {
+    return adapterTransition;
+  }
+  return {
+    ...adapterTransition,
+    internalState: existing.internalState,
+    mcpStatus: existing.mcpStatus,
+    substate: existing.substate,
+    statusMessage: existing.statusMessage ?? adapterTransition.statusMessage,
+    result: existing.result,
+    error: existing.error,
+  };
 }
 
 async function transitionTask(
@@ -2293,6 +2549,12 @@ async function transitionTask(
   if (update.startStopRequestedAt !== undefined) {
     add("start_stop_requested_at", update.startStopRequestedAt);
   }
+  if (update.startConfirmationDeadline !== undefined) {
+    add("start_confirmation_deadline", update.startConfirmationDeadline);
+  }
+  if (update.startConfirmationAttempts !== undefined) {
+    add("start_confirmation_attempts", update.startConfirmationAttempts);
+  }
   if (update.scheduleClaimOwner !== undefined)
     add("schedule_claim_owner", update.scheduleClaimOwner);
   if (update.scheduleClaimUntil !== undefined)
@@ -2302,6 +2564,10 @@ async function transitionTask(
   }
   if (update.invocationAttempt !== undefined) add("invocation_attempt", update.invocationAttempt);
   if (update.recoveryAttempts !== undefined) add("recovery_attempts", update.recoveryAttempts);
+  if (update.nextRecoveryAt !== undefined) add("next_recovery_at", update.nextRecoveryAt);
+  if (update.recoveryFailureCount !== undefined) {
+    add("recovery_failure_count", update.recoveryFailureCount);
+  }
   if (update.lastReconciledAt !== undefined) add("last_reconciled_at", update.lastReconciledAt);
   const resultingState = update.internalState ?? existing.internal_state;
   const ttlMs = existing.ttl_ms === null ? null : Number(existing.ttl_ms);
@@ -2675,6 +2941,8 @@ function fromRow(row: TaskRow): TaskRecord {
     latestStartAt: row.latest_start_at,
     actualStartedAt: row.actual_started_at,
     startStopRequestedAt: row.start_stop_requested_at,
+    startConfirmationDeadline: row.start_confirmation_deadline,
+    startConfirmationAttempts: row.start_confirmation_attempts,
     invocationAttempt: row.invocation_attempt,
     nextStartAttemptAt: row.next_start_attempt_at,
     scheduleClaimOwner: row.schedule_claim_owner,
@@ -2684,6 +2952,8 @@ function fromRow(row: TaskRow): TaskRecord {
     stopReason: row.stop_reason,
     timing: row.timing,
     recoveryAttempts: row.recovery_attempts,
+    nextRecoveryAt: row.next_recovery_at,
+    recoveryFailureCount: row.recovery_failure_count,
     lastReconciledAt: row.last_reconciled_at,
   };
 }

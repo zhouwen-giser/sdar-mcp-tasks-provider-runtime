@@ -43,6 +43,11 @@ JSON limits. An invalid success becomes a technical contract failure with
 `reasonCode=ADAPTER_OUTPUT_SCHEMA_MISMATCH`; it is never returned as successful structured
 content.
 
+The same size, sanitization and output-schema pipeline applies to `BUSINESS_FAILED` and partial
+results. Dangerous object keys are removed before schema validation. A safe-stop confirmation for
+`START_WINDOW_MISSED` preserves the sanitized Adapter payload under `adapterResult` in the
+standardized business result.
+
 Unknown/hidden/expired Tasks, unknown Tools, malformed TTL/timing/input and unsupported
 capabilities return JSON-RPC Invalid Params with stable `data.reasonCode`. Technical failure
 before Task publication returns JSON-RPC Internal Error. A published technical failure is
@@ -54,6 +59,11 @@ instead of changing it to failed. `_meta["io.sdar/taskExecution"]` then contains
 `snapshotFreshness="stale"`, `lastConfirmedAt` and `degradedReasonCode`. Identity mismatch,
 non-monotonic/invalid Snapshot and other Adapter contract failures are never converted to stale
 success.
+
+`tasks/get` includes at most 100 newest observations. Its
+`_meta["io.sdar/taskExecution"]` object reports `observationCursor` and `hasMore`.
+Call `tasks/observations` with `{ taskId, cursor?, limit? }` to read older pages; `limit` is
+bounded to 1-100 and the returned cursor is opaque to clients.
 
 ## Adapter gRPC v1
 
@@ -78,7 +88,7 @@ protocol version.
 
 ## rc.2 verification boundary
 
-`pnpm verify:rc2` is the aggregate Runtime gate. Adapter protocol reports qualify the reference
+`pnpm verify:rc3` is the aggregate Runtime gate. Adapter protocol reports qualify the reference
 TypeScript and Python implementations only; they mark Runtime Profile coverage `partial` and
 real-resource safety `not_claimed`. Production Adapters must separately prove resource-specific
 side-effect identity and safe-stop behavior.

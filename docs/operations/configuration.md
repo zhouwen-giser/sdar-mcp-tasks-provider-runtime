@@ -8,6 +8,7 @@ authentication.
 | ---------------------------------- | --------------------- | ---------------------------------------------------------- |
 | `HOST` / `PORT`                    | `0.0.0.0` / `8080`    | HTTP bind address and port                                 |
 | `LOG_LEVEL`                        | `info`                | Pino log level                                             |
+| `RUNTIME_ENV`                      | `development`         | `development`, `test`, or fail-closed `production`         |
 | `PROVIDER_ID`                      | `mock-provider`       | Must exactly match the Adapter Manifest                    |
 | `DATABASE_URL`                     | local development URL | PostgreSQL connection URI; use a production secret         |
 | `DATABASE_POOL_MAX`                | `10`                  | Pool clients per Runtime replica, range 1-100              |
@@ -32,20 +33,34 @@ authentication.
 | `IDEMPOTENCY_POLL_MS`              | `20`                  | Duplicate COMPLETE/PENDING poll delay                      |
 | `ADAPTER_HEALTH_POLL_MS`           | `5000`                | Continuous identity-checked Describe probe interval        |
 | `ADAPTER_HEALTH_FAILURE_THRESHOLD` | `2`                   | Consecutive failed probes before Adapter becomes not-ready |
+| `ADAPTER_MANIFEST_POLL_MS`         | `60000`               | Startup Manifest hash drift check interval                 |
 | `SCHEDULER_POLL_MS`                | `1000`                | Durable due/deadline/watchdog worker interval              |
+| `COMMAND_DISPATCH_CONCURRENCY`     | `8`                   | Per-replica command claims executed concurrently           |
+| `SCHEDULER_CONCURRENCY`            | `8`                   | Per-replica scheduled-start claims executed concurrently   |
+| `ALLOW_WEAK_LEASE_CONFIGURATION`   | `false`               | Explicit boolean; forbidden in production                  |
 | `RECOVERY_POLL_MS`                 | `5000`                | Nonterminal Reconcile interval                             |
 | `TTL_CLEANER_POLL_MS`              | `60000`               | Logical-expiry and purge worker interval                   |
 | `TTL_PURGE_GRACE_MS`               | `86400000`            | Expiry-to-purge delay, range 1 second-7 days               |
 | `OUTBOX_PUBLISHED_RETENTION_MS`    | `86400000`            | Published outbox retention, range 60 seconds-90 days       |
 | `TTL_CLEANER_BATCH_SIZE`           | `128`                 | Maximum rows claimed per cleaner stage and tick            |
+| `OUTBOX_SINK`                      | `internal_noop`       | `internal_noop` or `webhook`                               |
+| `OUTBOX_WEBHOOK_URL`               | unset                 | Required for webhook; HTTPS required in production         |
+| `OUTBOX_POLL_MS`                   | `1000`                | Publisher interval                                         |
+| `OUTBOX_BATCH_SIZE`                | `100`                 | Maximum events per publication batch                       |
+| `OUTBOX_WEBHOOK_TIMEOUT_MS`        | `5000`                | Webhook request timeout                                    |
 
 `development` authentication is limited to local Compose. `trusted_headers` requires an
 authenticating proxy that strips client-supplied `x-sdar-subject` and `x-sdar-tenant` headers;
 `jwt_hs256` is the standalone production mode. Rotate database, JWT and mTLS material through the
 deployment platform, never ConfigMaps or command-line arguments.
 
+Production startup requires non-development authentication, `ADAPTER_TLS_MODE=required` with
+all three certificate paths, and `ALLOW_WEAK_LEASE_CONFIGURATION=false`. Boolean values accept
+only `true`, `false`, `1`, or `0` (case-insensitive for words); ambiguous values fail startup.
+
 The in-process rate limiter is bounded but applies per replica. Configure the ingress/API gateway
 for a production-wide source or tenant limit. Keep `IDEMPOTENCY_LEASE_MS` greater than the
 Adapter RPC timeout and within the upstream HTTP timeout budget. Claim/finalize and Task
 publication use short database transactions; no checked-out PoolClient may span an Adapter RPC
-or be re-borrowed after commit.
+or be re-borrowed after commit. Command and scheduler claims are limited to their configured
+concurrency and renewed while an Adapter RPC is in flight.

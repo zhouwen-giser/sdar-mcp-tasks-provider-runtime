@@ -13,6 +13,11 @@ describe("Runtime configuration", () => {
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);
     expect(config.ADAPTER_HEALTH_FAILURE_THRESHOLD).toBe(2);
+    expect(config.ADAPTER_MANIFEST_POLL_MS).toBe(60_000);
+    expect(config.COMMAND_DISPATCH_CONCURRENCY).toBe(8);
+    expect(config.SCHEDULER_CONCURRENCY).toBe(8);
+    expect(config.OUTBOX_SINK).toBe("internal_noop");
+    expect(config.OUTBOX_BATCH_SIZE).toBe(100);
     expect(config.OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
   });
 
@@ -20,6 +25,8 @@ describe("Runtime configuration", () => {
     expect(() => loadRuntimeConfig({ PORT: "70000" })).toThrow();
     expect(() => loadRuntimeConfig({ ADAPTER_RPC_TIMEOUT_MS: "0" })).toThrow();
     expect(() => loadRuntimeConfig({ ADAPTER_ENDPOINT: "file:///tmp/adapter.sock" })).toThrow();
+    expect(() => loadRuntimeConfig({ COMMAND_DISPATCH_CONCURRENCY: "0" })).toThrow();
+    expect(() => loadRuntimeConfig({ SCHEDULER_CONCURRENCY: "129" })).toThrow();
   });
 
   it("requires complete mTLS and JWT secret configuration", () => {
@@ -50,5 +57,18 @@ describe("Runtime configuration", () => {
         .OUTBOX_PUBLISHED_RETENTION_MS,
     ).toBe(7_776_000_000);
     expect(() => loadRuntimeConfig({ OUTBOX_PUBLISHED_RETENTION_MS: "7776000001" })).toThrow();
+  });
+
+  it("requires long RPC scenarios to raise command and idempotency leases", () => {
+    expect(() => loadRuntimeConfig({ ADAPTER_RPC_TIMEOUT_MS: "20000" })).toThrow(
+      "COMMAND_CLAIM_LEASE_MS must be >= 41500",
+    );
+    expect(
+      loadRuntimeConfig({
+        ADAPTER_RPC_TIMEOUT_MS: "20000",
+        COMMAND_CLAIM_LEASE_MS: "60000",
+        IDEMPOTENCY_LEASE_MS: "60000",
+      }).leaseValidationMode,
+    ).toBe("strict");
   });
 });

@@ -3,6 +3,7 @@ export type McpTaskStatus = "working" | "input_required" | "completed" | "failed
 export type InternalTaskState =
   | "SCHEDULED"
   | "STARTING"
+  | "WAITING_START_CONFIRMATION"
   | "QUEUED"
   | "RUNNING"
   | "PAUSED"
@@ -54,6 +55,8 @@ export interface TaskRecord {
   latestStartAt: Date | null;
   actualStartedAt: Date | null;
   startStopRequestedAt: Date | null;
+  startConfirmationDeadline: Date | null;
+  startConfirmationAttempts: number;
   invocationAttempt: number;
   nextStartAttemptAt: Date | null;
   scheduleClaimOwner: string | null;
@@ -63,6 +66,8 @@ export interface TaskRecord {
   stopReason: string | null;
   timing: Record<string, unknown>;
   recoveryAttempts: number;
+  nextRecoveryAt: Date;
+  recoveryFailureCount: number;
   lastReconciledAt: Date | null;
 }
 

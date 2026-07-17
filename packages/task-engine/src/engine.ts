@@ -36,6 +36,7 @@ import type { ValidatedManifest, ValidatedOperation } from "../../operation-regi
 import type {
   AdmissionIntentRecord,
   IdempotencyRepository,
+  ObservationPage,
   CommandResolution,
   PendingCommandRecord,
   ResolvedTaskOperation,
@@ -43,7 +44,11 @@ import type {
   TaskRepository,
 } from "../../persistence-postgres/src/index.js";
 import { OperationSnapshotRepository } from "../../persistence-postgres/src/index.js";
-import { synchronousResult, validatedSnapshotTransition } from "./result-contract.js";
+import {
+  sanitizedAdapterResultPayload,
+  synchronousResult,
+  validatedSnapshotTransition,
+} from "./result-contract.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -475,7 +480,7 @@ export class TaskEngine {
       task: detailedTask(
         task,
         await this.#repository.listInputRequests(task.taskId),
-        await this.#repository.listObservations(task.taskId),
+        await this.#repository.listObservationPage(task.taskId),
       ),
     };
   }
@@ -533,7 +538,7 @@ export class TaskEngine {
         return detailedTask(
           task,
           await this.#repository.listInputRequests(task.taskId),
-          await this.#repository.listObservations(task.taskId),
+          await this.#repository.listObservationPage(task.taskId),
           {
             snapshotFreshness: "stale",
             degradedReasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
@@ -544,8 +549,26 @@ export class TaskEngine {
     return detailedTask(
       task,
       await this.#repository.listInputRequests(task.taskId),
-      await this.#repository.listObservations(task.taskId),
+      await this.#repository.listObservationPage(task.taskId),
     );
+  }
+
+  async getTaskObservations(
+    taskId: string,
+    authorization: AuthorizationContext,
+    cursor?: number,
+    limit = 100,
+  ): Promise<Record<string, unknown>> {
+    await this.#repository.getAuthorized(taskId, authorization);
+    const page = await this.#repository.listObservationPage(taskId, cursor, limit);
+    return {
+      taskId,
+      observations: wireObservations(page.observations),
+      _meta: {
+        observationCursor: page.nextCursor === null ? null : String(page.nextCursor),
+        hasMore: page.hasMore,
+      },
+    };
   }
 
   async recoverAdmission(
@@ -756,7 +779,7 @@ export class TaskEngine {
     const [task, inputRequests, observations] = await Promise.all([
       this.#repository.getAuthorized(taskId, authorization),
       this.#repository.listInputRequests(taskId),
-      this.#repository.listObservations(taskId),
+      this.#repository.listObservationPage(taskId),
     ]);
     const taskResult = detailedTask(task, inputRequests, observations) as Record<
       string,
@@ -793,7 +816,7 @@ export class TaskEngine {
     const [task, inputRequests, observations] = await Promise.all([
       this.#repository.getAuthorized(taskId, authorization),
       this.#repository.listInputRequests(taskId),
-      this.#repository.listObservations(taskId),
+      this.#repository.listObservationPage(taskId),
     ]);
     return detailedTask(task, inputRequests, observations);
   }
@@ -1005,18 +1028,7 @@ function detailedTask(
     required: boolean;
     status: "OPEN" | "ANSWERED";
   }[] = [],
-  observations: {
-    revision: number;
-    type: string;
-    occurredAt: Date;
-    reasonCode: string | null;
-    message: string | null;
-    substate: string | null;
-    progress: Record<string, unknown> | null;
-    source: "runtime" | "adapter";
-    adapterRevision: number | null;
-    payload: Record<string, unknown>;
-  }[] = [],
+  observationPage: ObservationPage = { observations: [], nextCursor: null, hasMore: false },
   readStatus: {
     snapshotFreshness: "fresh" | "stale";
     degradedReasonCode?: string;
@@ -1065,23 +1077,32 @@ function detailedTask(
           nextStartAttemptAt: task.nextStartAttemptAt?.toISOString() ?? null,
           deadlineAt: task.deadlineAt?.toISOString() ?? null,
         },
-        observations: observations.map((observation) => ({
-          revision: observation.revision,
-          type: observation.type,
-          occurredAt: observation.occurredAt.toISOString(),
-          ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
-          ...(observation.message === null ? {} : { message: observation.message }),
-          ...(observation.substate === null ? {} : { substate: observation.substate }),
-          ...(observation.progress === null ? {} : { progress: observation.progress }),
-          source: observation.source,
-          ...(observation.adapterRevision === null
-            ? {}
-            : { adapterRevision: observation.adapterRevision }),
-          ...observation.payload,
-        })),
+        observations: wireObservations(observationPage.observations),
+        observationCursor:
+          observationPage.nextCursor === null ? null : String(observationPage.nextCursor),
+        hasMore: observationPage.hasMore,
       },
     },
   };
+}
+
+function wireObservations(
+  observations: ObservationPage["observations"],
+): Record<string, unknown>[] {
+  return observations.map((observation) => ({
+    revision: observation.revision,
+    type: observation.type,
+    occurredAt: observation.occurredAt.toISOString(),
+    ...(observation.reasonCode === null ? {} : { reasonCode: observation.reasonCode }),
+    ...(observation.message === null ? {} : { message: observation.message }),
+    ...(observation.substate === null ? {} : { substate: observation.substate }),
+    ...(observation.progress === null ? {} : { progress: observation.progress }),
+    source: observation.source,
+    ...(observation.adapterRevision === null
+      ? {}
+      : { adapterRevision: observation.adapterRevision }),
+    ...observation.payload,
+  }));
 }
 
 function isTransientAdapterReadError(error: unknown): boolean {
@@ -1121,7 +1142,11 @@ function deadlineReached(message: string, completedAt: Date) {
   };
 }
 
-function startWindowMissed(completedAt: Date, message: string): Record<string, unknown> {
+export function startWindowMissed(
+  completedAt: Date,
+  message: string,
+  adapterResult?: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     content: [{ type: "text", text: message }],
     isError: true,
@@ -1130,17 +1155,26 @@ function startWindowMissed(completedAt: Date, message: string): Record<string, u
       reasonCode: "START_WINDOW_MISSED",
       retryable: true,
       completedAt: completedAt.toISOString(),
+      ...(adapterResult === undefined ? {} : { adapterResult }),
     },
   };
 }
 
-function startWindowMissedTransition(message: string, completedAt: Date) {
+function startWindowMissedTransition(
+  message: string,
+  completedAt: Date,
+  adapterResult?: Record<string, unknown>,
+) {
   return {
     internalState: "TERMINAL_COMPLETED" as const,
     mcpStatus: "completed" as const,
     substate: null,
     statusMessage: message || "Start window was missed after safe stop.",
-    result: startWindowMissed(completedAt, message || "Start window was missed after safe stop."),
+    result: startWindowMissed(
+      completedAt,
+      message || "Start window was missed after safe stop.",
+      adapterResult,
+    ),
     error: null,
     terminal: true,
     observationType: "task.start_window_missed",
@@ -1157,7 +1191,11 @@ function stopTransition(
     return deadlineReached(snapshot.message, completedAt);
   }
   if (snapshot.state === "CANCELLED" && task.stopReason === "START_WINDOW_MISSED") {
-    return startWindowMissedTransition(snapshot.message, completedAt);
+    return startWindowMissedTransition(
+      snapshot.message,
+      completedAt,
+      sanitizedAdapterResultPayload(snapshot),
+    );
   }
   if (task.stopReason === "START_WINDOW_MISSED" && isTerminalTaskState(snapshot.state)) {
     return startWindowMissedWithAdapterResultTransition(
