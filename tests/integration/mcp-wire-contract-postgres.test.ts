@@ -587,9 +587,7 @@ describe("H6 MCP wire and result contract", () => {
         commandState: "ACKNOWLEDGED",
       },
     });
-    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toEqual(
-      expect.any(Number),
-    );
+    expect((duplicate.error?.data as { retryAfterMs?: unknown }).retryAfterMs).toBe(0);
   });
 
   it("pending_cancel_blocks_new_pause_with_protocol", async () => {
