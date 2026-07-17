@@ -698,15 +698,25 @@ export class TaskEngine {
       pending.push({ key, hash, value });
     }
     if (pending.length === 0) {
-      const normalizedAnswers = [...allAnswers].sort((left, right) => left.key.localeCompare(right.key));
-      const requestHash = createHash("sha256").update(canonicalize(normalizedAnswers)).digest("hex");
-      const command = await this.#repository.findCommandByRequestHash(taskId, "UPDATE", requestHash);
+      const normalizedAnswers = [...allAnswers].sort((left, right) =>
+        left.key.localeCompare(right.key),
+      );
+      const requestHash = createHash("sha256")
+        .update(canonicalize(normalizedAnswers))
+        .digest("hex");
+      const command = await this.#repository.findCommandByRequestHash(
+        taskId,
+        "UPDATE",
+        requestHash,
+      );
       if (command !== null) {
         return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
       }
       return this.#taskSnapshot(taskId, authorization);
     }
-    const normalizedAnswers = [...allAnswers].sort((left, right) => left.key.localeCompare(right.key));
+    const normalizedAnswers = [...allAnswers].sort((left, right) =>
+      left.key.localeCompare(right.key),
+    );
     const requestHash = createHash("sha256").update(canonicalize(normalizedAnswers)).digest("hex");
     const command = await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
       answers,
@@ -782,7 +792,7 @@ export class TaskEngine {
       this.#repository.listInputRequests(taskId),
       this.#repository.listObservations(taskId),
     ]);
-    return detailedTask(task, inputRequests, observations) as Record<string, Record<string, unknown> | null>;
+    return detailedTask(task, inputRequests, observations);
   }
 
   async #resolveExistingCommand(

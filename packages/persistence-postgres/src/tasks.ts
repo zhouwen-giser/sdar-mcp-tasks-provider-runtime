@@ -587,42 +587,56 @@ export class TaskRepository {
     leaseMilliseconds = 30_000,
     limit = 32,
   ): Promise<PendingCommandRecord[]> {
+    // Rank candidates with a window function first, then lock base-table rows.
+    // PostgreSQL rejects FOR UPDATE when the locking SELECT itself uses window functions.
     const result = await this.pool.query<PendingCommandRecordRow>(
-      `WITH due AS (
-         SELECT task_id, command_sequence FROM (
-           SELECT task_command.task_id, task_command.command_sequence, task_command.command_type,
-                  task_command.payload, task_command.state, task_command.attempt_count,
-                  task_command.claim_owner, task_command.stop_reason, task_command.adapter_ack,
-                  task_command.claim_until,
-                  ROW_NUMBER() OVER (
-                    PARTITION BY task_command.task_id
-                    ORDER BY task_command.priority DESC, task_command.next_attempt_at,
-                      task_command.created_at, task_command.command_sequence
-                  ) AS rank
-           FROM task_command
-           JOIN provider_task
-             ON provider_task.task_id = task_command.task_id
-           WHERE task_command.command_type IN ('CANCEL','UPDATE','PAUSE','RESUME')
-             AND (
-               (task_command.state IN ('PENDING','RETRY_WAIT')
-                AND (task_command.command_type='CANCEL' OR provider_task.cancel_requested IS NOT TRUE))
-               OR (
-                 task_command.state='CLAIMED'
-                 AND task_command.claim_until <= GREATEST($1,clock_timestamp())
-                 AND (task_command.command_type='CANCEL' OR provider_task.cancel_requested IS NOT TRUE)
-               )
+      `WITH ranked AS (
+         SELECT task_command.task_id, task_command.command_sequence,
+                ROW_NUMBER() OVER (
+                  PARTITION BY task_command.task_id
+                  ORDER BY task_command.priority DESC, task_command.next_attempt_at,
+                    task_command.created_at, task_command.command_sequence
+                ) AS rank
+         FROM task_command
+         JOIN provider_task
+           ON provider_task.task_id = task_command.task_id
+         WHERE task_command.command_type IN ('CANCEL','UPDATE','PAUSE','RESUME')
+           AND (
+             (task_command.state IN ('PENDING','RETRY_WAIT')
+              AND (task_command.command_type='CANCEL' OR provider_task.cancel_requested IS NOT TRUE))
+             OR (
+               task_command.state='CLAIMED'
+               AND task_command.claim_until <= GREATEST($1,clock_timestamp())
+               AND (task_command.command_type='CANCEL' OR provider_task.cancel_requested IS NOT TRUE)
              )
-             AND NOT EXISTS (
-               SELECT 1 FROM task_command in_flight
-               WHERE in_flight.task_id = task_command.task_id
-                 AND in_flight.state = 'CLAIMED'
-                 AND in_flight.claim_until > GREATEST($1,clock_timestamp())
-                 AND in_flight.command_sequence <> task_command.command_sequence
-             )
-         ) ranked
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM task_command in_flight
+             WHERE in_flight.task_id = task_command.task_id
+               AND in_flight.state = 'CLAIMED'
+               AND in_flight.claim_until > GREATEST($1,clock_timestamp())
+               AND in_flight.command_sequence <> task_command.command_sequence
+           )
+       ),
+       candidates AS (
+         SELECT task_id, command_sequence
+         FROM ranked
          WHERE rank = 1
-         ORDER BY task_id, rank
-         FOR UPDATE SKIP LOCKED LIMIT $4
+         ORDER BY task_id
+         LIMIT $4
+       ),
+       due AS (
+         SELECT task_command.task_id, task_command.command_sequence
+         FROM task_command
+         INNER JOIN candidates
+           ON candidates.task_id = task_command.task_id
+          AND candidates.command_sequence = task_command.command_sequence
+         WHERE task_command.state IN ('PENDING','RETRY_WAIT')
+            OR (
+              task_command.state = 'CLAIMED'
+              AND task_command.claim_until <= GREATEST($1,clock_timestamp())
+            )
+         FOR UPDATE OF task_command SKIP LOCKED
        )
        UPDATE task_command command SET state='CLAIMED', claim_owner=$2,
          claim_until=GREATEST($1,clock_timestamp()) + ($3::text || ' milliseconds')::interval,

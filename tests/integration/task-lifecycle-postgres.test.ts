@@ -1239,7 +1239,7 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.updateTask(taskId, { approval: true }, authorization);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const repository = new TaskRepository(pool);
     const originalUpdateExecution = (
       gateway as unknown as {
@@ -1327,7 +1327,7 @@ describe("durable task lifecycle", () => {
 
     await engine.controlTask(taskId, "PAUSE", authorization);
     const repository = new TaskRepository(pool);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const originalPauseExecution = (
       gateway as unknown as {
         pauseExecution: GrpcAdapterGateway["pauseExecution"];
@@ -1406,7 +1406,7 @@ describe("durable task lifecycle", () => {
 
     await engine.controlTask(taskId, "RESUME", authorization);
     const repository = new TaskRepository(pool);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const originalResumeExecution = (
       gateway as unknown as {
         resumeExecution: GrpcAdapterGateway["resumeExecution"];
@@ -1484,7 +1484,7 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.updateTask(taskId, { approval: true }, authorization);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const repository = new TaskRepository(pool);
     const originalUpdateExecution = (
       gateway as unknown as {
@@ -1547,7 +1547,7 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.controlTask(taskId, "PAUSE", authorization);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const repository = new TaskRepository(pool);
     const originalPauseExecution = (
       gateway as unknown as {
@@ -1609,7 +1609,7 @@ describe("durable task lifecycle", () => {
     const before = controlSideEffectCount;
 
     await engine.controlTask(taskId, "RESUME", authorization);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const repository = new TaskRepository(pool);
     const originalResumeExecution = (
       gateway as unknown as {
@@ -1760,7 +1760,7 @@ describe("durable task lifecycle", () => {
     const taskId = String(created.task.taskId);
     const before = controlSideEffectCount;
     const repository = new TaskRepository(pool);
-    const release = createDeferred<void>();
+    const release = createDeferred();
     const originalUpdateExecution = (
       gateway as unknown as {
         updateExecution: GrpcAdapterGateway["updateExecution"];
