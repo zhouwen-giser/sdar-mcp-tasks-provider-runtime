@@ -35,6 +35,7 @@ const EnvironmentSchema = z
     IDEMPOTENCY_POLL_MS: z.coerce.number().int().min(5).max(1_000).default(20),
     ADAPTER_HEALTH_POLL_MS: z.coerce.number().int().min(100).max(300_000).default(5_000),
     ADAPTER_HEALTH_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(10).default(2),
+    ADAPTER_MANIFEST_POLL_MS: z.coerce.number().int().min(100).max(3_600_000).default(60_000),
     SCHEDULER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
     COMMAND_DISPATCH_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),
     SCHEDULER_CONCURRENCY: z.coerce.number().int().min(1).max(128).default(8),

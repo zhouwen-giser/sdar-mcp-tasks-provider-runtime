@@ -27,6 +27,7 @@ import {
 } from "../../../packages/task-engine/src/index.js";
 import type { RuntimeConfig } from "./config.js";
 import { BoundedRateLimiter } from "./rate-limiter.js";
+import { AdapterManifestWatcher } from "./manifest-watcher.js";
 
 function createHttpServer(logger: RuntimeLogger, bodyLimit: number) {
   return Fastify({ loggerInstance: logger, bodyLimit });
@@ -37,6 +38,7 @@ type RuntimeHttpServer = ReturnType<typeof createHttpServer>;
 export interface RuntimeDependencies {
   database: "starting" | "ready" | "failed";
   adapter: "starting" | "ready" | "failed";
+  adapterManifest: "starting" | "ready" | "failed";
   recovery: "starting" | "ready" | "failed";
   scheduler: "starting" | "ready" | "failed";
   commandDispatcher: "starting" | "ready" | "failed";
@@ -67,6 +69,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   const dependencies: RuntimeDependencies = {
     database: "starting",
     adapter: "starting",
+    adapterManifest: "starting",
     recovery: "starting",
     scheduler: "starting",
     commandDispatcher: "starting",
@@ -79,11 +82,13 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let commandDispatcherTimer: NodeJS.Timeout | undefined;
   let ttlCleanerTimer: NodeJS.Timeout | undefined;
   let adapterHealthTimer: NodeJS.Timeout | undefined;
+  let adapterManifestTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
   let ttlCleanerTicking = false;
   let adapterHealthTicking = false;
+  let adapterManifestTicking = false;
   let adapterHealthFailures = 0;
   const rateLimiter = new BoundedRateLimiter(
     config.RATE_LIMIT_MAX,
@@ -163,6 +168,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (commandDispatcherTimer !== undefined) clearInterval(commandDispatcherTimer);
     if (ttlCleanerTimer !== undefined) clearInterval(ttlCleanerTimer);
     if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
+    if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
     gateway.close();
     await pool.end();
   });
@@ -186,6 +192,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       }
       const validated = new OperationRegistry().validate(manifest);
       dependencies.adapter = "ready";
+      const manifestWatcher = new AdapterManifestWatcher(gateway, validated.manifestHash);
+      dependencies.adapterManifest = "ready";
       const snapshotIds = await new OperationSnapshotRepository(pool).saveManifest(validated);
       const taskEngine = new TaskEngine(
         validated,
@@ -351,6 +359,23 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.ADAPTER_HEALTH_POLL_MS);
       adapterHealthTimer.unref();
+      adapterManifestTimer = setInterval(() => {
+        if (adapterManifestTicking) return;
+        adapterManifestTicking = true;
+        void manifestWatcher
+          .tick()
+          .then(() => {
+            dependencies.adapterManifest = "ready";
+          })
+          .catch((error: unknown) => {
+            dependencies.adapterManifest = "failed";
+            logger.error({ err: error }, "Adapter Manifest drift check failed");
+          })
+          .finally(() => {
+            adapterManifestTicking = false;
+          });
+      }, config.ADAPTER_MANIFEST_POLL_MS);
+      adapterManifestTimer.unref();
     } catch (error) {
       if (dependencies.adapter === "starting") dependencies.adapter = "failed";
       throw error;

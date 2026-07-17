@@ -33,6 +33,7 @@ authentication.
 | `IDEMPOTENCY_POLL_MS`              | `20`                  | Duplicate COMPLETE/PENDING poll delay                      |
 | `ADAPTER_HEALTH_POLL_MS`           | `5000`                | Continuous identity-checked Describe probe interval        |
 | `ADAPTER_HEALTH_FAILURE_THRESHOLD` | `2`                   | Consecutive failed probes before Adapter becomes not-ready |
+| `ADAPTER_MANIFEST_POLL_MS`         | `60000`               | Startup Manifest hash drift check interval                 |
 | `SCHEDULER_POLL_MS`                | `1000`                | Durable due/deadline/watchdog worker interval              |
 | `COMMAND_DISPATCH_CONCURRENCY`     | `8`                   | Per-replica command claims executed concurrently           |
 | `SCHEDULER_CONCURRENCY`            | `8`                   | Per-replica scheduled-start claims executed concurrently   |

@@ -9,7 +9,9 @@ scan, and only then listens. `/health/live` proves the event loop can respond;
 `commandDispatcher`, and `ttlCleaner` independently.
 Remove a replica from traffic on any non-ready dependency.
 
-Adapter readiness is a continuous identity-checked probe, not a startup latch. An Adapter outage
+Adapter readiness is a continuous identity-checked probe, not a startup latch. Adapter Manifest
+readiness separately compares the current validated hash with the startup hash and latches drift
+as failed until restart. An Adapter outage
 must change only `adapter` to failed while a successful PostgreSQL probe keeps `database` ready;
 recovery is automatic after a valid probe. Scheduler/dispatcher/cleaner failures retain their
 own component label. Liveness remains 200 during ordinary dependency outages.

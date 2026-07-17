@@ -13,6 +13,7 @@ describe("Runtime configuration", () => {
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);
     expect(config.ADAPTER_HEALTH_FAILURE_THRESHOLD).toBe(2);
+    expect(config.ADAPTER_MANIFEST_POLL_MS).toBe(60_000);
     expect(config.COMMAND_DISPATCH_CONCURRENCY).toBe(8);
     expect(config.SCHEDULER_CONCURRENCY).toBe(8);
   });
