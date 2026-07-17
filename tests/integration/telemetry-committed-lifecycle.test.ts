@@ -29,12 +29,18 @@ describe("committed Task lifecycle telemetry", () => {
 
     expect(emitter.envelopes).toHaveLength(1);
     expect(emitter.envelopes[0]).toMatchObject({
-      recordType: "task.completed",
+      recordType: "provider.task_lifecycle",
       eventCategory: "task.lifecycle",
       deliveryClass: "audit",
       taskId: "task-1",
       observationRevision: 4,
-      payload: { internalState: "TERMINAL_COMPLETED", status: "completed" },
+      attributes: { lifecycleEvent: "task.completed" },
+      payload: {
+        previousState: "RUNNING",
+        currentState: "TERMINAL_COMPLETED",
+        terminal: true,
+        resultClass: "success",
+      },
     });
   });
 
@@ -111,6 +117,13 @@ function lifecycleEvent(): OutboxRecord {
       taskId: "task-1",
       internalState: "TERMINAL_COMPLETED",
       status: "completed",
+      previousState: "RUNNING",
+      currentState: "TERMINAL_COMPLETED",
+      previousSubstate: "running",
+      currentSubstate: null,
+      reasonCode: null,
+      terminal: true,
+      resultClass: "success",
       observationRevision: 4,
     },
     createdAt: new Date("2026-07-18T00:00:00.000Z"),

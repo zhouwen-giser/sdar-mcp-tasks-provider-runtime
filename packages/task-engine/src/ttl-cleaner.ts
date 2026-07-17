@@ -65,7 +65,19 @@ export class TtlCleaner {
          RETURNING task.task_id`,
         [now, this.#batchSize],
       );
-      const expired = await client.query<{ task_id: string }>(
+      const expired = await client.query<{
+        task_id: string;
+        internal_state: string;
+        substate: string | null;
+        observation_revision: string;
+        adapter_revision: string;
+        external_execution_id: string | null;
+        operation_name: string;
+        execution_mode: string;
+        simulation_id: string | null;
+        argument_hash: string;
+        authorization_context_hash: string;
+      }>(
         `WITH due AS (
            SELECT task_id FROM provider_task
            WHERE internal_state LIKE 'TERMINAL_%'
@@ -79,7 +91,10 @@ export class TtlCleaner {
          SET expired_at=$1,
              purge_after=$1 + ($3 * interval '1 millisecond')
          FROM due WHERE task.task_id=due.task_id
-         RETURNING task.task_id`,
+         RETURNING task.task_id, task.internal_state, task.substate,
+           task.observation_revision, task.adapter_revision, task.external_execution_id,
+           task.operation_name, task.execution_mode, task.simulation_id,
+           task.argument_hash, task.authorization_context_hash`,
         [now, this.#batchSize, this.#purgeGraceMs],
       );
       for (const row of expired.rows) {
@@ -91,7 +106,25 @@ export class TtlCleaner {
             randomUUID(),
             `${row.task_id}:expired`,
             row.task_id,
-            JSON.stringify({ taskId: row.task_id, expiredAt: now.toISOString() }),
+            JSON.stringify({
+              taskId: row.task_id,
+              previousState: row.internal_state,
+              currentState: "EXPIRED",
+              previousSubstate: row.substate,
+              currentSubstate: "expired",
+              reasonCode: "TTL_EXPIRED",
+              observationRevision: Number(row.observation_revision),
+              adapterRevision: Number(row.adapter_revision),
+              terminal: true,
+              resultClass: "expired",
+              externalExecutionId: row.external_execution_id,
+              operationName: row.operation_name,
+              executionMode: row.execution_mode,
+              simulationId: row.simulation_id,
+              argumentHash: row.argument_hash,
+              authorizationContextHash: row.authorization_context_hash,
+              expiredAt: now.toISOString(),
+            }),
           ],
         );
       }

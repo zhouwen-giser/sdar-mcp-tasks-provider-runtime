@@ -8,6 +8,7 @@ import type { OutboxSink } from "./outbox-publisher.js";
 
 const TASK_LIFECYCLE_EVENTS = new Set([
   "task.created",
+  "task.accepted",
   "task.started",
   "task.progress",
   "task.paused",
@@ -17,6 +18,11 @@ const TASK_LIFECYCLE_EVENTS = new Set([
   "task.completed",
   "task.failed",
   "task.cancelled",
+  "task.cancel_requested",
+  "task.deadline_stop_requested",
+  "task.start_window_stop_requested",
+  "task.start_window_violation",
+  "task.expired",
 ]);
 
 export interface ProviderOpsEventEmitter {
@@ -66,19 +72,20 @@ export function commandEnvelope(
     "reasonCode",
   ]);
   return createProviderOpsEnvelope({
-    recordType: event.eventType,
+    recordType: "provider.command_dispatch",
     eventCategory: "command.dispatch",
     deliveryClass: "operational",
     providerId: context.providerId,
     runtimeVersion: context.runtimeVersion,
     instanceId: context.instanceId,
     taskId: event.aggregateId,
+    ...optionalIdentityFields(event.payload),
     commandSequence: sequence,
     stableAggregateIdentity: event.aggregateId,
     eventIdentity: event.eventId,
     revision: sequence,
     occurredAt: event.createdAt,
-    attributes: { source: "committed_outbox" },
+    attributes: { source: "committed_outbox", commandEvent: event.eventType },
     payload,
   });
 }
@@ -91,18 +98,19 @@ export function lifecycleEnvelope(
   const payload = allowlistedLifecyclePayload(event.payload);
   const revision = numericField(event.payload, "observationRevision");
   return createProviderOpsEnvelope({
-    recordType: event.eventType,
+    recordType: "provider.task_lifecycle",
     eventCategory: "task.lifecycle",
     deliveryClass: "audit",
     providerId: context.providerId,
     runtimeVersion: context.runtimeVersion,
     instanceId: context.instanceId,
     taskId: event.aggregateId,
+    ...optionalIdentityFields(event.payload),
     stableAggregateIdentity: event.aggregateId,
     eventIdentity: event.eventId,
     ...(revision === undefined ? {} : { revision, observationRevision: revision }),
     occurredAt: event.createdAt,
-    attributes: { source: "committed_outbox" },
+    attributes: { source: "committed_outbox", lifecycleEvent: event.eventType },
     payload,
   });
 }
@@ -110,7 +118,33 @@ export function lifecycleEnvelope(
 function allowlistedLifecyclePayload(
   payload: Record<string, unknown>,
 ): Record<string, CanonicalJsonValue> {
-  return allowlistedPayload(payload, ["internalState", "status", "substate", "reasonCode"]);
+  return allowlistedPayload(payload, [
+    "previousState",
+    "currentState",
+    "previousSubstate",
+    "currentSubstate",
+    "reasonCode",
+    "observationRevision",
+    "adapterRevision",
+    "terminal",
+    "resultClass",
+  ]);
+}
+
+function optionalIdentityFields(payload: Record<string, unknown>): Partial<ProviderOpsEnvelope> {
+  const fields: Partial<ProviderOpsEnvelope> = {};
+  for (const key of [
+    "externalExecutionId",
+    "operationName",
+    "executionMode",
+    "simulationId",
+    "argumentHash",
+    "authorizationContextHash",
+  ] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.length > 0) fields[key] = value;
+  }
+  return fields;
 }
 
 function allowlistedPayload(

@@ -3305,6 +3305,23 @@ describe("durable task lifecycle", () => {
       "task.cancel_requested",
       "task.cancelled",
     ]);
+    expect(events.rows[1]?.payload).toMatchObject({
+      previousState: "RUNNING",
+      currentState: "STOPPING",
+      previousSubstate: "running",
+      currentSubstate: "stopping",
+      reasonCode: "USER_REQUESTED",
+      terminal: false,
+      resultClass: null,
+    });
+    expect(events.rows[2]?.payload).toMatchObject({
+      previousState: "STOPPING",
+      currentState: "TERMINAL_CANCELLED",
+      previousSubstate: "stopping",
+      currentSubstate: null,
+      terminal: true,
+      resultClass: "cancelled",
+    });
     for (const [index, event] of events.rows.entries()) {
       expect(event.payload).toMatchObject({
         taskId,

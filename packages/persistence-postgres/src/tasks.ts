@@ -2645,10 +2645,23 @@ async function transitionTask(
       request.outboxType,
       JSON.stringify({
         taskId: request.taskId,
+        previousState: existing.internal_state,
+        currentState: row.internal_state,
+        previousSubstate: existing.substate,
+        currentSubstate: row.substate,
+        reasonCode: request.observation.reasonCode ?? null,
+        terminal: isTerminalState(row.internal_state),
+        resultClass: taskResultClass(row),
         internalState: row.internal_state,
         status: row.mcp_status,
         substate: row.substate,
         statusMessage: row.status_message,
+        externalExecutionId: row.external_execution_id,
+        operationName: row.operation_name,
+        executionMode: row.execution_mode,
+        simulationId: row.simulation_id,
+        argumentHash: row.argument_hash,
+        authorizationContextHash: row.authorization_context_hash,
         observationRevision: revision,
         adapterRevision: Number(row.adapter_revision),
         ...(request.outboxPayload ?? {}),
@@ -2881,10 +2894,23 @@ async function insertOutbox(
       ? payload
       : {
           taskId,
+          previousState: null,
+          currentState: task.internal_state,
+          previousSubstate: null,
+          currentSubstate: task.substate,
+          reasonCode: null,
+          terminal: isTerminalState(task.internal_state),
+          resultClass: taskResultClass(task),
           internalState: task.internal_state,
           status: task.mcp_status,
           substate: task.substate,
           statusMessage: task.status_message,
+          externalExecutionId: task.external_execution_id,
+          operationName: task.operation_name,
+          executionMode: task.execution_mode,
+          simulationId: task.simulation_id,
+          argumentHash: task.argument_hash,
+          authorizationContextHash: task.authorization_context_hash,
           observationRevision: Number(task.observation_revision),
           adapterRevision: Number(task.adapter_revision),
           ...payload,
@@ -2894,6 +2920,18 @@ async function insertOutbox(
      VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING`,
     [randomUUID(), eventKey, taskId, type, JSON.stringify(completePayload)],
   );
+}
+
+function taskResultClass(row: TaskRow): string | null {
+  if (row.internal_state === "TERMINAL_FAILED") return "technical_failure";
+  if (row.internal_state === "TERMINAL_CANCELLED") return "cancelled";
+  if (row.internal_state !== "TERMINAL_COMPLETED") return null;
+  const structured = row.result?.structuredContent;
+  if (typeof structured === "object" && structured !== null && !Array.isArray(structured)) {
+    const outcome = (structured as Record<string, unknown>).outcome;
+    if (typeof outcome === "string") return outcome;
+  }
+  return row.result?.isError === true ? "business_failure" : "success";
 }
 
 async function recordCommandFact(

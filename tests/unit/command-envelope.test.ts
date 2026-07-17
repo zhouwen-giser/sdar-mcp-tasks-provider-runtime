@@ -19,8 +19,9 @@ describe("command dispatch telemetry envelope", () => {
   ])("maps %s without command payload content", (eventType, commandState) => {
     const envelope = commandEnvelope(event(eventType, commandState), context);
     expect(envelope).toMatchObject({
-      recordType: eventType,
+      recordType: "provider.command_dispatch",
       eventCategory: "command.dispatch",
+      attributes: { commandEvent: eventType },
       taskId: "task-1",
       commandSequence: 3,
       payload: { commandType: "UPDATE", commandState, attemptCount: 2 },
