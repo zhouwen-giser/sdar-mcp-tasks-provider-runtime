@@ -17,6 +17,7 @@ export interface TtlCleanerOptions {
     outcome: "renewed" | "expired" | "purged" | "blocked" | "error",
     amount?: number,
   ) => void;
+  onEvent?: (event: "renew" | "expire" | "purge" | "blocked", amount: number) => void;
 }
 
 export class TtlCleaner {
@@ -24,6 +25,7 @@ export class TtlCleaner {
   readonly #purgeGraceMs: number;
   readonly #recoveryLeaseMs: number;
   readonly #onMetric: TtlCleanerOptions["onMetric"];
+  readonly #onEvent: TtlCleanerOptions["onEvent"];
 
   constructor(
     readonly repository: TaskRepository,
@@ -42,6 +44,7 @@ export class TtlCleaner {
       throw new RangeError("RECOVERY_LEASE_MS_INVALID");
     }
     this.#onMetric = options.onMetric;
+    this.#onEvent = options.onEvent;
   }
 
   async tick(now = new Date()): Promise<TtlCleanerTickResult> {
@@ -65,7 +68,19 @@ export class TtlCleaner {
          RETURNING task.task_id`,
         [now, this.#batchSize],
       );
-      const expired = await client.query<{ task_id: string }>(
+      const expired = await client.query<{
+        task_id: string;
+        internal_state: string;
+        substate: string | null;
+        observation_revision: string;
+        adapter_revision: string;
+        external_execution_id: string | null;
+        operation_name: string;
+        execution_mode: string;
+        simulation_id: string | null;
+        argument_hash: string;
+        authorization_context_hash: string;
+      }>(
         `WITH due AS (
            SELECT task_id FROM provider_task
            WHERE internal_state LIKE 'TERMINAL_%'
@@ -79,7 +94,10 @@ export class TtlCleaner {
          SET expired_at=$1,
              purge_after=$1 + ($3 * interval '1 millisecond')
          FROM due WHERE task.task_id=due.task_id
-         RETURNING task.task_id`,
+         RETURNING task.task_id, task.internal_state, task.substate,
+           task.observation_revision, task.adapter_revision, task.external_execution_id,
+           task.operation_name, task.execution_mode, task.simulation_id,
+           task.argument_hash, task.authorization_context_hash`,
         [now, this.#batchSize, this.#purgeGraceMs],
       );
       for (const row of expired.rows) {
@@ -91,7 +109,25 @@ export class TtlCleaner {
             randomUUID(),
             `${row.task_id}:expired`,
             row.task_id,
-            JSON.stringify({ taskId: row.task_id, expiredAt: now.toISOString() }),
+            JSON.stringify({
+              taskId: row.task_id,
+              previousState: row.internal_state,
+              currentState: "EXPIRED",
+              previousSubstate: row.substate,
+              currentSubstate: "expired",
+              reasonCode: "TTL_EXPIRED",
+              observationRevision: Number(row.observation_revision),
+              adapterRevision: Number(row.adapter_revision),
+              terminal: true,
+              resultClass: "expired",
+              externalExecutionId: row.external_execution_id,
+              operationName: row.operation_name,
+              executionMode: row.execution_mode,
+              simulationId: row.simulation_id,
+              argumentHash: row.argument_hash,
+              authorizationContextHash: row.authorization_context_hash,
+              expiredAt: now.toISOString(),
+            }),
           ],
         );
       }
@@ -151,6 +187,10 @@ export class TtlCleaner {
       if (result.expired > 0) this.#onMetric?.("expired", result.expired);
       if (result.purged > 0) this.#onMetric?.("purged", result.purged);
       if (result.blocked > 0) this.#onMetric?.("blocked", result.blocked);
+      this.#emit("renew", result.renewed);
+      this.#emit("expire", result.expired);
+      this.#emit("purge", result.purged);
+      this.#emit("blocked", result.blocked);
       return result;
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -158,6 +198,15 @@ export class TtlCleaner {
       throw error;
     } finally {
       client.release();
+    }
+  }
+
+  #emit(event: "renew" | "expire" | "purge" | "blocked", amount: number): void {
+    if (amount < 1) return;
+    try {
+      this.#onEvent?.(event, amount);
+    } catch {
+      // Operational telemetry must never alter TTL lifecycle outcomes.
     }
   }
 

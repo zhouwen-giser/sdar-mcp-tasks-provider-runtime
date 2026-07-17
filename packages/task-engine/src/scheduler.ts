@@ -16,7 +16,11 @@ import { BoundExecutionWatchdog } from "./bound-execution-watchdog.js";
 export interface SchedulerOptions {
   concurrency?: number;
   leaseMilliseconds?: number;
+  onEvent?: (decision: SchedulerDecision, amount: number) => void;
 }
+
+export type SchedulerDecision =
+  "scheduled" | "claimed" | "started" | "retry" | "deadline" | "start_window_missed";
 
 export interface SchedulerTickResult {
   started: number;
@@ -86,7 +90,23 @@ export class DurableScheduler {
 
     const expired = await this.repository.claimExpiredDeadlines(this.clock.now());
     result.deadlineStops += expired.length;
+    const claimed = uncertain.length + due.length;
+    this.#emit("scheduled", claimed);
+    this.#emit("claimed", claimed);
+    this.#emit("started", result.started);
+    this.#emit("retry", result.deferred);
+    this.#emit("deadline", result.deadlineStops);
+    this.#emit("start_window_missed", result.missed);
     return result;
+  }
+
+  #emit(decision: SchedulerDecision, amount: number): void {
+    if (amount < 1) return;
+    try {
+      this.options.onEvent?.(decision, amount);
+    } catch {
+      // Operational telemetry must never alter scheduler outcomes.
+    }
   }
 
   private async reconcileUncertainStart(

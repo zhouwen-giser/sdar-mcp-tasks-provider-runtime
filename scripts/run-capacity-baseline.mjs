@@ -78,7 +78,7 @@ try {
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("Runtime did not bind");
-  client = new Client({ name: "runtime-capacity-baseline", version: "1.0.0-rc.3" });
+  client = new Client({ name: "runtime-capacity-baseline", version: "1.1.0" });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${String(address.port)}/mcp`)),
   );
@@ -267,13 +267,13 @@ try {
     throw new Error("Capacity workload did not persist Observation and Outbox evidence");
   }
 
-  const image = JSON.parse(readFileSync("reports/image/runtime-v1-rc3.json", "utf8"));
+  const image = JSON.parse(readFileSync("reports/image/runtime-v1.1.json", "utf8"));
   if (image.sizeBytes > image.maximumBytes || image.user === "root") {
-    throw new Error("Runtime image baseline violates the rc.3 image policy");
+    throw new Error("Runtime image baseline violates the v1.1 image policy");
   }
 
   const report = {
-    version: "1.0.0-rc.3",
+    version: "1.1.0",
     generatedAt: new Date().toISOString(),
     environment: {
       node: process.version,
@@ -331,7 +331,7 @@ try {
     },
   };
   const outputPath = resolve(
-    process.env.CAPACITY_REPORT_PATH ?? "reports/capacity/capacity-rc3.json",
+    process.env.CAPACITY_REPORT_PATH ?? "reports/capacity/capacity-v1.1.json",
   );
   mkdirSync(dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o644 });

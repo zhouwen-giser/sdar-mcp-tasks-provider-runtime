@@ -12,12 +12,16 @@ export interface RecoveryScanResult {
   lockSkipped: number;
 }
 
+export type RecoveryEvent =
+  "reconcile_start" | "reconcile_success" | "reconcile_failed" | "lease_conflict";
+
 export class RecoveryManager {
   constructor(
     readonly engine: TaskEngine,
     readonly repository: TaskRepository,
     readonly recoveryLeaseMs = 30_000,
     readonly onTaskError: (error: unknown, taskId: string) => void = () => undefined,
+    readonly onEvent: (event: RecoveryEvent, amount: number) => void = () => undefined,
   ) {}
 
   async scan(): Promise<RecoveryScanResult> {
@@ -51,7 +55,10 @@ export class RecoveryManager {
       }
     }
 
+    // Admission recovery can publish a Task. Enumerate Tasks afterwards so the same scan
+    // reconciles and records that recovery instead of deferring it to a later replica/tick.
     const tasks = await this.repository.listTasksForRecovery();
+    this.#emit("reconcile_start", admissions.length + tasks.length);
     for (const candidate of tasks) {
       try {
         const outcome = await this.repository.withRecoveryLock(
@@ -79,6 +86,18 @@ export class RecoveryManager {
         this.onTaskError(error, candidate.taskId);
       }
     }
+    this.#emit("reconcile_success", result.admissionsRecovered + result.tasksReconciled);
+    this.#emit("reconcile_failed", result.deferred);
+    this.#emit("lease_conflict", result.lockSkipped);
     return result;
+  }
+
+  #emit(event: RecoveryEvent, amount: number): void {
+    if (amount < 1) return;
+    try {
+      this.onEvent(event, amount);
+    } catch {
+      // Operational telemetry must never alter recovery outcomes.
+    }
   }
 }

@@ -5,6 +5,7 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 
 const outputPath = resolve("reports/sbom/runtime-v1.cdx.json");
+const rootPackage = JSON.parse(readFileSync("package.json", "utf8"));
 const checking = process.argv.includes("--check");
 const pnpmEntry = process.env.npm_execpath;
 if (!pnpmEntry) {
@@ -44,7 +45,7 @@ const document = {
     component: {
       type: "application",
       name: "sdar-mcp-tasks-provider-runtime",
-      version: "1.0.0-rc.3",
+      version: rootPackage.version,
     },
     properties: [{ name: "sdar:pnpm-lock-sha256", value: lockHash }],
   },

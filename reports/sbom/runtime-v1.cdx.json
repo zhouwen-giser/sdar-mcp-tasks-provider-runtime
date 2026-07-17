@@ -7,12 +7,12 @@
     "component": {
       "type": "application",
       "name": "sdar-mcp-tasks-provider-runtime",
-      "version": "1.0.0-rc.3"
+      "version": "1.1.0"
     },
     "properties": [
       {
         "name": "sdar:pnpm-lock-sha256",
-        "value": "c9ca02c6a9df12f8b6a1c039d47eee58862446bbb1cb7f4be13da97031b52f21"
+        "value": "7b298babebd4a86f03a7e3992a621614df658a57ef43f06c3b7111084ade7251"
       }
     ]
   },
@@ -82,6 +82,186 @@
       "name": "@modelcontextprotocol/sdk",
       "version": "1.29.0",
       "purl": "pkg:npm/%40modelcontextprotocol/sdk@1.29.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/api-logs",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/api-logs@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/api",
+      "version": "1.9.1",
+      "purl": "pkg:npm/%40opentelemetry/api@1.9.1"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/configuration",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/configuration@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/context-async-hooks",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/context-async-hooks@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/core",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/core@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-logs-otlp-grpc",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-logs-otlp-grpc@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-logs-otlp-http",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-logs-otlp-http@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-logs-otlp-proto",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-logs-otlp-proto@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-metrics-otlp-grpc",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-metrics-otlp-grpc@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-metrics-otlp-http",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-metrics-otlp-http@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-metrics-otlp-proto",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-metrics-otlp-proto@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-prometheus",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-prometheus@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-trace-otlp-grpc",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-trace-otlp-grpc@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-trace-otlp-http",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-trace-otlp-http@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-trace-otlp-proto",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-trace-otlp-proto@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/exporter-zipkin",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/exporter-zipkin@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/instrumentation",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/instrumentation@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/otlp-exporter-base",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/otlp-exporter-base@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/otlp-grpc-exporter-base",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/otlp-grpc-exporter-base@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/otlp-transformer",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/otlp-transformer@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/propagator-b3",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/propagator-b3@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/propagator-jaeger",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/propagator-jaeger@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/resources",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/resources@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/sdk-logs",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/sdk-logs@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/sdk-metrics",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/sdk-metrics@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/sdk-node",
+      "version": "0.220.0",
+      "purl": "pkg:npm/%40opentelemetry/sdk-node@0.220.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/sdk-trace-base",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/sdk-trace-base@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/sdk-trace-node",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/sdk-trace-node@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/sdk-trace",
+      "version": "2.9.0",
+      "purl": "pkg:npm/%40opentelemetry/sdk-trace@2.9.0"
+    },
+    {
+      "type": "library",
+      "name": "@opentelemetry/semantic-conventions",
+      "version": "1.43.0",
+      "purl": "pkg:npm/%40opentelemetry/semantic-conventions@1.43.0"
     },
     {
       "type": "library",
@@ -229,6 +409,12 @@
     },
     {
       "type": "library",
+      "name": "cjs-module-lexer",
+      "version": "2.2.0",
+      "purl": "pkg:npm/cjs-module-lexer@2.2.0"
+    },
+    {
+      "type": "library",
       "name": "cliui",
       "version": "8.0.1",
       "purl": "pkg:npm/cliui@8.0.1"
@@ -346,6 +532,12 @@
       "name": "es-errors",
       "version": "1.3.0",
       "purl": "pkg:npm/es-errors@1.3.0"
+    },
+    {
+      "type": "library",
+      "name": "es-module-lexer",
+      "version": "2.3.1",
+      "purl": "pkg:npm/es-module-lexer@2.3.1"
     },
     {
       "type": "library",
@@ -535,6 +727,12 @@
     },
     {
       "type": "library",
+      "name": "import-in-the-middle",
+      "version": "3.3.1",
+      "purl": "pkg:npm/import-in-the-middle@3.3.1"
+    },
+    {
+      "type": "library",
       "name": "inherits",
       "version": "2.0.4",
       "purl": "pkg:npm/inherits@2.0.4"
@@ -646,6 +844,12 @@
       "name": "mime-types",
       "version": "3.0.2",
       "purl": "pkg:npm/mime-types@3.0.2"
+    },
+    {
+      "type": "library",
+      "name": "module-details-from-path",
+      "version": "1.0.4",
+      "purl": "pkg:npm/module-details-from-path@1.0.4"
     },
     {
       "type": "library",
@@ -877,6 +1081,12 @@
     },
     {
       "type": "library",
+      "name": "require-in-the-middle",
+      "version": "8.0.1",
+      "purl": "pkg:npm/require-in-the-middle@8.0.1"
+    },
+    {
+      "type": "library",
       "name": "ret",
       "version": "0.5.0",
       "purl": "pkg:npm/ret@0.5.0"
@@ -1096,6 +1306,12 @@
       "name": "y18n",
       "version": "5.0.8",
       "purl": "pkg:npm/y18n@5.0.8"
+    },
+    {
+      "type": "library",
+      "name": "yaml",
+      "version": "2.9.0",
+      "purl": "pkg:npm/yaml@2.9.0"
     },
     {
       "type": "library",

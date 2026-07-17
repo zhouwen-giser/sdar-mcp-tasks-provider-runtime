@@ -93,6 +93,7 @@ interface PendingCommandRecordRow {
   last_error_code?: string | null;
   last_error_message?: string | null;
   claim_until: Date | null;
+  previous_state?: PendingCommandRecord["state"];
 }
 
 function mapPendingCommandRecord(row: PendingCommandRecordRow): PendingCommandRecord {
@@ -658,7 +659,8 @@ export class TaskRepository {
          LIMIT $4
        ),
        due AS (
-         SELECT task_command.task_id, task_command.command_sequence
+         SELECT task_command.task_id, task_command.command_sequence,
+                task_command.state AS previous_state
          FROM task_command
          INNER JOIN candidates
            ON candidates.task_id = task_command.task_id
@@ -679,12 +681,23 @@ export class TaskRepository {
        RETURNING command.task_id, command.command_sequence, command.command_type,
          command.payload, command.state, command.attempt_count, command.claim_owner,
          command.stop_reason, command.adapter_ack, command.next_attempt_at,
-         command.last_error_code, command.last_error_message, command.claim_until`,
+         command.last_error_code, command.last_error_message, command.claim_until,
+         due.previous_state`,
         [now, ownerId, leaseMilliseconds, limit],
       );
-      return result.rows.map((row) => ({
+      const commands = result.rows.map((row) => ({
         ...mapPendingCommandRecord(row),
       }));
+      await Promise.all(
+        commands.map((command, index) => {
+          const previousState = result.rows[index]?.previous_state;
+          return recordCommandFact(this.pool, command, "task.command.claimed", "CLAIMED", {
+            ...(previousState === undefined ? {} : { previousState }),
+            adapterRpcStatus: "not_started",
+          });
+        }),
+      );
+      return commands;
     } catch (error) {
       const databaseError = error as { code?: string; constraint?: string };
       if (
@@ -741,6 +754,11 @@ export class TaskRepository {
       ],
     );
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+    await recordCommandFact(this.pool, command, "task.command.retry_scheduled", "RETRY_WAIT", {
+      reasonCode: errorCode,
+      retryAfterMs: Math.max(0, nextAttemptAt.getTime() - Date.now()),
+      adapterRpcStatus: "error",
+    });
   }
 
   async renewCommandClaim(
@@ -769,6 +787,10 @@ export class TaskRepository {
       [command.taskId, command.commandSequence, command.claimOwner, errorCode, errorMessage],
     );
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+    await recordCommandFact(this.pool, command, "task.command.rejected", "REJECTED", {
+      reasonCode: errorCode,
+      adapterRpcStatus: "rejected",
+    });
   }
 
   async noteRecovery(taskId: string): Promise<void> {
@@ -1806,11 +1828,13 @@ export class TaskRepository {
       );
       if (existing.rows[0] !== undefined) {
         await client.query("COMMIT");
-        return {
+        const duplicate = {
           ...mapCommandResolution(existing.rows[0]),
           duplicate: true,
           disposition: "existing",
-        };
+        } as const;
+        await recordCommandResolutionFact(this.pool, taskId, duplicate, "task.command.duplicate");
+        return duplicate;
       }
       if (isTerminalState(previous.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
@@ -1870,7 +1894,15 @@ export class TaskRepository {
         },
         outboxType: "task.cancel_requested",
         eventKey: `${taskId}:command:${sequence}:requested`,
-        outboxPayload: { commandSequence: Number(sequence), reasonCode: "USER_REQUESTED" },
+        outboxPayload: {
+          commandType: "CANCEL",
+          commandSequence: Number(sequence),
+          commandPreviousState: null,
+          commandCurrentState: "PENDING",
+          commandAttempt: 0,
+          commandReasonCode: "USER_REQUESTED",
+          commandAdapterRpcStatus: "not_started",
+        },
       });
       await client.query("COMMIT");
       return {
@@ -1922,11 +1954,13 @@ export class TaskRepository {
       );
       if (existing.rows[0] !== undefined) {
         await client.query("COMMIT");
-        return {
+        const duplicate = {
           ...mapCommandResolution(existing.rows[0]),
           duplicate: true,
           disposition: "existing",
-        };
+        } as const;
+        await recordCommandResolutionFact(this.pool, taskId, duplicate, "task.command.duplicate");
+        return duplicate;
       }
 
       if (
@@ -2004,7 +2038,14 @@ export class TaskRepository {
         },
         outboxType: "task.command_requested",
         eventKey: `${taskId}:command:${sequence}:requested`,
-        outboxPayload: { commandType, commandSequence: Number(sequence) },
+        outboxPayload: {
+          commandType,
+          commandSequence: Number(sequence),
+          previousState: null,
+          currentState: "PENDING",
+          attempt: 0,
+          adapterRpcStatus: "not_started",
+        },
       });
       await client.query("COMMIT");
       return {
@@ -2088,6 +2129,10 @@ export class TaskRepository {
     if (result.rowCount !== 1) {
       throw new Error("COMMAND_CLAIM_LOST");
     }
+    await recordCommandFact(this.pool, command, "task.command.superseded", "EXHAUSTED", {
+      reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+      adapterRpcStatus: "not_dispatched",
+    });
   }
 
   async supersedeExpiredClaimedNormalCommandsForSafeStop(taskId: string): Promise<number> {
@@ -2131,6 +2176,10 @@ export class TaskRepository {
       [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
     );
     if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+    await recordCommandFact(this.pool, command, "task.command.acknowledged", "ACKNOWLEDGED", {
+      previousState: "CLAIMED",
+      adapterRpcStatus: "success",
+    });
   }
 
   async acknowledgeUpdateAndCompleteInputAnswers(
@@ -2179,6 +2228,10 @@ export class TaskRepository {
       if (isTerminalState(task.internal_state)) {
         await exhaust("TASK_TERMINAL");
         await client.query("COMMIT");
+        await recordCommandFact(this.pool, command, "task.command.rejected", "EXHAUSTED", {
+          reasonCode: "TASK_TERMINAL",
+          adapterRpcStatus: "not_dispatched",
+        });
         return "task_terminal";
       }
       if (
@@ -2188,6 +2241,10 @@ export class TaskRepository {
       ) {
         await exhaust("SUPERSEDED_BY_SAFE_STOP");
         await client.query("COMMIT");
+        await recordCommandFact(this.pool, command, "task.command.superseded", "EXHAUSTED", {
+          reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+          adapterRpcStatus: "not_dispatched",
+        });
         return "superseded_by_safe_stop";
       }
 
@@ -2231,6 +2288,10 @@ export class TaskRepository {
       );
       if (acknowledged.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
       await client.query("COMMIT");
+      await recordCommandFact(this.pool, command, "task.command.acknowledged", "ACKNOWLEDGED", {
+        previousState: "CLAIMED",
+        adapterRpcStatus: "success",
+      });
       return "acknowledged";
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -2498,6 +2559,7 @@ async function transitionTask(
   client: PoolClient,
   request: TaskTransitionRequest,
 ): Promise<{ row: TaskRow; applied: boolean }> {
+  const transitionStartedAt = performance.now();
   const locked = await client.query<TaskRow>(
     "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
     [request.taskId],
@@ -2617,14 +2679,28 @@ async function transitionTask(
       request.taskId,
       request.outboxType,
       JSON.stringify({
+        ...(request.outboxPayload ?? {}),
         taskId: request.taskId,
+        previousState: existing.internal_state,
+        currentState: row.internal_state,
+        previousSubstate: existing.substate,
+        currentSubstate: row.substate,
+        reasonCode: request.observation.reasonCode ?? null,
+        terminal: isTerminalState(row.internal_state),
+        resultClass: taskResultClass(row),
         internalState: row.internal_state,
         status: row.mcp_status,
         substate: row.substate,
         statusMessage: row.status_message,
+        externalExecutionId: row.external_execution_id,
+        operationName: row.operation_name,
+        executionMode: row.execution_mode,
+        simulationId: row.simulation_id,
+        argumentHash: row.argument_hash,
+        authorizationContextHash: row.authorization_context_hash,
         observationRevision: revision,
         adapterRevision: Number(row.adapter_revision),
-        ...(request.outboxPayload ?? {}),
+        taskTransitionDurationMs: performance.now() - transitionStartedAt,
       }),
     ],
   );
@@ -2854,10 +2930,23 @@ async function insertOutbox(
       ? payload
       : {
           taskId,
+          previousState: null,
+          currentState: task.internal_state,
+          previousSubstate: null,
+          currentSubstate: task.substate,
+          reasonCode: null,
+          terminal: isTerminalState(task.internal_state),
+          resultClass: taskResultClass(task),
           internalState: task.internal_state,
           status: task.mcp_status,
           substate: task.substate,
           statusMessage: task.status_message,
+          externalExecutionId: task.external_execution_id,
+          operationName: task.operation_name,
+          executionMode: task.execution_mode,
+          simulationId: task.simulation_id,
+          argumentHash: task.argument_hash,
+          authorizationContextHash: task.authorization_context_hash,
           observationRevision: Number(task.observation_revision),
           adapterRevision: Number(task.adapter_revision),
           ...payload,
@@ -2867,6 +2956,94 @@ async function insertOutbox(
      VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING`,
     [randomUUID(), eventKey, taskId, type, JSON.stringify(completePayload)],
   );
+}
+
+function taskResultClass(row: TaskRow): string | null {
+  if (row.internal_state === "TERMINAL_FAILED") return "technical_failure";
+  if (row.internal_state === "TERMINAL_CANCELLED") return "cancelled";
+  if (row.internal_state !== "TERMINAL_COMPLETED") return null;
+  const structured = row.result?.structuredContent;
+  if (typeof structured === "object" && structured !== null && !Array.isArray(structured)) {
+    const outcome = (structured as Record<string, unknown>).outcome;
+    if (typeof outcome === "string") return outcome;
+  }
+  return row.result?.isError === true ? "business_failure" : "success";
+}
+
+async function recordCommandFact(
+  pool: Pool,
+  command: Pick<
+    PendingCommandRecord,
+    "taskId" | "commandSequence" | "commandType" | "attemptCount"
+  >,
+  eventType: string,
+  commandState: PendingCommandRecord["state"],
+  extra: {
+    previousState?: PendingCommandRecord["state"];
+    retryAfterMs?: number;
+    reasonCode?: string;
+    adapterRpcStatus?: string;
+  } = {},
+): Promise<void> {
+  await recordCommandResolutionFact(
+    pool,
+    command.taskId,
+    {
+      sequence: command.commandSequence,
+      commandType: command.commandType,
+      state: commandState,
+      attemptCount: command.attemptCount,
+    },
+    eventType,
+    extra,
+  );
+}
+
+async function recordCommandResolutionFact(
+  pool: Pool,
+  taskId: string,
+  command: {
+    sequence: number;
+    commandType: PendingCommandRecord["commandType"];
+    state: PendingCommandRecord["state"];
+    attemptCount?: number;
+  },
+  eventType: string,
+  extra: {
+    previousState?: PendingCommandRecord["state"];
+    retryAfterMs?: number;
+    reasonCode?: string;
+    adapterRpcStatus?: string;
+  } = {},
+): Promise<void> {
+  try {
+    const eventId = randomUUID();
+    await pool.query(
+      `INSERT INTO outbox_event(event_id,event_key,aggregate_id,event_type,payload)
+       VALUES ($1,$2,$3,$4,$5::jsonb)`,
+      [
+        eventId,
+        `${taskId}:command:${String(command.sequence)}:${eventType}:${eventId}`,
+        taskId,
+        eventType,
+        JSON.stringify({
+          taskId,
+          commandSequence: command.sequence,
+          commandType: command.commandType,
+          previousState: extra.previousState ?? command.state,
+          currentState: command.state,
+          ...(command.attemptCount === undefined ? {} : { attempt: command.attemptCount }),
+          ...(extra.retryAfterMs === undefined ? {} : { retryAfterMs: extra.retryAfterMs }),
+          ...(extra.reasonCode === undefined ? {} : { reasonCode: extra.reasonCode }),
+          ...(extra.adapterRpcStatus === undefined
+            ? {}
+            : { adapterRpcStatus: extra.adapterRpcStatus }),
+        }),
+      ],
+    );
+  } catch {
+    // Operational telemetry persistence is best effort and cannot fail command processing.
+  }
 }
 
 function stableObservationType(transition: SnapshotTransition): string {

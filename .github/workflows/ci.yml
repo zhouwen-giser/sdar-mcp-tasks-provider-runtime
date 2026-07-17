@@ -43,8 +43,9 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: 1.57.2
+          github_token: ${{ github.token }}
       - run: pnpm install --frozen-lockfile
-      - run: pnpm verify:rc3
+      - run: pnpm verify:v1.1
       - run: buf lint proto
       - name: Check Protobuf compatibility against rc.1
         run: buf breaking proto --against '.git#tag=v1.0.0-rc.1,subdir=proto'

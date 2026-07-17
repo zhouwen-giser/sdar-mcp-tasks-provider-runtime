@@ -1,6 +1,6 @@
 import * as grpc from "@grpc/grpc-js";
 import Fastify from "fastify";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index.js";
@@ -10,7 +10,11 @@ import {
   McpProtocolHandler,
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
-import { createLogger, RuntimeMetrics } from "../../../packages/observability/src/index.js";
+import {
+  createLogger,
+  ProviderTelemetry,
+  RuntimeMetrics,
+} from "../../../packages/observability/src/index.js";
 import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
 import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
 import {
@@ -25,6 +29,7 @@ import {
   DurableScheduler,
   InternalNoopOutboxSink,
   OutboxPublisher,
+  ProviderOpsOutboxSink,
   RecoveryManager,
   TaskEngine,
   OutboxCleaner,
@@ -71,6 +76,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   }
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
+  const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
+  let telemetry: ProviderTelemetry | undefined;
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
   const gateway = new GrpcAdapterGateway({
@@ -78,7 +85,12 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     providerId: config.PROVIDER_ID,
     credentials: adapterCredentials(config),
     timeoutMs: config.ADAPTER_RPC_TIMEOUT_MS,
-    onRpc: (method, outcome) => metrics.increment("sdar_adapter_rpc_total", { method, outcome }),
+    onRpc: (method, outcome, durationMs, context) => {
+      metrics.increment("sdar_adapter_rpc_total", { method, outcome });
+      telemetry?.adapterRpc(method, outcome, durationMs, context);
+      telemetry?.metric("adapter_rpc_total", 1, { method, outcome });
+      telemetry?.metric("adapter_rpc_duration", durationMs, { method, outcome }, "histogram");
+    },
   });
   const dependencies: RuntimeDependencies = {
     database: "starting",
@@ -205,6 +217,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
     if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
     gateway.close();
+    await telemetry?.shutdown();
     await pool.end();
   });
 
@@ -226,6 +239,24 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         );
       }
       const validated = new OperationRegistry().validate(manifest);
+      if (telemetry === undefined) {
+        telemetry = new ProviderTelemetry({
+          enabled: config.OTEL_ENABLED,
+          otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+          resource: {
+            serviceVersion: "1.1.0",
+            instanceId: telemetryInstanceId,
+            deploymentEnvironment: config.RUNTIME_ENV,
+            providerId: validated.providerId,
+            providerVersion: manifest.providerVersion,
+          },
+        });
+        try {
+          telemetry.start();
+        } catch (error) {
+          logger.warn({ err: error }, "Provider telemetry initialization failed");
+        }
+      }
       dependencies.adapter = "ready";
       const manifestWatcher = new AdapterManifestWatcher(gateway, validated.manifestHash);
       dependencies.adapterManifest = "ready";
@@ -264,6 +295,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         {
           concurrency: config.SCHEDULER_CONCURRENCY,
           leaseMilliseconds: config.SCHEDULE_CLAIM_LEASE_MS,
+          onEvent: (decision, amount) =>
+            telemetry?.event("provider.scheduler_decision", { decision, amount }),
         },
       );
       const commandDispatcher = new DurableCommandDispatcher(
@@ -277,6 +310,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         {
           concurrency: config.COMMAND_DISPATCH_CONCURRENCY,
           leaseMilliseconds: config.COMMAND_CLAIM_LEASE_MS,
+          onMetric: (durationMs) =>
+            telemetry?.metric("command_dispatch_duration", durationMs, {}, "histogram"),
         },
       );
       const outboxCleaner = new OutboxCleaner(taskRepository, {
@@ -290,15 +325,22 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         recoveryLeaseMs: config.RECOVERY_LEASE_MS,
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
+        onEvent: (event, amount) => telemetry?.event("provider.ttl_event", { event, amount }),
       });
-      const outboxPublisher = new OutboxPublisher(
-        new OutboxRepository(pool),
+      const downstreamOutboxSink =
         config.OUTBOX_SINK === "webhook"
           ? new WebhookOutboxSink(
               new URL(requiredOutboxWebhookUrl(config)),
               config.OUTBOX_WEBHOOK_TIMEOUT_MS,
             )
-          : new InternalNoopOutboxSink(),
+          : new InternalNoopOutboxSink();
+      const outboxPublisher = new OutboxPublisher(
+        new OutboxRepository(pool),
+        new ProviderOpsOutboxSink(downstreamOutboxSink, telemetry, {
+          providerId: validated.providerId,
+          runtimeVersion: "1.1.0",
+          instanceId: telemetryInstanceId,
+        }),
         config.OUTBOX_BATCH_SIZE,
       );
       const recovery = new RecoveryManager(
@@ -306,13 +348,20 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         taskRepository,
         config.RECOVERY_LEASE_MS,
         (error, taskId) => {
+          telemetry?.metric("provider_error_total", 1, { source: "recovery" });
           logger.warn(
             { err: error, taskId, providerId: validated.providerId },
             "task recovery deferred",
           );
         },
+        (event, amount) => {
+          telemetry?.event("provider.recovery_event", { event, amount });
+          telemetry?.metric("provider_recovery_total", amount, { event });
+        },
       );
+      const recoveryStartedAt = performance.now();
       const recovered = await recovery.scan();
+      telemetry.metric("recovery_duration", performance.now() - recoveryStartedAt, {}, "histogram");
       metrics.increment("sdar_recovery_total", { outcome: "scan" });
       dependencies.recovery = "ready";
       logger.info(
@@ -329,6 +378,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       dependencies.ttlCleaner = "ready";
       await outboxPublisher.tick();
       dependencies.outboxPublisher = "ready";
+      await updateOperationalGauges(pool, telemetry);
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
         schedulerTicking = true;
@@ -336,6 +386,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           .tick()
           .then(() => {
             dependencies.scheduler = "ready";
+            void updateOperationalGauges(pool, telemetry);
           })
           .catch((error: unknown) => {
             dependencies.scheduler = "failed";
@@ -496,6 +547,38 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
 function requiredOutboxWebhookUrl(config: RuntimeConfig): string {
   if (config.OUTBOX_WEBHOOK_URL === undefined) throw new Error("OUTBOX_WEBHOOK_URL_REQUIRED");
   return config.OUTBOX_WEBHOOK_URL;
+}
+
+async function updateOperationalGauges(
+  pool: Pool,
+  telemetry: ProviderTelemetry | undefined,
+): Promise<void> {
+  if (telemetry === undefined) return;
+  try {
+    const counts = await pool.query<{
+      active_tasks: string;
+      pending_commands: string;
+      outbox_pending: string;
+      recovery_backlog: string;
+    }>(`SELECT
+      (SELECT count(*) FROM provider_task WHERE internal_state NOT LIKE 'TERMINAL_%')::text
+        AS active_tasks,
+      (SELECT count(*) FROM task_command WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text
+        AS pending_commands,
+      (SELECT count(*) FROM outbox_event WHERE published_at IS NULL)::text AS outbox_pending,
+      ((SELECT count(*) FROM admission_intent WHERE state IN ('PENDING','UNCERTAIN')) +
+       (SELECT count(*) FROM provider_task
+        WHERE internal_state NOT LIKE 'TERMINAL_%' AND next_recovery_at <= clock_timestamp()))::text
+        AS recovery_backlog`);
+    const row = counts.rows[0];
+    if (row === undefined) return;
+    telemetry.metric("active_tasks", Number(row.active_tasks), {}, "gauge");
+    telemetry.metric("pending_commands", Number(row.pending_commands), {}, "gauge");
+    telemetry.metric("outbox_pending", Number(row.outbox_pending), {}, "gauge");
+    telemetry.metric("recovery_backlog", Number(row.recovery_backlog), {}, "gauge");
+  } catch {
+    // Metrics collection is best effort and never affects Runtime readiness or Task state.
+  }
 }
 
 function authenticationOptions(config: RuntimeConfig): AuthenticationOptions {

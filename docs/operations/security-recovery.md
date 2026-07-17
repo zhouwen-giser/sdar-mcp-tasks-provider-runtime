@@ -35,4 +35,9 @@ The Adapter Manifest component compares each validated DescribeProvider hash wit
 startup hash. Any schema, capability, inventory, provider-version or operation drift latches that
 component failed until the Runtime restarts against the intended Manifest.
 
-`/metrics` exports Prometheus text for task states, Tool call count/latency, cancel requests, Adapter RPC outcomes, recovery scans, idempotency hits, rate limiting, and pending Outbox events. Structured trace events contain providerId, taskId, operationName, resourceRef, executionMode, and correlationId without full arguments.
+`/metrics` exports Prometheus text for task states, Tool call count/latency, cancel requests,
+Adapter RPC outcomes, recovery scans, idempotency hits, rate limiting, and pending Outbox events.
+Optional OTLP Provider Ops Telemetry uses committed facts, bounded queues and a recursive
+sanitizer. Raw arguments, input/answer values, Adapter payloads and authorization secrets are
+never exported; telemetry failure cannot change readiness or business state. The complete signal
+catalog is in [Provider Ops Telemetry](provider-ops-telemetry.md).

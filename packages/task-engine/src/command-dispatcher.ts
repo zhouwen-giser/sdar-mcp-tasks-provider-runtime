@@ -15,6 +15,7 @@ import { validatedSnapshotTransition } from "./result-contract.js";
 export interface CommandDispatcherOptions {
   concurrency?: number;
   leaseMilliseconds?: number;
+  onMetric?: (durationMs: number) => void;
 }
 
 export interface CommandDispatcherTickResult {
@@ -45,6 +46,7 @@ export class DurableCommandDispatcher {
   }
 
   async tick(): Promise<CommandDispatcherTickResult> {
+    const startedAt = performance.now();
     const now = this.clock.now();
     const concurrency = this.options.concurrency ?? 8;
     const leaseMilliseconds = this.options.leaseMilliseconds ?? this.claimLeaseMs;
@@ -63,6 +65,11 @@ export class DurableCommandDispatcher {
       terminal: 0,
     };
     await Promise.all(commands.map((command) => this.executeClaimed(command, result)));
+    try {
+      this.options.onMetric?.(performance.now() - startedAt);
+    } catch {
+      // Operational telemetry must never alter command dispatch outcomes.
+    }
     return result;
   }
 

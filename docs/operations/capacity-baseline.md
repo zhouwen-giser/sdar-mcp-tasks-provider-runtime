@@ -2,10 +2,10 @@
 
 `pnpm capacity:baseline` creates an isolated PostgreSQL 17 schema and runs two Runtime replicas,
 one real TypeScript gRPC Adapter and one official MCP Streamable HTTP client. It writes
-environment, topology, throughput and latency to `reports/capacity/capacity-rc3.json`, then drops
+environment, topology, throughput and latency to `reports/capacity/capacity-v1.1.json`, then drops
 the schema.
 
-The rc.3 workload records and enforces:
+The v1.1 workload records and enforces:
 
 - 100 sequential synchronous Tool calls and 1,000 concurrent durable Task admissions;
 - SQL progress while a real Adapter delays StartOperation for 15 seconds; the pool query must finish
@@ -23,7 +23,7 @@ resource-specific. It has no multi-tenant network contention or Outbox consumer.
 production Adapter and database before setting SLOs, and investigate any material regression on
 the same CI runner/topology even if correctness thresholds still pass.
 
-The rc.3 image report is `reports/image/runtime-v1-rc3.json`. The local Docker Desktop release
-gate measured 97,165,200 bytes against a 350,000,000-byte ceiling, non-root execution and an
+The v1.1 image report is `reports/image/runtime-v1.1.json`. The local Docker Desktop release
+gate measured 99,772,087 bytes against a 350,000,000-byte ceiling, non-root execution and an
 identical filesystem/config shape across two builds. GitHub Actions repeats the measurement on
 Linux before merge.

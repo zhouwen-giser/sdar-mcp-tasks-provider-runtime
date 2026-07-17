@@ -39,4 +39,39 @@ describe("TypeScript Adapter foundation", () => {
     expect(manifest.operations[0]?.execution).toBe("SYNCHRONOUS");
     expect(manifest.operations[1]?.capabilities.scheduling).toBe(true);
   });
+
+  it("reports task and execution context from the real Adapter RPC boundary", async () => {
+    server = createMockAdapterServer({ providerId: "contract-provider" });
+    const port = await bindMockAdapter(server, "127.0.0.1:0");
+    const calls: {
+      method: string;
+      outcome: "success" | "error";
+      context: { taskId?: string; externalExecutionId?: string; commandSequence?: number };
+    }[] = [];
+    gateway = new GrpcAdapterGateway({
+      endpoint: `127.0.0.1:${String(port)}`,
+      providerId: "contract-provider",
+      onRpc: (method, outcome, _durationMs, context) => calls.push({ method, outcome, context }),
+    });
+
+    await gateway.startOperation(
+      "durable_task",
+      { resourceId: "safe" },
+      {
+        taskId: "task-telemetry",
+        externalExecutionId: "execution-telemetry",
+      },
+    );
+
+    expect(calls).toEqual([
+      {
+        method: "startOperation",
+        outcome: "success",
+        context: {
+          taskId: "task-telemetry",
+          externalExecutionId: "execution-telemetry",
+        },
+      },
+    ]);
+  });
 });
