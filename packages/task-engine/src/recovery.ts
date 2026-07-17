@@ -34,8 +34,6 @@ export class RecoveryManager {
     };
 
     const admissions = await this.repository.listAdmissionsForRecovery();
-    const tasks = await this.repository.listTasksForRecovery();
-    this.#emit("reconcile_start", admissions.length + tasks.length);
     for (const admission of admissions) {
       try {
         const recovered = await this.repository.withRecoveryLock(
@@ -57,6 +55,10 @@ export class RecoveryManager {
       }
     }
 
+    // Admission recovery can publish a Task. Enumerate Tasks afterwards so the same scan
+    // reconciles and records that recovery instead of deferring it to a later replica/tick.
+    const tasks = await this.repository.listTasksForRecovery();
+    this.#emit("reconcile_start", admissions.length + tasks.length);
     for (const candidate of tasks) {
       try {
         const outcome = await this.repository.withRecoveryLock(

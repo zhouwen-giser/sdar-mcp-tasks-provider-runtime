@@ -5,6 +5,37 @@ import type { TaskRepository } from "../../packages/persistence-postgres/src/ind
 import { RecoveryManager, type TaskEngine } from "../../packages/task-engine/src/index.js";
 
 describe("H8 recovery fairness", () => {
+  it("enumerates Tasks after uncertain admissions are recovered", async () => {
+    const tasks: TaskRecord[] = [];
+    const admission = {
+      taskId: "recovered-admission",
+      operationSnapshotId: "snapshot",
+    };
+    const repository = {
+      listAdmissionsForRecovery: () => Promise.resolve([admission]),
+      listTasksForRecovery: () => Promise.resolve(tasks),
+      withRecoveryLock: <T>(_taskId: string, recover: () => Promise<T>) => recover(),
+      getById: (taskId: string) =>
+        Promise.resolve(tasks.find((task) => task.taskId === taskId) ?? null),
+      noteRecoveryFailure: () => Promise.resolve(),
+    };
+    const engine = {
+      resolveTaskOperation: () => Promise.resolve({ operation: {} }),
+      recoverAdmission: () => {
+        tasks.push(candidate("recovered-admission"));
+        return Promise.resolve({ kind: "task" });
+      },
+      reconcileTask: () => Promise.resolve("found"),
+    } as unknown as TaskEngine;
+
+    const result = await new RecoveryManager(
+      engine,
+      repository as unknown as TaskRepository,
+    ).scan();
+
+    expect(result).toMatchObject({ admissionsRecovered: 1, tasksReconciled: 1 });
+  });
+
   it("backs off a persistent failure without preventing a fresh candidate", async () => {
     const repository = new FairRecoveryRepository();
     const events: [string, number][] = [];
