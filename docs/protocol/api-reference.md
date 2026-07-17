@@ -72,3 +72,10 @@ The authoritative field definitions, enums and compatibility comments are in
 `pnpm proto:check`. Additive field evolution is allowed within protocol v1;
 renumbering/removing fields or changing identity semantics requires a new major
 protocol version.
+
+## rc.2 verification boundary
+
+`pnpm verify:rc2` is the aggregate Runtime gate. Adapter protocol reports qualify the reference
+TypeScript and Python implementations only; they mark Runtime Profile coverage `partial` and
+real-resource safety `not_claimed`. Production Adapters must separately prove resource-specific
+side-effect identity and safe-stop behavior.

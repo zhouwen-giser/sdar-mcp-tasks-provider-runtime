@@ -2,7 +2,11 @@
 
 An independently deployable, language-neutral Runtime for the SEP-2663 task lifecycle and the `io.sdar/taskExecution` Provider Profile. The Runtime is implemented in strict TypeScript and delegates resource facts and side effects to versioned gRPC/Protobuf Adapters.
 
-The implementation follows [`SDAR_MCP_Tasks_Runtime_Codex_Goal_Task_Package_V1.0.md`](SDAR_MCP_Tasks_Runtime_Codex_Goal_Task_Package_V1.0.md). Normative design inputs are under [`references/`](references/), the living execution plan is [`docs/implementation/runtime-exec-plan.md`](docs/implementation/runtime-exec-plan.md), and delivery evidence is under [`reports/runtime-v1/`](reports/runtime-v1/).
+The current release candidate is `v1.0.0-rc.2`. Its hardening plan and traceability matrix are
+[`runtime-rc2-hardening-exec-plan.md`](docs/implementation/runtime-rc2-hardening-exec-plan.md)
+and
+[`runtime-rc2-requirement-traceability.md`](docs/implementation/runtime-rc2-requirement-traceability.md);
+phase and final evidence is under [`reports/runtime-v1-rc2/`](reports/runtime-v1-rc2/).
 
 ## Runtime quick start
 
@@ -29,7 +33,7 @@ readiness. The reference Adapter state and PostgreSQL data use named volumes.
 For a release gate with PostgreSQL and Docker available, run:
 
 ```bash
-TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify
+TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify:rc2
 ```
 
 Configuration and security are documented in
@@ -48,6 +52,8 @@ safety `not_claimed`; a Mock Adapter result is not production qualification.
 
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).
-Root commands in `package.json` expose every release gate; `pnpm verify` includes
+Root commands in `package.json` expose every release gate; `pnpm verify:rc2` includes
 formatting, lint, types, build/Proto drift, audit/SBOM, deployment/container,
-unit/contract/integration/recovery/security/E2E/conformance and capacity checks.
+unit/contract/integration/recovery/security/E2E/conformance, the six rc.1 red-regression guards,
+and the expanded capacity checks. CI additionally runs Buf lint/breaking against the immutable
+rc.1 tag and builds the Runtime plus both Adapter images with Compose.

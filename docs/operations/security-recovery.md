@@ -22,4 +22,8 @@ state, a failed caller expires its lease, and a crashed caller is taken over aft
 with Reconcile before any safe retry. Source-IP rate state has an explicit per-replica key bound;
 global production limiting remains the ingress/gateway responsibility.
 
+Task publication, scheduler acceptance and start-window compensation also reuse their checked-out
+client for post-commit visibility reads. They never retain a client and request a second one;
+pool-max-one regression and slow-Adapter capacity gates enforce this connection boundary.
+
 `/metrics` exports Prometheus text for task states, Tool call count/latency, cancel requests, Adapter RPC outcomes, recovery scans, idempotency hits, rate limiting, and pending Outbox events. Structured trace events contain providerId, taskId, operationName, resourceRef, executionMode, and correlationId without full arguments.

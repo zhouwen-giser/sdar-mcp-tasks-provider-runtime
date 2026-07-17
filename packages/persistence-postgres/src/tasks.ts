@@ -355,7 +355,7 @@ export class TaskRepository {
         [input.taskId],
       );
       await client.query("COMMIT");
-      const task = await this.getById(input.taskId);
+      const task = await selectTaskById(client, input.taskId);
       if (task === null) throw new Error("TASK_NOT_VISIBLE_AFTER_COMMIT");
       return task;
     } catch (error) {
@@ -427,7 +427,7 @@ export class TaskRepository {
         [input.taskId],
       );
       await client.query("COMMIT");
-      const task = await this.getById(input.taskId);
+      const task = await selectTaskById(client, input.taskId);
       if (task === null) throw new Error("SCHEDULED_TASK_NOT_VISIBLE_AFTER_COMMIT");
       return task;
     } catch (error) {
@@ -459,10 +459,7 @@ export class TaskRepository {
   }
 
   async getById(taskId: string): Promise<TaskRecord | null> {
-    const result = await this.pool.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
-      taskId,
-    ]);
-    return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
+    return selectTaskById(this.pool, taskId);
   }
 
   async listAdmissionsForRecovery(limit = 128): Promise<AdmissionIntentRecord[]> {
@@ -954,7 +951,7 @@ export class TaskRepository {
         [taskId, JSON.stringify(adapterResponse)],
       );
       await client.query("COMMIT");
-      const visible = await this.getById(taskId);
+      const visible = await selectTaskById(client, taskId);
       if (visible === null) throw new Error("SCHEDULED_TASK_NOT_VISIBLE_AFTER_COMMIT");
       return visible;
     } catch (error) {
@@ -1209,7 +1206,7 @@ export class TaskRepository {
       }
       await persistStartWindowStop(client, taskId, requestedAt);
       await client.query("COMMIT");
-      const updated = await this.getById(taskId);
+      const updated = await selectTaskById(client, taskId);
       if (updated === null) throw new Error("TASK_NOT_FOUND");
       return updated;
     } catch (error) {
@@ -2256,6 +2253,16 @@ function reasonCodeFromTransition(transition: SnapshotTransition): string | null
 
 function jsonOrNull(value: Record<string, unknown> | null): string | null {
   return value === null ? null : JSON.stringify(value);
+}
+
+async function selectTaskById(
+  queryable: Pool | PoolClient,
+  taskId: string,
+): Promise<TaskRecord | null> {
+  const result = await queryable.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
+    taskId,
+  ]);
+  return result.rows[0] === undefined ? null : fromRow(result.rows[0]);
 }
 
 function fromRow(row: TaskRow): TaskRecord {

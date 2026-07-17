@@ -28,3 +28,8 @@ Groups are cumulative:
   irreversibility.
 
 Both examples store execution binding, full Snapshot, terminal proof, input round, and command Ack journal in an atomic mode-0600 JSON file. The TypeScript and Python processes do not use an in-memory Map/dictionary as execution authority. `ADAPTER_STATE_PATH` selects the durable file; restart tests deliberately reuse it.
+
+The rc.2 release gate validates both JSON reports against the executable schema, requires at
+least 17 cases per language and rejects a report that promotes Runtime Profile or resource safety
+beyond these scopes. `pnpm verify:rc2` also runs the independent Runtime integration, recovery,
+security, wire and capacity matrix.

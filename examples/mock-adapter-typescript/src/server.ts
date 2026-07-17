@@ -13,6 +13,7 @@ export interface MockAdapterOptions {
   onStartSideEffect?: (taskId: string) => void;
   onControlSideEffect?: (taskId: string, command: string) => void;
   statePath?: string;
+  startResponseDelayMs?: number;
 }
 
 interface MockExecution {
@@ -716,7 +717,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           );
           return;
         }
-        callback(null, {
+        const acceptedResponse = {
           accepted: {
             externalExecutionId:
               result.scenario === "start_external_identity_mismatch"
@@ -728,7 +729,12 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
                 : initialSnapshot,
           },
           result: "accepted",
-        });
+        };
+        if (result.scenario === "slow_start" && (options.startResponseDelayMs ?? 0) > 0) {
+          setTimeout(() => callback(null, acceptedResponse), options.startResponseDelayMs);
+        } else {
+          callback(null, acceptedResponse);
+        }
         return;
       }
       const externalExecutionId = `sync-${taskId}`;

@@ -1,6 +1,6 @@
 {
   "name": "sdar-mcp-tasks-provider-runtime",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.13.1",
@@ -35,6 +35,7 @@
     "capacity:baseline": "node scripts/require-env.mjs TEST_DATABASE_URL && pnpm build && node scripts/run-capacity-baseline.mjs",
     "test": "pnpm test:unit && pnpm test:contract",
     "verify": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm build && pnpm proto:check && pnpm audit:dependencies && pnpm sbom:check && pnpm deployment:check && pnpm container:check && pnpm test:unit && pnpm test:contract && pnpm test:integration && pnpm test:recovery && pnpm test:security && pnpm test:e2e && pnpm test:conformance && pnpm capacity:baseline",
+    "verify:rc2": "pnpm verify && pnpm test:rc2:red",
     "dev:runtime": "tsx apps/runtime/src/main.ts",
     "dev:adapter:ts": "tsx examples/mock-adapter-typescript/src/main.ts"
   },

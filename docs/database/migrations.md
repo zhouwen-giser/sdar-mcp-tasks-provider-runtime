@@ -78,3 +78,7 @@ detection, and a complete 001-006 rc.1 fixture containing pending/uncertain admi
 working/queued/input/stopping/scheduled/terminal Tasks, a pending command, observation/outbox and
 idempotency data. After 007-012 it proves data/backfills and executes Recovery, Dispatcher and
 Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter.
+
+rc.2 repository code reads the committed Task through the same client used for the publication
+transaction, then releases it. This is a runtime access-pattern fix and requires no schema
+migration; it prevents a one-connection pool from deadlocking after a successful `COMMIT`.

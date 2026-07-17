@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0-rc.2 - unreleased
+## 1.0.0-rc.2 - 2026-07-17
 
 - Hardened durable commands, timing windows, observation revisions, immutable
   operation snapshots, Adapter identity, TTL/read freshness, MCP wire contracts,
@@ -8,6 +8,12 @@
 - Added an actual 001-006 rc.1 full-state forward-upgrade fixture and expanded
   17-case-per-language Adapter protocol conformance with explicit partial/not-claimed
   Runtime Profile and resource-safety scopes.
+- Fixed committed-Task publication under a one-connection pool by reusing the transaction client
+  for post-commit visibility reads; no repository path re-borrows the Pool while retaining that
+  client.
+- Expanded the release capacity gate with slow-Adapter database progress, durable dispatcher,
+  scheduled/watchdog, 100/500/1000 recovery-candidate, Observation/Outbox growth and image
+  evidence.
 
 ## 1.0.0-rc.1 - 2026-07-16
 

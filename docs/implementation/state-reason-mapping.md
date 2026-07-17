@@ -33,3 +33,9 @@ text and may change. Clients must branch on MCP state, structured outcome and
 reason code, not English messages. Business failure and partial completion are
 completed executions with business result semantics, whereas infrastructure or
 protocol failure is MCP `failed`.
+
+Control rejection never aliases success. Retryable or transport rejection remains
+`working/stopping` with a durable retry; a permanently rejected user cancellation reconciles and
+restores the authoritative working state with `CANCEL_REJECTED`; an unconfirmed mandatory stop
+ends as `failed` with `SAFE_STOP_UNCONFIRMED`. `START_WINDOW_MISSED` is completed only when no
+execution exists or a later Snapshot proves compensation stopped it safely.

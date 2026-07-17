@@ -170,3 +170,11 @@ The tag is never moved.
   are unit 27, contract 4, rc.2 guards 6, integration 59, recovery 8, security 6 and E2E 4; both
   Adapters passed all 17 expanded cases. H8 closes without claiming real-resource safety or a
   complete standalone Runtime Profile.
+- 2026-07-17 H9 implementation: release versions and deployment image move to rc.2;
+  `verify:rc2` adds the six regression guards and CI compares Buf directly to the immutable rc.1
+  tag. The expanded isolated-schema capacity gate exposed a real pool-max-one post-commit
+  deadlock in four Task repository paths. All now reuse the checked-out client for visibility;
+  the new lifecycle regression passes and integration grows to 60 tests. Local release evidence
+  passes formatting/lint/type, audit/SBOM/deployment, unit 27, contract 4, guards 6, integration
+  60, recovery 8, security 6, E2E 4, Adapter conformance 17/17 per language, expanded capacity,
+  reproducible image, three-image Compose and Docker-hosted Buf lint/breaking.

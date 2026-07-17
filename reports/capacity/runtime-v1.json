@@ -1,36 +1,147 @@
 {
-  "version": "1.0.0-rc.1",
-  "generatedAt": "2026-07-16T23:03:51.949Z",
+  "version": "1.0.0-rc.2",
+  "generatedAt": "2026-07-17T00:12:23.055Z",
   "environment": {
     "node": "v22.14.0",
     "platform": "win32/x64",
     "cpuLogicalCount": 16,
     "memoryBytes": 34085838848,
     "database": "TEST_DATABASE_URL target (credentials redacted)",
-    "topology": "single Runtime, single TypeScript Adapter, sequential MCP HTTP client"
+    "topology": "single Runtime (PostgreSQL pool max 1), single TypeScript Adapter, sequential MCP client"
   },
   "workloads": {
     "synchronousTool": {
       "iterations": 100,
-      "durationMs": 1008.2826000000001,
-      "throughputPerSecond": 99.1785437931786,
+      "durationMs": 943.8857,
+      "throughputPerSecond": 105.9450312680868,
       "latencyMs": {
-        "p50": 9.499299999999948,
-        "p95": 13.709100000000035,
-        "p99": 20.042599999999993,
-        "max": 23.297199999999975
+        "p50": 9.005599999999959,
+        "p95": 12.110299999999825,
+        "p99": 12.441100000000006,
+        "max": 12.657600000000002
       }
     },
     "durableTaskCreateAndGet": {
       "iterations": 25,
-      "durationMs": 1177.3890000000001,
-      "throughputPerSecond": 21.2334241274549,
+      "durationMs": 1261.0818,
+      "throughputPerSecond": 19.824249307221784,
       "latencyMs": {
-        "p50": 46.24519999999984,
-        "p95": 59.16379999999981,
-        "p99": 63.04470000000015,
-        "max": 63.04470000000015
+        "p50": 46.47330000000011,
+        "p95": 65.95110000000022,
+        "p99": 68.33689999999979,
+        "max": 68.33689999999979
       }
+    },
+    "slowAdapterDatabaseAvailability": {
+      "adapterResponseDelayMs": 750,
+      "databaseQueryDurationMs": 1.0398000000000138,
+      "databaseQueryCompletedBeforeAdapterResponse": true,
+      "taskId": "c9d6b111-6855-44e2-8864-86fc8faa3551"
+    },
+    "durableCommandDispatcher": {
+      "commands": 20,
+      "durationMs": 451.02419999999984,
+      "commandsPerSecond": 44.343518596119694,
+      "result": {
+        "claimed": 20,
+        "acknowledged": 20,
+        "retried": 0,
+        "rejected": 0,
+        "exhausted": 0,
+        "terminal": 0
+      }
+    },
+    "scheduledScan": {
+      "futureTasks": 32,
+      "durationMs": 7.770199999999932,
+      "result": {
+        "started": 0,
+        "missed": 0,
+        "deferred": 0,
+        "deadlineStops": 0,
+        "watchdogStops": 0,
+        "reconciled": 0
+      }
+    },
+    "watchdogScan": {
+      "overdueTasks": 16,
+      "durationMs": 137.26029999999992,
+      "result": {
+        "started": 0,
+        "missed": 0,
+        "deferred": 0,
+        "deadlineStops": 0,
+        "watchdogStops": 16,
+        "reconciled": 0
+      }
+    },
+    "recoveryCandidateScans": {
+      "100": {
+        "requested": 100,
+        "returned": 100,
+        "durationMs": 3.7626000000000204,
+        "candidatesPerSecond": 26577.366714505784
+      },
+      "500": {
+        "requested": 500,
+        "returned": 500,
+        "durationMs": 13.09059999999954,
+        "candidatesPerSecond": 38195.34627901071
+      },
+      "1000": {
+        "requested": 1000,
+        "returned": 1000,
+        "durationMs": 19.714899999999943,
+        "candidatesPerSecond": 50723.05718010251
+      }
+    },
+    "observationOutboxGrowth": {
+      "observations": {
+        "before": {
+          "rows": 0,
+          "bytes": 24576
+        },
+        "after": {
+          "rows": 155,
+          "bytes": 90112
+        },
+        "rows": 155,
+        "bytes": 65536
+      },
+      "outbox": {
+        "before": {
+          "rows": 0,
+          "bytes": 32768
+        },
+        "after": {
+          "rows": 155,
+          "bytes": 180224
+        },
+        "rows": 155,
+        "bytes": 147456
+      }
+    },
+    "runtimeImage": {
+      "schemaVersion": 1,
+      "measuredAt": "2026-07-17T07:08:41+08:00",
+      "measurementEnvironment": "GitHub Actions ubuntu-24.04 Docker Engine",
+      "image": "sdar-runtime:rc2-audit-primary",
+      "base": "node:22-bookworm-slim",
+      "sizeBytes": 327026557,
+      "maximumBytes": 350000000,
+      "user": "node",
+      "layers": 11,
+      "frozenLockfile": true,
+      "productionDependenciesOnly": true,
+      "containsTestsDocsOrReferences": false,
+      "containsTypescriptOrVitest": false,
+      "containsProtoAndMigrations": true,
+      "reproducibleFilesystemAndConfig": true
     }
+  },
+  "interpretation": {
+    "productionSlo": false,
+    "recoveryScope": "Measures the real PostgreSQL candidate-selection/materialization path; Adapter reconciliation latency is resource-specific.",
+    "thresholds": "Only correctness/regression bounds are enforced: pool progress under 500ms, exact claims/counts, positive durable growth, and image policy."
   }
 }

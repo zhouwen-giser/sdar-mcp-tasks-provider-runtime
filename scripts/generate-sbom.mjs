@@ -44,7 +44,7 @@ const document = {
     component: {
       type: "application",
       name: "sdar-mcp-tasks-provider-runtime",
-      version: "1.0.0-rc.1",
+      version: "1.0.0-rc.2",
     },
     properties: [{ name: "sdar:pnpm-lock-sha256", value: lockHash }],
   },

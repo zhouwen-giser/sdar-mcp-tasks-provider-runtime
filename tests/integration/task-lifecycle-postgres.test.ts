@@ -146,6 +146,33 @@ describe("durable task lifecycle", () => {
     ).rejects.toThrow("TASK_NOT_FOUND");
   });
 
+  it("returns a committed Task without re-borrowing the only PoolClient", async () => {
+    const singleConnectionPool = new Pool({ connectionString: databaseUrl, max: 1 });
+    try {
+      const snapshots = await new OperationSnapshotRepository(singleConnectionPool).saveManifest(
+        engine.manifest,
+      );
+      const singleConnectionEngine = new TaskEngine(
+        engine.manifest,
+        snapshots,
+        gateway,
+        new TaskRepository(singleConnectionPool),
+      );
+      const created = await Promise.race([
+        singleConnectionEngine.callOperation(
+          requiredOperation("durable_task"),
+          { resourceId: "rc2-pool-one-publication" },
+          authorization,
+        ),
+        rejectAfter(2_000, "Task publication re-borrowed its checked-out PoolClient"),
+      ]);
+      expect(created).toMatchObject({ kind: "task", task: { status: "working" } });
+      expect(singleConnectionPool.waitingCount).toBe(0);
+    } finally {
+      await singleConnectionPool.end();
+    }
+  });
+
   it("returns an inline result for terminal task-capable admission", async () => {
     const before = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
     const result = await engine.callOperation(
@@ -1918,4 +1945,11 @@ function requiredOperation(name: string) {
   const operation = engine.manifest.operations.find((candidate) => candidate.name === name);
   if (operation === undefined) throw new Error(`Operation ${name} is missing`);
   return operation;
+}
+
+function rejectAfter(milliseconds: number, message: string): Promise<never> {
+  return new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), milliseconds);
+    timer.unref();
+  });
 }

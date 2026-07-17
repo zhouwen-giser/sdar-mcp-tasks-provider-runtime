@@ -43,3 +43,8 @@ Runtime startup does not become ready until migrations, Manifest validation, Ada
 Authentication is pluggable: explicit development identity, trusted proxy headers, or signed HS256 JWT with expiry/issuer/audience checks. Authorization context, execution mode, and simulation identity are part of every Task query/control predicate and Adapter execution context. Production Adapter transport supports mutual TLS from configured CA/client certificate/private key files; plaintext is an explicit development mode. HTTP body size, JSON byte/depth/node complexity, availability batch, key, TTL, timing, and schema bounds are enforced before side effects. Adapter endpoints are fixed startup configuration and cannot be selected by Tool arguments.
 
 The low-level official SDK Server is intentional because Adapter input/output documents are validated JSON Schema Draft 2020-12, whereas the high-level registration API accepts application-owned Zod schemas. SDK types do not enter domain, registry or persistence packages.
+
+The availability batch bound is 1-128 checks. The rc.2 publication path commits intent, Task,
+first Runtime Observation and Outbox event before returning a Task. Post-commit visibility uses
+the same checked-out PostgreSQL client and releases it before returning; a one-connection pool
+therefore cannot deadlock or span an Adapter RPC.

@@ -28,7 +28,7 @@
         "containers": [
           {
             "name": "runtime",
-            "image": "ghcr.io/zhouwen-giser/sdar-mcp-tasks-provider-runtime:v1.0.0-rc.1",
+            "image": "ghcr.io/zhouwen-giser/sdar-mcp-tasks-provider-runtime:v1.0.0-rc.2",
             "imagePullPolicy": "IfNotPresent",
             "ports": [{ "name": "http", "containerPort": 8080, "protocol": "TCP" }],
             "envFrom": [
