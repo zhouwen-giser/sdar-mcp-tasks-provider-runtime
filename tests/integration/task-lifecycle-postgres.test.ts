@@ -137,6 +137,9 @@ describe("durable task lifecycle", () => {
     if (created.kind !== "task") throw new Error("Expected task result");
     expect(created.task.status).toBe("working");
     const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const initiallyCommitted = await repository.getById(taskId);
+    expect(initiallyCommitted?.runtimeRevision).toBe("1");
 
     const visible = await pool.query<{ state: string }>(
       `SELECT admission_intent.state FROM provider_task
@@ -158,7 +161,11 @@ describe("durable task lifecycle", () => {
       structuredContent: { resourceId: "resource-1", completed: true },
     });
 
-    const repository = new TaskRepository(pool);
+    const finallyCommitted = await repository.getById(taskId);
+    expect(BigInt(finallyCommitted?.runtimeRevision ?? "0")).toBeGreaterThan(1n);
+    expect(finallyCommitted?.runtimeUpdatedAt.toISOString()).toBe(
+      finallyCommitted?.updatedAt.toISOString(),
+    );
     const unchanged = await repository.applySnapshot(taskId, 99, {
       internalState: "RUNNING",
       mcpStatus: "working",

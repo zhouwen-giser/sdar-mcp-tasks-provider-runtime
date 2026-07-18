@@ -234,6 +234,7 @@ interface TaskRow {
   error: Record<string, unknown> | null;
   adapter_revision: string;
   observation_revision: string;
+  runtime_revision: string;
   ttl_ms: string | null;
   handle_expires_at: Date | null;
   terminal_at: Date | null;
@@ -243,6 +244,7 @@ interface TaskRow {
   poll_interval_ms: number;
   created_at: Date;
   updated_at: Date;
+  runtime_updated_at: Date;
   version: string;
   accepted_at: Date;
   not_before: Date | null;
@@ -1771,7 +1773,8 @@ export class TaskRepository {
     const result = await this.pool.query(
       `UPDATE provider_task
        SET schedule_claim_owner=NULL, schedule_claim_until=$3, status_message=$4,
-           updated_at=clock_timestamp()
+           updated_at=clock_timestamp(), runtime_updated_at=clock_timestamp(),
+           runtime_revision=runtime_revision+1
        WHERE task_id=$1 AND internal_state='WAITING_START_CONFIRMATION'
          AND schedule_claim_owner=$2`,
       [taskId, claimOwner, retryAt, message],
@@ -3130,8 +3133,10 @@ async function transitionTask(
   const values: unknown[] = [request.taskId, request.observation.occurredAt];
   const assignments = [
     "observation_revision=observation_revision+1",
+    "runtime_revision=runtime_revision+1",
     "version=version+1",
     "updated_at=$2",
+    "runtime_updated_at=$2",
   ];
   const add = (column: string, value: unknown, json = false): void => {
     values.push(json && value !== null ? JSON.stringify(value) : value);
@@ -3847,6 +3852,7 @@ function fromRow(row: TaskRow): TaskRecord {
     error: row.error,
     adapterRevision: Number(row.adapter_revision),
     observationRevision: Number(row.observation_revision),
+    runtimeRevision: row.runtime_revision,
     ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
     handleExpiresAt: row.handle_expires_at,
     terminalAt: row.terminal_at,
@@ -3856,6 +3862,7 @@ function fromRow(row: TaskRow): TaskRecord {
     pollIntervalMs: row.poll_interval_ms,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    runtimeUpdatedAt: row.runtime_updated_at,
     version: Number(row.version),
     acceptedAt: row.accepted_at,
     notBefore: row.not_before,
