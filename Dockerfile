@@ -6,6 +6,7 @@ RUN corepack enable
 WORKDIR /workspace
 COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml .npmrc ./
 COPY apps/runtime/package.json apps/runtime/package.json
+COPY apps/home-assistant-climate-provider/package.json apps/home-assistant-climate-provider/package.json
 COPY packages/adapter-protocol/package.json packages/adapter-protocol/package.json
 COPY packages/conformance-testkit/package.json packages/conformance-testkit/package.json
 COPY packages/domain/package.json packages/domain/package.json
@@ -36,3 +37,6 @@ CMD ["node", "dist/apps/runtime/src/main.js"]
 
 FROM runtime AS adapter-ts
 CMD ["node", "dist/examples/mock-adapter-typescript/src/main.js"]
+
+FROM runtime AS home-assistant-climate-provider
+CMD ["node", "dist/apps/home-assistant-climate-provider/src/main.js"]
