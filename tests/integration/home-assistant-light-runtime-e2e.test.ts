@@ -1,8 +1,4 @@
 import { createServer } from "node:net";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { loadRuntimeConfig } from "../../apps/runtime/src/config.js";
@@ -27,7 +23,7 @@ let provider: HomeAssistantLightProviderServer;
 let websocket: HomeAssistantWebSocketClient;
 let telemetry: ProviderTelemetryClient;
 let runtime: RuntimeApplication;
-let client: Client;
+let runtimeUrl: URL;
 let pool: Pool;
 
 beforeAll(async () => {
@@ -98,8 +94,8 @@ beforeAll(async () => {
       PROVIDER_TELEMETRY_HOST: "127.0.0.1",
       PROVIDER_TELEMETRY_PORT: String(telemetryPort),
       PROVIDER_TELEMETRY_TLS_MODE: "disabled",
-      SCHEDULER_POLL_MS: "100",
-      RECOVERY_POLL_MS: "500",
+      SCHEDULER_POLL_MS: "5000",
+      RECOVERY_POLL_MS: "5000",
       ADAPTER_HEALTH_POLL_MS: "100",
     }),
   );
@@ -107,12 +103,7 @@ beforeAll(async () => {
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("RUNTIME_BIND_FAILED");
-  client = new Client({ name: "ha-light-e2e", version: "1.0.0" });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${String(address.port)}/mcp`), {
-      requestInit: { headers: { "x-sdar-subject": "e2e-user", "x-sdar-tenant": "e2e-tenant" } },
-    }) as unknown as Transport,
-  );
+  runtimeUrl = new URL(`http://127.0.0.1:${String(address.port)}/mcp`);
   telemetry.start();
   websocket.start();
 });
@@ -120,7 +111,6 @@ beforeAll(async () => {
 afterAll(async () => {
   websocket.stop();
   telemetry.stop();
-  await client.close();
   await runtime.app.close();
   await provider.close();
   await fake.close();
@@ -128,40 +118,118 @@ afterAll(async () => {
 });
 
 describe("Home Assistant light Runtime E2E", () => {
-  it("publishes tools, completes the Task once, and records Provider telemetry", async () => {
-    const tools = await client.listTools();
-    expect(tools.tools.map((tool) => tool.name)).toEqual([
+  it("uses frozen discovery, flat Tasks, Ack-first notifications and actual-state Evidence", async () => {
+    const discovery = await frozenRequest("server/discover", {}, 1);
+    expect(discovery.statusCode).toBe(200);
+    expect(discovery.json<{ result: Record<string, unknown> }>().result).toMatchObject({
+      resultType: "complete",
+      supportedVersions: ["2026-07-28"],
+      capabilities: { extensions: { "io.modelcontextprotocol/tasks": {} } },
+    });
+
+    const toolsResponse = await frozenRequest("tools/list", {}, 2);
+    const tools = toolsResponse.json<{ result: { tools: Record<string, unknown>[] } }>().result
+      .tools;
+    expect(tools.map((tool) => tool.name)).toEqual([
       "light_get_state",
       "light_set_power",
       "light_set_brightness",
     ]);
-    const state = await client.callTool({
-      name: "light_get_state",
-      arguments: { resourceId: "e2e-light" },
-    });
-    expect(state).toMatchObject({
+    expect(tools.map(taskBehavior)).toEqual(["synchronous_only", "task_required", "task_required"]);
+
+    const stateResponse = await frozenRequest(
+      "tools/call",
+      { name: "light_get_state", arguments: { resourceId: "e2e-light" } },
+      3,
+      "light_get_state",
+    );
+    expect(stateResponse.json<{ result: Record<string, unknown> }>().result).toMatchObject({
+      resultType: "complete",
       isError: false,
       structuredContent: { resourceId: "e2e-light", power: "off" },
+      _meta: {
+        "io.sdar/evidence": {
+          profileVersion: "1.0",
+          items: [
+            expect.objectContaining({
+              evidenceType: "light.state.observation",
+              payloadRef: { kind: "structured_content", jsonPointer: "/power" },
+            }),
+          ],
+        },
+      },
     });
-    const request = {
-      method: "tools/call" as const,
-      params: {
-        name: "light_set_power",
-        arguments: { resourceId: "e2e-light", power: "on" },
-        _meta: { "io.sdar/taskExecution": { idempotencyKey: "ha-light-e2e-power" } },
+
+    fake.applyDelayMs = 300;
+    const taskMeta = {
+      "io.sdar/taskExecution": {
+        profileVersion: "1.0",
+        idempotencyKey: "ha-light-e2e-power",
       },
     };
-    const created = await client.request(request, CreateTaskResultSchema, {
-      task: { ttl: 60_000 },
-    });
-    await waitFor(
-      async () =>
-        (await client.experimental.tasks.getTask(created.task.taskId)).status === "completed",
+    const createResponse = await frozenRequest(
+      "tools/call",
+      { name: "light_set_power", arguments: { resourceId: "e2e-light", power: "on" } },
+      4,
+      "light_set_power",
+      taskMeta,
     );
-    const duplicate = await client.request(request, CreateTaskResultSchema, {
-      task: { ttl: 60_000 },
+    const created = createResponse.json<{ result: Record<string, unknown> }>().result;
+    expect(created).toMatchObject({ resultType: "task", status: "working" });
+    expect(created).not.toHaveProperty("task");
+    const taskId = String(created.taskId);
+
+    const subscription = await openFrozenSubscription(runtimeUrl, taskId, "ha-light-subscription");
+    const acknowledgement = await subscription.next();
+    expect(acknowledgement).toMatchObject({
+      method: "notifications/subscriptions/acknowledged",
+      params: { notifications: { taskIds: [taskId] } },
     });
-    expect(duplicate.task.taskId).toBe(created.task.taskId);
+    const working = await subscription.nextUntil(
+      (message) =>
+        message.method === "notifications/tasks" &&
+        (message.params as Record<string, unknown>).status === "working",
+    );
+    expect(working).toBeDefined();
+    const completedMessage = await subscription.nextUntil(
+      (message) =>
+        message.method === "notifications/tasks" &&
+        (message.params as Record<string, unknown>).status === "completed",
+    );
+    const completedTask = completedMessage.params as Record<string, unknown>;
+    const getResponse = await frozenRequest("tasks/get", { taskId }, 5, taskId);
+    const authoritative = getResponse.json<{ result: Record<string, unknown> }>().result;
+    expect(normalizeNotificationTask(completedTask)).toEqual(normalizeGetTask(authoritative));
+    expect(completedTask).toMatchObject({
+      result: {
+        resultType: "complete",
+        structuredContent: { resourceId: "e2e-light", power: "on", confirmed: true },
+        _meta: {
+          "io.sdar/evidence": {
+            profileVersion: "1.0",
+            items: [
+              expect.objectContaining({
+                evidenceType: "light.state.observation",
+                payloadRef: { kind: "structured_content", jsonPointer: "/power" },
+              }),
+            ],
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(completedTask)).not.toContain("requirementId");
+    await subscription.close();
+
+    const duplicateResponse = await frozenRequest(
+      "tools/call",
+      { name: "light_set_power", arguments: { resourceId: "e2e-light", power: "on" } },
+      6,
+      "light_set_power",
+      taskMeta,
+    );
+    expect(duplicateResponse.json<{ result: Record<string, unknown> }>().result).toMatchObject({
+      taskId,
+    });
     expect(fake.serviceCalls).toHaveLength(1);
     await waitFor(async () => {
       const result = await pool.query<{ count: string }>(
@@ -171,6 +239,151 @@ describe("Home Assistant light Runtime E2E", () => {
     });
   });
 });
+
+function frozenRequest(
+  method: string,
+  params: Record<string, unknown>,
+  id: number,
+  name?: string,
+  extraMeta: Record<string, unknown> = {},
+) {
+  return runtime.app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: frozenHeaders(method, name),
+    payload: {
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: { ...params, _meta: { ...frozenMeta(), ...extraMeta } },
+    },
+  });
+}
+
+function frozenHeaders(method: string, name?: string): Record<string, string> {
+  return {
+    accept: "application/json, text/event-stream",
+    "content-type": "application/json",
+    "mcp-protocol-version": "2026-07-28",
+    "mcp-method": method,
+    ...(name === undefined ? {} : { "mcp-name": name }),
+    "x-sdar-subject": "e2e-user",
+    "x-sdar-tenant": "e2e-tenant",
+  };
+}
+
+function frozenMeta(): Record<string, unknown> {
+  return {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { name: "ha-light-e2e", version: "1.0.0" },
+    "io.modelcontextprotocol/clientCapabilities": {
+      extensions: { "io.modelcontextprotocol/tasks": {} },
+    },
+  };
+}
+
+async function openFrozenSubscription(url: URL, taskId: string, requestId: string) {
+  const controller = new AbortController();
+  const response = await fetch(url, {
+    method: "POST",
+    signal: controller.signal,
+    headers: frozenHeaders("subscriptions/listen"),
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "subscriptions/listen",
+      params: { notifications: { taskIds: [taskId] }, _meta: frozenMeta() },
+    }),
+  });
+  expect(response.status).toBe(200);
+  const reader = response.body?.getReader();
+  if (reader === undefined) throw new Error("SSE_RESPONSE_BODY_MISSING");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const messages: Record<string, unknown>[] = [];
+  const next = async (): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const queued = messages.shift();
+      if (queued !== undefined) return queued;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`SSE_MESSAGE_TIMEOUT:${requestId}`);
+      const read = await withTimeout(reader.read(), remaining);
+      if (read.done) throw new Error(`SSE_STREAM_CLOSED:${requestId}`);
+      const chunk: unknown = read.value;
+      if (!(chunk instanceof Uint8Array)) throw new Error(`SSE_BYTES_INVALID:${requestId}`);
+      buffer += decoder.decode(chunk, { stream: true });
+      for (;;) {
+        const boundary = buffer.indexOf("\n\n");
+        if (boundary < 0) break;
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data: "))
+          .map((line) => line.slice(6))
+          .join("\n");
+        if (data.length === 0) continue;
+        messages.push(JSON.parse(data) as Record<string, unknown>);
+      }
+    }
+  };
+  return {
+    next,
+    async nextUntil(predicate: (message: Record<string, unknown>) => boolean) {
+      for (;;) {
+        const message = await next();
+        if (predicate(message)) return message;
+      }
+    },
+    async close() {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    },
+  };
+}
+
+function normalizeNotificationTask(task: Record<string, unknown>): Record<string, unknown> {
+  const value = structuredClone(task);
+  const meta = value._meta as Record<string, Record<string, unknown>>;
+  delete meta["io.modelcontextprotocol/subscriptionId"];
+  const execution = meta["io.sdar/taskExecution"];
+  if (execution !== undefined) {
+    delete execution.eventId;
+    delete execution.observedAt;
+  }
+  return value;
+}
+
+function normalizeGetTask(task: Record<string, unknown>): Record<string, unknown> {
+  const value = structuredClone(task);
+  delete value.resultType;
+  return value;
+}
+
+function taskBehavior(tool: Record<string, unknown>): unknown {
+  const meta = tool._meta;
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) return undefined;
+  const profile = (meta as Record<string, unknown>)["io.sdar/taskExecution"];
+  if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return undefined;
+  return (profile as Record<string, unknown>).taskBehavior;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("SSE_READ_TIMEOUT")), timeoutMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
 
 async function freePort(): Promise<number> {
   const server = createServer();

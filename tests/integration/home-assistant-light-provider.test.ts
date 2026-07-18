@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { GrpcAdapterGateway } from "../../packages/adapter-protocol/src/index.js";
+import {
+  GrpcAdapterGateway,
+  protoStructToJson,
+} from "../../packages/adapter-protocol/src/index.js";
 import { FakeHomeAssistant } from "../fixtures/fake-home-assistant.js";
 import { HomeAssistantRestClient } from "../../apps/home-assistant-light-provider/src/home-assistant/rest-client.js";
 import { HomeAssistantWebSocketClient } from "../../apps/home-assistant-light-provider/src/home-assistant/websocket-client.js";
@@ -68,6 +71,19 @@ describe("Home Assistant light Provider Adapter", () => {
     expect(fake.serviceCalls).toHaveLength(1);
     const execution = store.get("task-power-1");
     expect(execution?.revision).toBeGreaterThanOrEqual(3);
+    expect(execution?.confirmedState).toMatchObject({ power: "on", reachable: true });
+    const snapshot = await gateway?.getExecution("task-power-1");
+    expect(protoStructToJson(snapshot?.result)).toMatchObject({
+      resourceId: resource.resourceId,
+      power: "on",
+      confirmed: true,
+    });
+    expect(snapshot?.evidence?.[0]?.evidenceType).toBe("light.state.observation");
+    expect(snapshot?.evidence?.[0]?.payloadRef).toMatchObject({
+      kind: "structured_content",
+      jsonPointer: "/power",
+    });
+    expect(JSON.stringify(snapshot?.evidence)).not.toContain("requirementId");
     const reconciled = await gateway?.reconcileExecution(
       "task-power-1",
       "light_set_power",
@@ -97,6 +113,13 @@ describe("Home Assistant light Provider Adapter", () => {
       return store.get("task-brightness")?.state === "SUCCEEDED";
     });
     expect(store.get("task-brightness")?.state).toBe("SUCCEEDED");
+    const snapshot = await gateway?.getExecution("task-brightness");
+    expect(protoStructToJson(snapshot?.result)).toMatchObject({ brightnessPercent: 50 });
+    expect(snapshot?.evidence?.[0]?.evidenceType).toBe("light.brightness.observation");
+    expect(snapshot?.evidence?.[0]?.payloadRef).toMatchObject({
+      kind: "structured_content",
+      jsonPointer: "/brightnessPercent",
+    });
   });
 
   async function startProvider(): Promise<{
