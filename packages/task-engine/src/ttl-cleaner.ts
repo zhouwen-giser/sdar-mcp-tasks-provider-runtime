@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
-import type { TaskRepository } from "../../persistence-postgres/src/index.js";
+import {
+  captureTaskOperationalEvent,
+  insertCommittedTaskEvent,
+  type TaskRepository,
+} from "../../persistence-postgres/src/index.js";
 
 export interface TtlCleanerTickResult {
   renewed: number;
@@ -80,6 +84,8 @@ export class TtlCleaner {
         simulation_id: string | null;
         argument_hash: string;
         authorization_context_hash: string;
+        handle_expires_at: Date | null;
+        purge_after: Date | null;
       }>(
         `WITH due AS (
            SELECT task_id FROM provider_task
@@ -97,42 +103,58 @@ export class TtlCleaner {
          RETURNING task.task_id, task.internal_state, task.substate,
            task.observation_revision, task.adapter_revision, task.external_execution_id,
            task.operation_name, task.execution_mode, task.simulation_id,
-           task.argument_hash, task.authorization_context_hash`,
+           task.argument_hash, task.authorization_context_hash,
+           task.handle_expires_at, task.purge_after`,
         [now, this.#batchSize, this.#purgeGraceMs],
       );
       for (const row of expired.rows) {
-        await client.query(
-          `INSERT INTO outbox_event(event_id,event_key,aggregate_id,event_type,payload)
-           VALUES ($1,$2,$3,'task.expired',$4::jsonb)
-           ON CONFLICT (event_key) DO NOTHING`,
-          [
-            randomUUID(),
-            `${row.task_id}:expired`,
-            row.task_id,
-            JSON.stringify({
-              taskId: row.task_id,
-              previousState: row.internal_state,
-              currentState: "EXPIRED",
-              previousSubstate: row.substate,
-              currentSubstate: "expired",
-              reasonCode: "TTL_EXPIRED",
-              observationRevision: Number(row.observation_revision),
-              adapterRevision: Number(row.adapter_revision),
-              terminal: true,
-              resultClass: "expired",
-              externalExecutionId: row.external_execution_id,
-              operationName: row.operation_name,
-              executionMode: row.execution_mode,
-              simulationId: row.simulation_id,
-              argumentHash: row.argument_hash,
-              authorizationContextHash: row.authorization_context_hash,
-              expiredAt: now.toISOString(),
-            }),
-          ],
+        const eventKey = `${row.task_id}:expired`;
+        await insertCommittedTaskEvent(
+          client,
+          row.task_id,
+          "task.expired",
+          {
+            taskId: row.task_id,
+            previousState: row.internal_state,
+            currentState: "EXPIRED",
+            previousSubstate: row.substate,
+            currentSubstate: "expired",
+            reasonCode: "TTL_EXPIRED",
+            observationRevision: Number(row.observation_revision),
+            adapterRevision: Number(row.adapter_revision),
+            terminal: true,
+            resultClass: "expired",
+            externalExecutionId: row.external_execution_id,
+            operationName: row.operation_name,
+            executionMode: row.execution_mode,
+            simulationId: row.simulation_id,
+            argumentHash: row.argument_hash,
+            authorizationContextHash: row.authorization_context_hash,
+            expiredAt: now.toISOString(),
+          },
+          eventKey,
         );
+        await captureTaskOperationalEvent(client, row.task_id, {
+          recordType: "provider.ttl.lifecycle",
+          eventType: "expire",
+          eventIdentity: eventKey,
+          occurredAt: now,
+          payload: {
+            event: "expire",
+            taskId: row.task_id,
+            previousExpiry: row.handle_expires_at?.toISOString() ?? null,
+            newExpiry: null,
+            purgeAfter: row.purge_after?.toISOString() ?? null,
+            blockedReason: null,
+          },
+        });
       }
-      const purgeDue = await client.query<{ task_id: string }>(
-        `SELECT task_id
+      const purgeDue = await client.query<{
+        task_id: string;
+        handle_expires_at: Date | null;
+        purge_after: Date | null;
+      }>(
+        `SELECT task_id,handle_expires_at,purge_after
          FROM provider_task
          WHERE internal_state LIKE 'TERMINAL_%'
            AND expired_at IS NOT NULL
@@ -163,9 +185,37 @@ export class TtlCleaner {
         const lockOwner = await this.#acquireRecoveryLease(client, row.task_id);
         if (lockOwner === null) {
           blocked += 1;
+          await captureTaskOperationalEvent(client, row.task_id, {
+            recordType: "provider.ttl.lifecycle",
+            eventType: "blocked",
+            eventIdentity: `${row.task_id}:ttl-blocked:${row.purge_after?.toISOString() ?? now.toISOString()}`,
+            occurredAt: now,
+            payload: {
+              event: "blocked",
+              taskId: row.task_id,
+              previousExpiry: row.handle_expires_at?.toISOString() ?? null,
+              newExpiry: null,
+              purgeAfter: row.purge_after?.toISOString() ?? null,
+              blockedReason: "RECOVERY_LEASE_HELD",
+            },
+          });
           continue;
         }
         try {
+          await captureTaskOperationalEvent(client, row.task_id, {
+            recordType: "provider.ttl.lifecycle",
+            eventType: "purge",
+            eventIdentity: `${row.task_id}:ttl-purge:${row.purge_after?.toISOString() ?? now.toISOString()}`,
+            occurredAt: now,
+            payload: {
+              event: "purge",
+              taskId: row.task_id,
+              previousExpiry: row.handle_expires_at?.toISOString() ?? null,
+              newExpiry: null,
+              purgeAfter: row.purge_after?.toISOString() ?? null,
+              blockedReason: null,
+            },
+          });
           await client.query("DELETE FROM task_input_request WHERE task_id=$1", [row.task_id]);
           await client.query("DELETE FROM idempotency_record WHERE task_id=$1", [row.task_id]);
           await client.query("DELETE FROM task_command WHERE task_id=$1", [row.task_id]);

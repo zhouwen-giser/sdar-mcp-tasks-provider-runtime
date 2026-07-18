@@ -72,7 +72,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await pool.query(`TRUNCATE TABLE
-    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
     task_observation, provider_task, admission_intent
     RESTART IDENTITY CASCADE`);
 });
@@ -84,7 +84,7 @@ afterAll(async () => {
 });
 
 describe("Runtime startup and fault recovery", () => {
-  it("recovers an immediate StartOperation response loss during startup scan", async () => {
+  it("recovery_event_uses_envelope", async () => {
     await expect(
       engine.callOperation(
         requiredOperation("durable_task"),
@@ -105,6 +105,15 @@ describe("Runtime startup and fault recovery", () => {
     expect(recovered.rows[0]?.recovery_attempts).toBeGreaterThanOrEqual(1);
     expect(await engine.getTask(String(recovered.rows[0]?.task_id), authorization)).toMatchObject({
       status: "completed",
+    });
+    const events = await pool.query<{ record_type: string; payload: Record<string, unknown> }>(
+      `SELECT record_type,record_body->'payload' AS payload FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.recovery.lifecycle'`,
+      [String(recovered.rows[0]?.task_id)],
+    );
+    expect(events.rows[0]).toMatchObject({
+      record_type: "provider.recovery.lifecycle",
+      payload: { event: "reconcile", outcome: "success" },
     });
   });
 

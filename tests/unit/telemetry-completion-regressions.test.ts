@@ -66,6 +66,36 @@ describe("v1.1 telemetry completion regression guards", () => {
     expect(runtime).not.toContain('telemetry?.event("provider.ttl_event"');
   });
 
+  it("aggregate_worker_count_is_metric_only", () => {
+    const runtime = root("apps/runtime/src/runtime.ts");
+    expect(runtime).not.toContain('telemetry?.event("provider.scheduler_decision"');
+    expect(runtime).not.toContain('telemetry?.event("provider.recovery_event"');
+    expect(runtime).not.toContain('telemetry?.event("provider.ttl_event"');
+    expect(runtime).toContain('telemetry?.metric("provider_scheduler_total"');
+    expect(runtime).toContain('telemetry?.metric("provider_recovery_total"');
+  });
+
+  it("operational_event_has_stable_record_id", () => {
+    const input = {
+      recordType: "provider.scheduler.decision",
+      eventCategory: "scheduler.decision",
+      deliveryClass: "operational",
+      providerId: "provider",
+      runtimeVersion: "1.1.0",
+      taskId: "task-operational",
+      stableAggregateIdentity: "task-operational",
+      eventIdentity: "task-operational:start:1",
+      occurredAt: "2026-07-18T00:00:00.000Z",
+      eventType: "started",
+      attributes: {},
+      payload: { decision: "started" },
+    } as const;
+    const first = createProviderOpsEnvelope({ ...input, instanceId: "replica-a" });
+    const replay = createProviderOpsEnvelope({ ...input, instanceId: "replica-b" });
+    expect(first.recordId).toBe(replay.recordId);
+    expect(first.recordHash).toBe(replay.recordHash);
+  });
+
   it("redacts credential text and handles circular arrays without recursion failure", () => {
     const sanitizer = new TelemetrySanitizer();
     const circular: unknown[] = [];

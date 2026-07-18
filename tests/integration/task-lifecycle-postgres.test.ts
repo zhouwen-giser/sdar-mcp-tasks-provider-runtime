@@ -561,7 +561,7 @@ describe("durable task lifecycle", () => {
     }
   });
 
-  it("T-013 starts scheduled work no earlier than notBefore and only once across workers", async () => {
+  it("scheduler_decision_uses_envelope", async () => {
     const clock = new FakeClock(new Date("2026-07-16T12:00:00Z"));
     const scheduledEngine = new TaskEngine(
       engine.manifest,
@@ -627,6 +627,15 @@ describe("durable task lifecycle", () => {
     ]);
     const task = await scheduledEngine.getTask(String(created.task.taskId), authorization);
     expect(task.status).toBe("completed");
+    const decisions = await pool.query<{ event_type: string }>(
+      `SELECT record_body->>'eventType' AS event_type FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.scheduler.decision'
+       ORDER BY created_at`,
+      [String(created.task.taskId)],
+    );
+    expect(decisions.rows.map((row) => row.event_type)).toEqual(
+      expect.arrayContaining(["claimed", "started"]),
+    );
   });
 
   it("T-013 reconciles a response-lost scheduled start without a duplicate side effect", async () => {
@@ -3762,7 +3771,7 @@ describe("durable task lifecycle", () => {
     ).toBe(defaultRetained.ttlMs);
   });
 
-  it("T-026 lets concurrent TTL cleaners expire and purge each Task exactly once", async () => {
+  it("ttl_expire_uses_envelope and ttl_purge_uses_envelope", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "rc2-ttl-concurrency" },
@@ -3810,6 +3819,17 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(expiryEvents.rows[0]?.count).toBe("1");
+    const expireEnvelope = await pool.query<{ payload: Record<string, unknown> }>(
+      `SELECT record_body->'payload' AS payload FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.ttl.lifecycle'
+         AND record_body->>'eventType'='expire'`,
+      [taskId],
+    );
+    expect(expireEnvelope.rows[0]?.payload).toMatchObject({
+      event: "expire",
+      taskId,
+      blockedReason: null,
+    });
     await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
       taskId,
     ]);
@@ -3834,6 +3854,13 @@ describe("durable task lifecycle", () => {
     ]);
     expect(purged.reduce((sum, result) => sum + result.purged, 0)).toBe(1);
     expect(ttlEvents).toContainEqual(["purge", 1]);
+    const purgeEnvelope = await pool.query<{ payload: Record<string, unknown> }>(
+      `SELECT record_body->'payload' AS payload FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.ttl.lifecycle'
+         AND record_body->>'eventType'='purge'`,
+      [taskId],
+    );
+    expect(purgeEnvelope.rows[0]?.payload).toMatchObject({ event: "purge", taskId });
     const residue = await pool.query<{ count: string }>(
       `SELECT (
          (SELECT count(*) FROM provider_task WHERE task_id=$1) +

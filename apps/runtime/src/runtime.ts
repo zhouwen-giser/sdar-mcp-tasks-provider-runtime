@@ -380,7 +380,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           concurrency: config.SCHEDULER_CONCURRENCY,
           leaseMilliseconds: config.SCHEDULE_CLAIM_LEASE_MS,
           onEvent: (decision, amount) =>
-            telemetry?.event("provider.scheduler_decision", { decision, amount }),
+            telemetry?.metric("provider_scheduler_total", amount, { decision }),
         },
       );
       const commandDispatcher = new DurableCommandDispatcher(
@@ -409,7 +409,6 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         recoveryLeaseMs: config.RECOVERY_LEASE_MS,
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
-        onEvent: (event, amount) => telemetry?.event("provider.ttl_event", { event, amount }),
       });
       const downstreamOutboxSink =
         config.OUTBOX_SINK === "webhook"
@@ -453,7 +452,6 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           );
         },
         (event, amount) => {
-          telemetry?.event("provider.recovery_event", { event, amount });
           telemetry?.metric("provider_recovery_total", amount, { event });
         },
       );

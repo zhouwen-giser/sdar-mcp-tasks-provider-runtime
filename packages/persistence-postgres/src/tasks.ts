@@ -266,6 +266,75 @@ interface TaskRow {
   last_reconciled_at: Date | null;
 }
 
+export interface TaskOperationalEventInput {
+  recordType:
+    "provider.scheduler.decision" | "provider.recovery.lifecycle" | "provider.ttl.lifecycle";
+  eventType: string;
+  eventIdentity: string;
+  occurredAt: Date;
+  payload: Record<string, string | number | boolean | null>;
+}
+
+export async function captureTaskOperationalEvent(
+  client: PoolClient,
+  taskId: string,
+  input: TaskOperationalEventInput,
+): Promise<void> {
+  const result = await client.query<TaskRow>("SELECT * FROM provider_task WHERE task_id=$1", [
+    taskId,
+  ]);
+  const task = result.rows[0];
+  if (task === undefined) throw new Error("TASK_NOT_FOUND");
+  const aggregateType = input.recordType.startsWith("provider.scheduler")
+    ? "scheduler"
+    : input.recordType.startsWith("provider.recovery")
+      ? "recovery"
+      : "ttl";
+  const eventKey = `${input.eventIdentity}:${input.recordType}`;
+  const envelope = createProviderOpsEnvelope({
+    recordType: input.recordType,
+    eventCategory: input.recordType.replace("provider.", ""),
+    deliveryClass: "operational",
+    providerId: task.provider_id,
+    runtimeVersion: "1.1.0",
+    instanceId: "",
+    taskId,
+    resourceId: taskId,
+    resourceType: "task",
+    ...(task.external_execution_id === null
+      ? {}
+      : { externalExecutionId: task.external_execution_id }),
+    operationName: task.operation_name,
+    executionMode: task.execution_mode,
+    ...(task.simulation_id === null ? {} : { simulationId: task.simulation_id }),
+    argumentHash: task.argument_hash,
+    authorizationContextHash: task.authorization_context_hash,
+    adapterRevision: task.adapter_revision,
+    eventType: input.eventType,
+    stableAggregateIdentity: taskId,
+    eventIdentity: input.eventIdentity,
+    occurredAt: input.occurredAt,
+    attributes: { source: "committed_postgres", eventType: input.eventType },
+    payload: input.payload,
+  });
+  await captureProviderOpsDelivery(client, {
+    envelope,
+    eventKey,
+    aggregateType,
+    aggregateId: taskId,
+  });
+}
+
+export async function insertCommittedTaskEvent(
+  client: PoolClient,
+  taskId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+  eventKey: string,
+): Promise<void> {
+  await insertOutbox(client, taskId, eventType, payload, eventKey);
+}
+
 export class TaskRepository {
   constructor(readonly pool: Pool) {}
 
@@ -977,8 +1046,15 @@ export class TaskRepository {
   }
 
   async noteRecoveryFailure(taskId: string, failedAt = new Date()): Promise<void> {
-    const result = await this.pool.query<{ recovery_failure_count: number }>(
-      `UPDATE provider_task
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        recovery_failure_count: number;
+        recovery_attempts: number;
+        next_recovery_at: Date;
+      }>(
+        `UPDATE provider_task
        SET recovery_failure_count=recovery_failure_count+1,
            next_recovery_at=$2 + (
              LEAST(300000, 1000 * power(2, LEAST(recovery_failure_count, 8))) +
@@ -986,10 +1062,33 @@ export class TaskRepository {
            ) * interval '1 millisecond',
            updated_at=clock_timestamp()
        WHERE task_id=$1 AND internal_state NOT LIKE 'TERMINAL_%'
-       RETURNING recovery_failure_count`,
-      [taskId, failedAt],
-    );
-    if (result.rowCount === 0) return;
+       RETURNING recovery_failure_count,recovery_attempts,next_recovery_at`,
+        [taskId, failedAt],
+      );
+      const row = result.rows[0];
+      if (row !== undefined) {
+        await captureTaskOperationalEvent(client, taskId, {
+          recordType: "provider.recovery.lifecycle",
+          eventType: "reconcile_failed",
+          eventIdentity: `${taskId}:recovery-failed:${String(row.recovery_failure_count)}`,
+          occurredAt: failedAt,
+          payload: {
+            event: "reconcile",
+            taskId,
+            recoveryAttempt: row.recovery_attempts,
+            outcome: "deferred",
+            reasonCode: "RECOVERY_DEFERRED",
+            nextRecoveryAt: row.next_recovery_at.toISOString(),
+          },
+        });
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async recordIdentityConflict(taskId: string, detail: string): Promise<void> {
@@ -3163,7 +3262,55 @@ async function transitionTask(
     request.eventKey,
     occurredAt,
   );
+  const schedulerDecision = schedulerDecisionFor(request.outboxType);
+  if (schedulerDecision !== null) {
+    await captureTaskOperationalEvent(client, request.taskId, {
+      recordType: "provider.scheduler.decision",
+      eventType: schedulerDecision,
+      eventIdentity: request.eventKey,
+      occurredAt,
+      payload: {
+        decision: schedulerDecision,
+        taskId: request.taskId,
+        operationName: row.operation_name,
+        invocationAttempt: row.invocation_attempt,
+        scheduledAt: row.not_before?.toISOString() ?? null,
+        latestStartAt: row.latest_start_at?.toISOString() ?? null,
+        reasonCode: request.observation.reasonCode ?? null,
+      },
+    });
+  }
+  if (request.outboxType === "task.recovery") {
+    await captureTaskOperationalEvent(client, request.taskId, {
+      recordType: "provider.recovery.lifecycle",
+      eventType: "reconcile_success",
+      eventIdentity: request.eventKey,
+      occurredAt,
+      payload: {
+        event: "reconcile",
+        taskId: request.taskId,
+        recoveryAttempt: row.recovery_attempts,
+        outcome: "success",
+        reasonCode: request.observation.reasonCode ?? null,
+        nextRecoveryAt: row.next_recovery_at.toISOString(),
+      },
+    });
+  }
   return { row, applied: true };
+}
+
+function schedulerDecisionFor(eventType: string): string | null {
+  const decisions: Record<string, string> = {
+    "task.start_attempt": "claimed",
+    "task.start_retry": "retry",
+    "task.start_uncertain": "retry",
+    "task.start_window_violation": "start_window_missed",
+    "task.start_window_missed": "start_window_missed",
+    "task.start_window_stop_requested": "start_window_missed",
+    "task.started": "started",
+    "task.deadline_stop_requested": "deadline",
+  };
+  return decisions[eventType] ?? null;
 }
 
 async function persistStartWindowStop(
