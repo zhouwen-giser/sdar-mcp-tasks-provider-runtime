@@ -43,6 +43,17 @@ are atomically persisted for restart recovery. Duplicate `taskId` does not repea
 Resource state, current/target temperature metrics, resource health, and Task progress are sent
 through Runtime `ProviderTelemetryIngress`. Delivery failure does not change control outcomes.
 
+## Frozen MCP Tasks V1
+
+All Runtime calls use MCP Stateless `2026-07-28` Request Meta and routing headers. State reads are
+`synchronous_only`; power, HVAC-mode, and target-temperature controls are `task_required` and
+return flat Task results. Provider E2E proves Ack-first subscriptions, working and completed
+notifications, and equality with `tasks/get` at the same Runtime Revision.
+
+Completion persists the actual Home Assistant observation and derives both structured output and
+type-only Evidence from that fact. Evidence points to `/power`, `/hvacMode`, or
+`/targetTemperature` as applicable and never contains `requirementId`.
+
 ## Docker
 
 Copy the example deployment config, create the token secret, and run:

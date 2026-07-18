@@ -1,10 +1,10 @@
 # Home Assistant Climate Provider Final Delivery Report
 
-Date: 2026-07-18
+Date: 2026-07-19
 
 Branch: `feature/home-assistant-climate-provider`
 
-Base: `origin/main` at `d16cc55f3459148c86959db13427c26e45ace95f`
+Base: protected Runtime merge `798656827ea747fb824df2975f8e66135e80fcc2`
 
 ## Delivered
 
@@ -18,6 +18,8 @@ Base: `origin/main` at `d16cc55f3459148c86959db13427c26e45ace95f`
   allowlisting, capability checks, and temperature-range checks.
 - Fake Home Assistant fixtures, unit/integration/recovery/security coverage, Runtime/PostgreSQL E2E,
   image integration, Compose example, operator documentation, and an execution plan.
+- Frozen request metadata/headers, flat Task results, Ack-first notifications, same-Revision
+  `tasks/get` equality, and actual-state type-only Evidence.
 
 ## Verification
 
@@ -26,6 +28,8 @@ Base: `origin/main` at `d16cc55f3459148c86959db13427c26e45ace95f`
 | TypeScript and ESLint                           | PASS                                                                    |
 | Climate-focused suite (4 files, 7 tests)        | PASS                                                                    |
 | Runtime/PostgreSQL climate E2E (1 file, 1 test) | PASS                                                                    |
+| `pnpm test:ha-climate:protocol-v1`              | PASS, 5 files / 8 tests                                                 |
+| `pnpm protocol:ha-climate:check`                | PASS, 8/8 SHA-locked Provider cases                                     |
 | `pnpm verify:v1.1`                              | PASS (exit 0, 343.1 seconds)                                            |
 | Dependency audit                                | PASS, no known vulnerabilities                                          |
 | Production SBOM                                 | PASS, 221 components                                                    |
@@ -39,10 +43,12 @@ and image reports are committed with this delivery.
 ## Verification boundary
 
 Home Assistant behavior was verified against the in-repository Fake Home Assistant and a real local
-PostgreSQL-backed Runtime path. No physical air conditioner or independently managed Home Assistant
-installation was used, so vendor-specific device behavior and a real deployment remain unverified.
+PostgreSQL-backed frozen Runtime HTTP/SSE path. No physical air conditioner or independently
+managed Home Assistant installation was used, so vendor-specific device behavior and a real
+deployment remain unverified. The maximum claim is **Home Assistant Climate Provider Component
+Conformant**; this report does not claim `real-resource qualified` or `Interop Certified`.
 
 ## Publication
 
-The work is committed locally on the feature branch. No remote push or pull request was performed as
-part of this delivery.
+The branch is intentionally separate from the light Provider branch. It must be pushed and opened
+as its own Draft PR, then pass protected checks before publication is complete.

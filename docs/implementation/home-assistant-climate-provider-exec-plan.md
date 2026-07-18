@@ -1,8 +1,8 @@
 # Home Assistant Climate Provider ExecPlan
 
-Status: complete
+Status: frozen protocol migration complete; publication pending
 
-Base: `origin/main` at `d16cc55f3459148c86959db13427c26e45ace95f`
+Base: `origin/main` merged at `798656827ea747fb824df2975f8e66135e80fcc2`
 
 Target: `feature/home-assistant-climate-provider`
 
@@ -37,14 +37,18 @@ vendor protocols, pause/resume, and cancellation after dispatch are out of scope
 | C2      | durable execution, confirmation and recovery        | integration/recovery tests | complete |
 | C3      | durable Provider telemetry and security             | telemetry/security tests   | complete |
 | C4      | Fake HA, Runtime E2E, image, Compose and docs       | E2E/deployment checks      | complete |
+| C5      | frozen Wire, type-only Evidence, notification E2E   | Provider V1 report 8/8     | complete |
 | Release | full repository verification and phased commits     | `pnpm verify:v1.1`         | complete |
 
 ## Verification ledger
 
-| Date       | Command                                     | Result |
-| ---------- | ------------------------------------------- | ------ |
-| 2026-07-18 | repository and protocol baseline inspection | PASS   |
-| 2026-07-18 | TypeScript and ESLint                       | PASS   |
-| 2026-07-18 | focused suite (4 files, 7 tests)            | PASS   |
-| 2026-07-18 | Runtime/PostgreSQL climate E2E              | PASS   |
-| 2026-07-18 | `pnpm verify:v1.1` (343.1 seconds)          | PASS   |
+| Date       | Command                                      | Result |
+| ---------- | -------------------------------------------- | ------ |
+| 2026-07-18 | repository and protocol baseline inspection  | PASS   |
+| 2026-07-18 | TypeScript and ESLint                        | PASS   |
+| 2026-07-18 | focused suite (4 files, 7 tests)             | PASS   |
+| 2026-07-18 | Runtime/PostgreSQL climate E2E               | PASS   |
+| 2026-07-18 | `pnpm verify:v1.1` (343.1 seconds)           | PASS   |
+| 2026-07-19 | merge protected Runtime main                 | PASS   |
+| 2026-07-19 | `pnpm test:ha-climate:protocol-v1` (8 tests) | PASS   |
+| 2026-07-19 | `pnpm protocol:ha-climate:check` (8/8)       | PASS   |
