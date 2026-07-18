@@ -51,6 +51,7 @@ export interface LightExecution {
   createdAt: string;
   updatedAt: string;
   confirmationDeadlineAt: string;
+  confirmedState?: NormalizedLightState;
   lastSnapshot: Record<string, unknown>;
   commandAcks: Record<string, Record<string, unknown>>;
 }

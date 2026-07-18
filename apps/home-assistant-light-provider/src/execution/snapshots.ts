@@ -2,6 +2,7 @@ import { jsonToProtoStruct } from "../../../../packages/adapter-protocol/src/ind
 import type { LightExecution } from "../types.js";
 
 export function executionSnapshot(execution: LightExecution): Record<string, unknown> {
+  const completedResult = execution.state === "SUCCEEDED" ? result(execution) : undefined;
   return {
     taskId: execution.taskId,
     externalExecutionId: execution.externalExecutionId,
@@ -13,7 +14,12 @@ export function executionSnapshot(execution: LightExecution): Record<string, unk
     reasonCode: reasonCode(execution.state),
     message: message(execution.state),
     ...(execution.state === "CONFIRMING" ? { progress: progress(execution) } : {}),
-    ...(execution.state === "SUCCEEDED" ? { result: jsonToProtoStruct(result(execution)) } : {}),
+    ...(completedResult === undefined
+      ? {}
+      : {
+          result: jsonToProtoStruct(completedResult),
+          evidence: [completionEvidence(execution)],
+        }),
     retryable: execution.state === "TECHNICAL_FAILED",
     observedAt: timestamp(new Date(execution.updatedAt)),
   };
@@ -53,19 +59,38 @@ function message(state: LightExecution["state"]): string {
   return "Desired light state was not confirmed before the deadline.";
 }
 function result(execution: LightExecution): Record<string, unknown> {
+  const confirmed = execution.confirmedState;
+  if (confirmed === undefined) throw new Error("CONFIRMED_LIGHT_STATE_MISSING");
   if (execution.desiredState.type === "power")
     return {
       resourceId: execution.resourceId,
-      power: execution.desiredState.power,
+      power: confirmed.power,
       confirmed: true,
-      observedAt: execution.updatedAt,
+      observedAt: confirmed.observedAt,
     };
   return {
     resourceId: execution.resourceId,
-    power: "on",
-    brightnessPercent: execution.desiredState.brightnessPercent,
+    power: confirmed.power,
+    brightnessPercent: confirmed.brightnessPercent,
     confirmed: true,
-    observedAt: execution.updatedAt,
+    observedAt: confirmed.observedAt,
+  };
+}
+
+function completionEvidence(execution: LightExecution): Record<string, unknown> {
+  const confirmed = execution.confirmedState;
+  if (confirmed === undefined) throw new Error("CONFIRMED_LIGHT_STATE_MISSING");
+  const brightness = execution.desiredState.type === "brightness";
+  return {
+    evidenceId: `home-assistant-light-${execution.taskId}-${String(execution.revision)}`,
+    evidenceType: brightness ? "light.brightness.observation" : "light.state.observation",
+    observedAt: confirmed.observedAt,
+    subjectRef: `resource:${execution.resourceId}`,
+    payloadRef: {
+      kind: "structured_content",
+      jsonPointer: brightness ? "/brightnessPercent" : "/power",
+    },
+    producer: ["home-assistant"],
   };
 }
 function progress(execution: LightExecution): Record<string, unknown> {

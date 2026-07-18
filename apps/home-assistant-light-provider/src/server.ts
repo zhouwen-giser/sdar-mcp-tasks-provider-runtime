@@ -211,6 +211,16 @@ export class HomeAssistantLightProviderServer {
           reasonCode: "HOME_ASSISTANT_STATE_READ",
           message: "Light state read.",
           result: jsonToProtoStruct(publicLightState(normalized)),
+          evidence: [
+            {
+              evidenceId: `home-assistant-light-state-${resourceId}-${normalized.observedAt}`,
+              evidenceType: "light.state.observation",
+              observedAt: normalized.observedAt,
+              subjectRef: `resource:${resourceId}`,
+              payloadRef: { kind: "structured_content", jsonPointer: "/power" },
+              producer: [this.options.providerId, "home-assistant"],
+            },
+          ],
           observedAt: timestamp(new Date(normalized.observedAt)),
         };
         return { accepted: { externalExecutionId, initialSnapshot: snapshot }, result: "accepted" };

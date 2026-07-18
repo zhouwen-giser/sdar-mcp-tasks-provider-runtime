@@ -106,7 +106,7 @@ export class LightExecutionEngine {
         execution.state === "CONFIRMING" &&
         confirmed(execution, state)
       ) {
-        const succeeded = advanceExecution(execution, "SUCCEEDED");
+        const succeeded = advanceExecution({ ...execution, confirmedState: state }, "SUCCEEDED");
         this.store.set(succeeded);
         await this.telemetry.executionProgress(succeeded, state);
       }
