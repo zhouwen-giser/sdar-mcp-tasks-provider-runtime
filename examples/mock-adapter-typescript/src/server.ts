@@ -697,6 +697,20 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           message: "Reference task completed.",
           result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
         };
+        if (result.scenario === "evidence_success") {
+          Object.assign(terminalSnapshot, {
+            evidence: [
+              {
+                evidenceId: `evidence-${taskId}`,
+                evidenceType: "resource.completion",
+                observedAt: now.toISOString(),
+                subjectRef: `resource:${String(result.resourceId)}`,
+                payloadRef: { kind: "structured_content", jsonPointer: "/resourceId" },
+                producer: [providerId],
+              },
+            ],
+          });
+        }
         if (result.scenario === "output_invalid") {
           terminalSnapshot.result = jsonToProtoStruct({ resourceId: 42, completed: "yes" });
         } else if (result.scenario === "partial_valid") {

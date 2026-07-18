@@ -80,3 +80,8 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   Runtime still commits an audit event and a new Runtime revision.
 - Runtime `/mcp` remains on the Legacy handler until frozen `tools/call` and mandatory Task
   notifications are implemented; partial capability publication is not enabled.
+- Adapter `ExecutionSnapshot.evidence` is additive field 16. Runtime validates the frozen item,
+  Pointer, zoned timestamp, URI scheme, size, depth and cardinality bounds, then maps objective
+  facts to `CallToolResult._meta["io.sdar/evidence"]`. The Proto and mapper contain no
+  `requirementId`; synchronous, completed, business-failure and partial-completion results use the
+  same result-contract path.

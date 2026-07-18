@@ -276,6 +276,36 @@ describe("durable task lifecycle", () => {
     ).toHaveProperty("rowCount", 0);
   });
 
+  it("maps Adapter Evidence into completed frozen CallToolResult without requirementId", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "evidence-resource", scenario: "evidence_success" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected Evidence Task");
+    const taskId = String(created.task.taskId);
+    await engine.getTask(taskId, authorization);
+    const frozen = await engine.getFrozenTask(taskId, authorization);
+    expect(frozen).toMatchObject({
+      status: "completed",
+      result: {
+        resultType: "complete",
+        _meta: {
+          "io.sdar/evidence": {
+            profileVersion: "1.0",
+            items: [
+              {
+                evidenceType: "resource.completion",
+                payloadRef: { kind: "structured_content", jsonPointer: "/resourceId" },
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(frozen)).not.toContain("requirementId");
+  });
+
   it("returns an inline result for terminal task-capable admission", async () => {
     const before = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
     const result = await engine.callOperation(

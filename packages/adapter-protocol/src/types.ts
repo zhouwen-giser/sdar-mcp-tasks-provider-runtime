@@ -53,9 +53,25 @@ export interface ExecutionSnapshot {
   result?: unknown;
   inputRequests?: AdapterInputRequest[];
   mcpInputRequests?: McpTaskInputRequest[];
+  evidence?: AdapterEvidenceItem[];
   operationName: string;
   argumentHash: string;
   executionContext?: AdapterExecutionContext;
+}
+
+export interface AdapterEvidenceItem {
+  evidenceId: string;
+  evidenceType: string;
+  observedAt: string;
+  subjectRef?: string;
+  payloadRef?: {
+    kind: string;
+    jsonPointer?: string;
+    uri?: string;
+    mediaType?: string;
+    sha256?: string;
+  };
+  producer?: string[];
 }
 
 export interface AdapterExecutionContext {

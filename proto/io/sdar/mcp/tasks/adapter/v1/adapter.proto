@@ -259,6 +259,23 @@ message McpTaskInputResponse {
   google.protobuf.Struct result = 2;
 }
 
+message EvidencePayloadRef {
+  string kind = 1;
+  optional string json_pointer = 2;
+  optional string uri = 3;
+  optional string media_type = 4;
+  optional string sha256 = 5;
+}
+
+message EvidenceItem {
+  string evidence_id = 1;
+  string evidence_type = 2;
+  string observed_at = 3;
+  optional string subject_ref = 4;
+  EvidencePayloadRef payload_ref = 5;
+  repeated string producer = 6;
+}
+
 message ExecutionSnapshot {
   string task_id = 1;
   string external_execution_id = 2;
@@ -275,6 +292,7 @@ message ExecutionSnapshot {
   string operation_name = 13;
   string argument_hash = 14;
   ExecutionContext execution_context = 15;
+  repeated EvidenceItem evidence = 16;
   repeated McpTaskInputRequest mcp_input_requests = 17;
 }
 
