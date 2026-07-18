@@ -24,6 +24,10 @@ describe("Provider telemetry failure isolation", () => {
         },
         enabled: true,
         spanExporter: spans,
+        metricReader: new PeriodicExportingMetricReader({
+          exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE),
+          exportIntervalMillis: 60_000,
+        }),
       });
       telemetry.start();
       const failure = new Error("classified database url and token=classified");

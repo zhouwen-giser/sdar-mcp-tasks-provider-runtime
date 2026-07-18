@@ -1,6 +1,6 @@
 {
   "version": "1.1.0",
-  "generatedAt": "2026-07-17T17:59:15.934Z",
+  "generatedAt": "2026-07-18T04:00:56.734Z",
   "environment": {
     "node": "v22.14.0",
     "platform": "win32/x64",
@@ -12,33 +12,33 @@
   "workloads": {
     "synchronousTool": {
       "iterations": 100,
-      "durationMs": 1242.9417000000012,
-      "throughputPerSecond": 80.45429644849787,
+      "durationMs": 1128.3197,
+      "throughputPerSecond": 88.62736332619204,
       "latencyMs": {
-        "p50": 12.217899999999645,
-        "p95": 15.861700000001292,
-        "p99": 16.872200000001612,
-        "max": 22.290500000002794
+        "p50": 10.544400000002497,
+        "p95": 14.800999999999476,
+        "p99": 25.0666999999994,
+        "max": 25.10610000000088
       }
     },
     "concurrentTaskAdmission": {
       "tasks": 1000,
       "runtimeReplicas": 2,
-      "durationMs": 30164.211000000003,
-      "tasksPerSecond": 33.151869942827275
+      "durationMs": 28366.6729,
+      "tasksPerSecond": 35.252636201829645
     },
     "slowAdapterDatabaseAvailability": {
       "adapterResponseDelayMs": 15000,
-      "databaseQueryDurationMs": 1.118900000000167,
+      "databaseQueryDurationMs": 0.8801999999998316,
       "databaseQueryCompletedBeforeAdapterResponse": true,
-      "taskId": "3c0e9056-9dc4-4e17-b7d6-c9d7de5bce74"
+      "taskId": "c3d94e94-bd8e-4d54-8ce5-3878a72316b7"
     },
     "durableCommandDispatcher": {
       "commands": 500,
       "runtimeReplicas": 2,
       "duplicateAdapterSideEffects": 0,
-      "durationMs": 27519.0538,
-      "commandsPerSecond": 18.16922935046553,
+      "durationMs": 29544.5988,
+      "commandsPerSecond": 16.923567092066925,
       "result": {
         "claimed": 484,
         "acknowledged": 484,
@@ -51,7 +51,7 @@
     },
     "scheduledScan": {
       "futureTasks": 32,
-      "durationMs": 6.299299999998766,
+      "durationMs": 7.061600000000908,
       "result": {
         "started": 0,
         "missed": 0,
@@ -63,7 +63,7 @@
     },
     "watchdogScan": {
       "overdueTasks": 16,
-      "durationMs": 565.0105999999942,
+      "durationMs": 513.8399999999965,
       "result": {
         "watchdogStops": 16,
         "reconciled": 0,
@@ -74,20 +74,20 @@
       "100": {
         "requested": 100,
         "returned": 100,
-        "durationMs": 4.248500000001513,
-        "candidatesPerSecond": 23537.71919500162
+        "durationMs": 5.537400000001071,
+        "candidatesPerSecond": 18059.016867118262
       },
       "500": {
         "requested": 500,
         "returned": 500,
-        "durationMs": 10.762000000002445,
-        "candidatesPerSecond": 46459.7658427696
+        "durationMs": 10.514300000009825,
+        "candidatesPerSecond": 47554.28321424467
       },
       "1000": {
         "requested": 1000,
         "returned": 1000,
-        "durationMs": 28.321899999995367,
-        "candidatesPerSecond": 35308.36561107
+        "durationMs": 18.90129999999772,
+        "candidatesPerSecond": 52906.41384455676
       }
     },
     "observationOutboxGrowth": {
@@ -109,20 +109,20 @@
           "bytes": 32768
         },
         "after": {
-          "rows": 2581,
-          "bytes": 4202496
+          "rows": 3597,
+          "bytes": 9256960
         },
-        "rows": 2581,
-        "bytes": 4169728
+        "rows": 3597,
+        "bytes": 9224192
       }
     },
     "runtimeImage": {
       "schemaVersion": 1,
-      "measuredAt": "2026-07-17T17:56:08.740Z",
+      "measuredAt": "2026-07-18T03:57:41.868Z",
       "measurementEnvironment": "win32/x64 Docker Engine",
       "image": "sdar-runtime:v1.1-audit-primary",
       "base": "node:22-bookworm-slim",
-      "sizeBytes": 99772087,
+      "sizeBytes": 99810460,
       "maximumBytes": 350000000,
       "user": "node",
       "layers": 11,

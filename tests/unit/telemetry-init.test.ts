@@ -1,4 +1,9 @@
 import { InMemoryLogRecordExporter } from "@opentelemetry/sdk-logs";
+import {
+  AggregationTemporality,
+  InMemoryMetricExporter,
+  PeriodicExportingMetricReader,
+} from "@opentelemetry/sdk-metrics";
 import { InMemorySpanExporter } from "@opentelemetry/sdk-trace-node";
 import { describe, expect, it } from "vitest";
 import {
@@ -23,6 +28,7 @@ describe("ProviderTelemetry initialization", () => {
       enabled: true,
       spanExporter: spans,
       eventExporter: events,
+      metricReader: inMemoryMetricReader(),
       batch: { scheduledDelayMillis: 60_000 },
     });
 
@@ -51,7 +57,12 @@ describe("ProviderTelemetry initialization", () => {
 
   it("confirms audit export before resolving", async () => {
     const audit = new RetainingLogExporter();
-    const telemetry = new ProviderTelemetry({ resource, enabled: true, auditExporter: audit });
+    const telemetry = new ProviderTelemetry({
+      resource,
+      enabled: true,
+      auditExporter: audit,
+      metricReader: inMemoryMetricReader(),
+    });
     telemetry.start();
     const envelope = createProviderOpsEnvelope({
       recordType: "provider.task.lifecycle",
@@ -87,4 +98,11 @@ class RetainingLogExporter extends InMemoryLogRecordExporter {
   override shutdown(): Promise<void> {
     return Promise.resolve();
   }
+}
+
+function inMemoryMetricReader(): PeriodicExportingMetricReader {
+  return new PeriodicExportingMetricReader({
+    exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE),
+    exportIntervalMillis: 60_000,
+  });
 }

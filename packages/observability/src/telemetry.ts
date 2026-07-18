@@ -8,13 +8,23 @@ import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import {
   BatchLogRecordProcessor,
+  InMemoryLogRecordExporter,
   LoggerProvider,
   SimpleLogRecordProcessor,
 } from "@opentelemetry/sdk-logs";
 import type { LogRecordExporter } from "@opentelemetry/sdk-logs";
-import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
+import {
+  AggregationTemporality,
+  InMemoryMetricExporter,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+} from "@opentelemetry/sdk-metrics";
 import type { MetricReader } from "@opentelemetry/sdk-metrics";
-import { BatchSpanProcessor, NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import {
+  BatchSpanProcessor,
+  InMemorySpanExporter,
+  NodeTracerProvider,
+} from "@opentelemetry/sdk-trace-node";
 import type { SpanExporter } from "@opentelemetry/sdk-trace-node";
 import { createProviderResource } from "./provider-resource.js";
 import type { ProviderResourceInput } from "./provider-resource.js";
@@ -199,24 +209,35 @@ export class ProviderTelemetry {
             },
           }),
     };
+    const usesInjectedSignals =
+      this.#options.spanExporter !== undefined ||
+      this.#options.eventExporter !== undefined ||
+      this.#options.auditExporter !== undefined ||
+      this.#options.metricReader !== undefined;
     const rawSpanExporter =
       this.#options.spanExporter ??
-      new OTLPTraceExporter({
-        url: signalEndpoint(this.#options.otlpEndpoint, "traces"),
-        ...exporterOptions,
-      });
+      (usesInjectedSignals
+        ? new InMemorySpanExporter()
+        : new OTLPTraceExporter({
+            url: signalEndpoint(this.#options.otlpEndpoint, "traces"),
+            ...exporterOptions,
+          }));
     const rawEventExporter =
       this.#options.eventExporter ??
-      new OTLPLogExporter({
-        url: signalEndpoint(this.#options.otlpEndpoint, "logs"),
-        ...exporterOptions,
-      });
+      (usesInjectedSignals
+        ? new InMemoryLogRecordExporter()
+        : new OTLPLogExporter({
+            url: signalEndpoint(this.#options.otlpEndpoint, "logs"),
+            ...exporterOptions,
+          }));
     const rawAuditExporter =
       this.#options.auditExporter ??
-      new OTLPLogExporter({
-        url: signalEndpoint(this.#options.otlpEndpoint, "logs"),
-        ...exporterOptions,
-      });
+      (usesInjectedSignals
+        ? new InMemoryLogRecordExporter()
+        : new OTLPLogExporter({
+            url: signalEndpoint(this.#options.otlpEndpoint, "logs"),
+            ...exporterOptions,
+          }));
     const exportTimeoutMillis = this.#options.batch?.exportTimeoutMillis ?? 10_000;
     const spanExporter = observedSpanExporter(
       rawSpanExporter,
@@ -239,10 +260,12 @@ export class ProviderTelemetry {
     const metricReader =
       this.#options.metricReader ??
       new PeriodicExportingMetricReader({
-        exporter: new OTLPMetricExporter({
-          url: signalEndpoint(this.#options.otlpEndpoint, "metrics"),
-          ...exporterOptions,
-        }),
+        exporter: usesInjectedSignals
+          ? new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE)
+          : new OTLPMetricExporter({
+              url: signalEndpoint(this.#options.otlpEndpoint, "metrics"),
+              ...exporterOptions,
+            }),
         exportIntervalMillis: this.#options.metricExportIntervalMillis ?? 60_000,
         exportTimeoutMillis: this.#options.batch?.exportTimeoutMillis ?? 10_000,
       });

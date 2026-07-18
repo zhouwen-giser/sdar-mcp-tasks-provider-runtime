@@ -44,8 +44,8 @@ final-report repair are explicitly out of scope.
 | H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | complete    | `5b911f0` |
 | H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | complete    | `e795267` |
 | H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | complete    | `40e18d9` |
-| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | complete    | pending   |
-| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | in progress | pending   |
+| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | complete    | `51244b6` |
+| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | in progress | `143c711` |
 
 ## Verification ledger
 
@@ -72,6 +72,12 @@ final-report repair are explicitly out of scope.
 | 2026-07-18 | H8 completion guard status                           | PASS for H8; only H9 guard remains red                                           |
 | 2026-07-18 | H9 production HTTPS, header-file and mTLS security   | PASS, 31 focused tests plus typecheck and lint                                   |
 | 2026-07-18 | H9 Kubernetes secret-file deployment templates       | PASS, credentials absent from ConfigMap                                          |
+| 2026-07-18 | migration 017/018 forward upgrade fixtures           | PASS, rc.1 and pre-012 fixtures preserved; 19 migrations applied                 |
+| 2026-07-18 | multi-replica Provider delivery and command races    | PASS, idempotent ingress/delivery and 32 slow commands execute once              |
+| 2026-07-18 | TypeScript and Python Provider conformance           | PASS, both reports regenerated                                                   |
+| 2026-07-18 | release evidence regeneration                        | PASS, SBOM (220 components), image, capacity and conformance reports refreshed   |
+| 2026-07-18 | `pnpm verify:v1.1` final full gate                   | PASS, 278 seconds; 71 unit, 6 contract, 188 integration, 9 recovery, 28 security |
+| 2026-07-18 | release scans                                        | PASS, no `.skip`/`.only`; legacy names only in negative guards                   |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.
