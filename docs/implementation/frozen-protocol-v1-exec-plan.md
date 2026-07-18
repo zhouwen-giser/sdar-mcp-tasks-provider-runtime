@@ -1,6 +1,6 @@
 # Frozen SDAR MCP Tasks Protocol V1 Migration ExecPlan
 
-Status: in progress; H0 contract and pinned upstream baseline verified
+Status: Runtime implementation complete and exact-commit audit passed; publication pending
 
 Branch: `feature/sep2663-frozen-protocol-v1`
 
@@ -20,17 +20,17 @@ documentation are not substitute sources.
 
 ## Ordered execution
 
-| Phase               | Deliverable                                                                                             | Gate                                                            | Status      |
-| ------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ----------- |
-| A                   | remote branch and PR inventory                                                                          | inventory report matches GitHub and local refs                  | complete    |
-| H0                  | exact frozen contract, pinned MCP schema, derived schemas and protocol lock                             | byte hash, Git blob and lock verification                       | complete    |
-| H1-H3               | isolated SEP-2663 handler, routing, request meta, headers, discovery, tool profile and availability     | focused protocol tests                                          | in progress |
-| H4-H7               | flat task results, detailed task mapping, runtime revision, true TTL, MRTR and cooperative cancellation | PostgreSQL integration and migration upgrade tests              | in progress |
-| H8-H10              | type-only evidence, durable SSE task notifications and non-standard method migration                    | evidence, multi-replica notification and legacy isolation tests | in progress |
-| H11-H13             | Adapter migration, 74-case conformance, CI, version and reports                                         | `verify:v2` and machine reports                                 | pending     |
-| Runtime publication | phased commits, Draft PR, protected CI, normal merge                                                    | merged Runtime PR with green required checks                    | pending     |
-| Provider migration  | merge new `origin/main` into every active Provider branch and update existing PRs                       | Provider conformance and Runtime E2E                            | pending     |
-| Completion audit    | requirement-by-requirement evidence review                                                              | all Definition of Done items proven                             | pending     |
+| Phase               | Deliverable                                                                                             | Gate                                                            | Status   |
+| ------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | -------- |
+| A                   | remote branch and PR inventory                                                                          | inventory report matches GitHub and local refs                  | complete |
+| H0                  | exact frozen contract, pinned MCP schema, derived schemas and protocol lock                             | byte hash, Git blob and lock verification                       | complete |
+| H1-H3               | isolated SEP-2663 handler, routing, request meta, headers, discovery, tool profile and availability     | focused protocol tests                                          | complete |
+| H4-H7               | flat task results, detailed task mapping, runtime revision, true TTL, MRTR and cooperative cancellation | PostgreSQL integration and migration upgrade tests              | complete |
+| H8-H10              | type-only evidence, durable SSE task notifications and non-standard method migration                    | evidence, multi-replica notification and legacy isolation tests | complete |
+| H11-H13             | Adapter migration, 74-case conformance, CI, version and reports                                         | `verify:v2` and machine reports                                 | complete |
+| Runtime publication | phased commits, Draft PR, protected CI, normal merge                                                    | merged Runtime PR with green required checks                    | pending  |
+| Provider migration  | merge new `origin/main` into every active Provider branch and update existing PRs                       | Provider conformance and Runtime E2E                            | pending  |
+| Completion audit    | requirement-by-requirement evidence review                                                              | all Runtime Definition of Done items proven                     | complete |
 
 ## Governance invariants
 
@@ -100,3 +100,25 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   HTTP E2E covers discovery, tools/list, synchronous and Task-producing tools/call, immediately
   consistent tasks/get, the SSE acknowledgement frame, and the isolated Legacy compatibility
   endpoint.
+
+## H11-H13 and completion audit
+
+- Both TypeScript and Python mock Adapters implement the frozen reservation identity, keyed MRTR
+  response, type-only Evidence projection, reconciliation, cancellation and restart behavior.
+- `scripts/protocol/run-frozen-conformance.mjs` executes the numbered C-001 through C-074 catalog,
+  including real PostgreSQL lifecycle coverage, and writes the machine-readable 74-case report.
+- Runtime and workspace packages target `2.0.0-rc.1`; Provider Ops schema remains `1.1.0` because
+  this migration does not change that wire contract.
+- The capacity baseline uses the frozen `/mcp` HTTP protocol and proves 100 synchronous calls,
+  1,000 task admissions, 500 durable commands without duplicate Adapter side effects, watchdog
+  processing, recovery candidate scans, durable growth and the Runtime image policy.
+- A detached worktree at exact implementation commit `0e54fdb` ran `pnpm verify:v2` with a
+  disposable PostgreSQL instance on 2026-07-18. The command completed with exit code 0 in 464.5
+  seconds. The frozen protocol suite passed 68 tests, the catalog passed 74/74, and every format,
+  lint, type, build, Proto, dependency, SBOM, deployment, image, unit, contract, integration,
+  recovery, security, E2E, Adapter conformance, capacity and rc2 regression gate passed.
+- The measured image was non-root and 99,843,505 bytes, below the 350,000,000-byte limit; the
+  repeated image filesystem/config check passed.
+- The maximum supported claim is **Component Conformant**. Runtime publication and all Provider
+  branch migrations remain blocked on the normal protected PR/merge sequence, not on code or test
+  completion.
