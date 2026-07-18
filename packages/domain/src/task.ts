@@ -36,6 +36,7 @@ export interface TaskRecord {
   correlationId?: string | null;
   executionMode: ExecutionMode;
   simulationId: string | null;
+  reservationRef: string | null;
   arguments: Record<string, unknown>;
   argumentHash: string;
   externalExecutionId: string | null;

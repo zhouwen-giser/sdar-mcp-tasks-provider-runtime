@@ -67,8 +67,8 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   `handleExpiresAt - createdAt`, emits `ttlMs`/`pollIntervalMs`, maps MRTR requests by key, and
   carries the Runtime revision.
 - Legacy `ttl`/`pollInterval` output remains confined to the Legacy handler path.
-- Verified with TypeScript, ESLint, protocol projection tests, forward migration, and 115 real
-  PostgreSQL lifecycle cases.
+- Verified with TypeScript, ESLint, 35 frozen protocol tests, and 192 real PostgreSQL/gRPC
+  integration cases across 21 files.
 - Migration 020 and additive Adapter fields preserve exact keyed MRTR request/response JSON and
   response hashes. The frozen dispatch path uses `McpTaskInputRequest` and
   `McpTaskInputResponse`; Legacy `InputRequest` and `UpdateValue` retain their field numbers and
@@ -78,8 +78,12 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   persists a cooperative intent for every known and authorized Task: capable Adapters receive the
   existing durable Cancel Command, while incapable Adapters receive no impossible RPC and the
   Runtime still commits an audit event and a new Runtime revision.
-- Runtime `/mcp` remains on the Legacy handler until frozen `tools/call` and mandatory Task
-  notifications are implemented; partial capability publication is not enabled.
+- Frozen `tools/call` now rejects Legacy task controls, validates the SDAR profile and Tasks
+  capability before execution, and returns flat complete/task results from the authoritative
+  projection. Migration 021 durably carries the optional bounded `reservationRef` through
+  Admission, recovery, immediate starts, and scheduled starts to Adapter field 9. Runtime `/mcp`
+  remains on the Legacy handler until the frozen router is wired and verified end to end; partial
+  capability publication is not enabled.
 - Adapter `ExecutionSnapshot.evidence` is additive field 16. Runtime validates the frozen item,
   Pointer, zoned timestamp, URI scheme, size, depth and cardinality bounds, then maps objective
   facts to `CallToolResult._meta["io.sdar/evidence"]`. The Proto and mapper contain no

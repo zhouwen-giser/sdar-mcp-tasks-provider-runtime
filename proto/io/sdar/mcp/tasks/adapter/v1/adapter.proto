@@ -217,6 +217,7 @@ message StartOperationRequest {
   ExecutionContext execution_context = 6;
   string argument_hash = 7;
   uint32 invocation_attempt = 8;
+  optional string reservation_ref = 9;
 }
 
 message Alternative {

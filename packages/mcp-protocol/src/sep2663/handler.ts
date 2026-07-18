@@ -9,8 +9,15 @@ import { FrozenErrorCode, FrozenProtocolError, frozenErrorResponse } from "./err
 import { validateFrozenHeaders } from "./headers.js";
 import { validateFrozenRequest } from "./request-validator.js";
 import { requireTasksCapability } from "./request-validator.js";
-import { parseTaskId, parseTaskInputResponses, parseTaskReference } from "./tasks.js";
+import {
+  parseTaskId,
+  parseTaskInputResponses,
+  parseTaskObservations,
+  parseTaskReference,
+} from "./tasks.js";
 import { TaskNotificationStream } from "./notifications.js";
+import { parseFrozenToolCall } from "./tools-call.js";
+import { parseFrozenAvailability } from "./availability.js";
 
 const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
 
@@ -81,8 +88,37 @@ export class Sep2663ProtocolHandler {
       if (this.taskEngine === undefined) {
         throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
       }
-      requireTasksCapability(request);
       let result: Record<string, unknown>;
+      if (request.method === "io.sdar/taskExecution/checkAvailability") {
+        result = {
+          ...(await this.taskEngine.checkAvailability(
+            parseFrozenAvailability(request),
+            authorization,
+          )),
+        };
+        return { httpStatus: 200, body: { jsonrpc: "2.0", id: request.id, result } };
+      }
+      if (request.method === "tools/call") {
+        const call = parseFrozenToolCall(request);
+        const operation = this.manifest.operations.find(
+          (candidate) => candidate.name === call.name,
+        );
+        if (operation === undefined) {
+          throw new FrozenProtocolError(FrozenErrorCode.InvalidParams, "Unknown tool", 400);
+        }
+        if (operation.execution !== "SYNCHRONOUS") requireTasksCapability(request);
+        operation.validateArguments(call.arguments);
+        result = await this.taskEngine.callFrozenOperation(
+          operation,
+          call.arguments,
+          authorization,
+          call.idempotencyKey,
+          call.timing,
+          call.reservationRef,
+        );
+        return { httpStatus: 200, body: { jsonrpc: "2.0", id: request.id, result } };
+      }
+      requireTasksCapability(request);
       switch (request.method) {
         case "tasks/get": {
           const taskId = parseTaskReference(request.params);
@@ -100,6 +136,19 @@ export class Sep2663ProtocolHandler {
           const taskId = parseTaskReference(request.params);
           await this.taskEngine.cancelTaskCooperatively(taskId, authorization);
           result = { resultType: "complete" };
+          break;
+        }
+        case "io.sdar/taskExecution/tasks/observations": {
+          const parsed = parseTaskObservations(request.params);
+          result = {
+            resultType: "complete",
+            ...(await this.taskEngine.getTaskObservations(
+              parsed.taskId,
+              authorization,
+              parsed.cursor,
+              parsed.limit,
+            )),
+          };
           break;
         }
         default:

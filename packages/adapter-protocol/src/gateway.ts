@@ -72,6 +72,7 @@ export interface StartOperationOptions {
   correlationId?: string;
   rootTraceparent?: string;
   rootTracestate?: string;
+  reservationRef?: string;
 }
 
 export class GrpcAdapterGateway {
@@ -339,6 +340,7 @@ export class GrpcAdapterGateway {
         argumentHash:
           options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
         invocationAttempt: options.invocationAttempt ?? 1,
+        reservationRef: options.reservationRef,
       },
       rpcContext(taskId, options.externalExecutionId, undefined, operationName, options),
     );

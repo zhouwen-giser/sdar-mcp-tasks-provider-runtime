@@ -571,6 +571,11 @@ export class StartOperationRequest extends jspb.Message {
     getInvocationAttempt(): number;
     setInvocationAttempt(value: number): StartOperationRequest;
 
+    hasReservationRef(): boolean;
+    clearReservationRef(): void;
+    getReservationRef(): string | undefined;
+    setReservationRef(value: string): StartOperationRequest;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): StartOperationRequest.AsObject;
     static toObject(includeInstance: boolean, msg: StartOperationRequest): StartOperationRequest.AsObject;
@@ -591,6 +596,7 @@ export namespace StartOperationRequest {
         executionContext?: ExecutionContext.AsObject,
         argumentHash: string,
         invocationAttempt: number,
+        reservationRef?: string,
     }
 }
 

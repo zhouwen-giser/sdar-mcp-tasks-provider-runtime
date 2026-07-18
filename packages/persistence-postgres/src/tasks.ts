@@ -28,6 +28,7 @@ export interface AdmissionIntentInput {
   deadlineAt: Date | null;
   ttlMs: number | null;
   timing: TaskExecutionTiming;
+  reservationRef: string | null;
 }
 
 export interface PublishTaskInput extends AdmissionIntentInput {
@@ -232,6 +233,7 @@ interface TaskRow {
   correlation_id: string | null;
   execution_mode: TaskRecord["executionMode"];
   simulation_id: string | null;
+  reservation_ref: string | null;
   arguments: Record<string, unknown>;
   argument_hash: string;
   external_execution_id: string | null;
@@ -355,9 +357,10 @@ export class TaskRepository {
         (task_id, provider_id, operation_name, operation_snapshot_id,
          authorization_context_hash, execution_mode, simulation_id, arguments,
          argument_hash, state, accepted_at, not_before, latest_start_at,
-         deadline_at, ttl_ms, timing, trace_id, root_traceparent, root_tracestate, correlation_id)
+         deadline_at, ttl_ms, timing, trace_id, root_traceparent, root_tracestate, correlation_id,
+         reservation_ref)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING',$10,$11,$12,$13,$14,$15::jsonb,
-               $16,$17,$18,$19)
+               $16,$17,$18,$19,$20)
        ON CONFLICT (task_id) DO NOTHING`,
       [
         input.taskId,
@@ -379,6 +382,7 @@ export class TaskRepository {
         input.authorization.rootTraceparent ?? null,
         input.authorization.rootTracestate ?? null,
         input.authorization.correlationId ?? null,
+        input.reservationRef,
       ],
     );
     return result.rowCount === 1;
@@ -406,6 +410,7 @@ export class TaskRepository {
       root_traceparent: string | null;
       root_tracestate: string | null;
       correlation_id: string | null;
+      reservation_ref: string | null;
     }>("SELECT * FROM admission_intent WHERE task_id=$1", [taskId]);
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -431,6 +436,7 @@ export class TaskRepository {
       deadlineAt: row.deadline_at,
       ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
       timing: row.timing,
+      reservationRef: row.reservation_ref,
       state: row.state,
     };
   }
@@ -479,7 +485,8 @@ export class TaskRepository {
            substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, actual_started_at,
            invocation_attempt, observation_revision, terminal_at, handle_expires_at,
-           last_confirmed_at, trace_id, root_traceparent, root_tracestate, correlation_id)
+           last_confirmed_at, trace_id, root_traceparent, root_tracestate, correlation_id,
+           reservation_ref)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
                  $16::jsonb,$17,$18,$19,$20::jsonb,$21,$22,$23,
                  $24,$25,1,
@@ -488,7 +495,7 @@ export class TaskRepository {
                    WHEN $19::bigint IS NULL AND $11 NOT LIKE 'TERMINAL_%' THEN NULL
                    ELSE clock_timestamp() + (COALESCE($19::bigint,86400000) * interval '1 millisecond')
                  END,
-                 clock_timestamp(),$26,$27,$28,$29)`,
+                 clock_timestamp(),$26,$27,$28,$29,$30)`,
         [
           input.taskId,
           input.providerId,
@@ -519,6 +526,7 @@ export class TaskRepository {
           input.authorization.rootTraceparent ?? null,
           input.authorization.rootTracestate ?? null,
           input.authorization.correlationId ?? null,
+          input.reservationRef,
         ],
       );
       await insertObservation(client, input.taskId, 1, input.transition, {
@@ -564,10 +572,10 @@ export class TaskRepository {
            substate, status_message, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, invocation_attempt,
            next_start_attempt_at, observation_revision, trace_id, root_traceparent,
-           root_tracestate, correlation_id)
+           root_tracestate, correlation_id, reservation_ref)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,NULL,'SCHEDULED','working',
                  'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15,0,$13,1,
-                 $16,$17,$18,$19)`,
+                 $16,$17,$18,$19,$20)`,
         [
           input.taskId,
           input.providerId,
@@ -588,6 +596,7 @@ export class TaskRepository {
           input.authorization.rootTraceparent ?? null,
           input.authorization.rootTracestate ?? null,
           input.authorization.correlationId ?? null,
+          input.reservationRef,
         ],
       );
       await initializeTaskRetention(
@@ -3284,6 +3293,7 @@ async function transitionTask(
     operationName: row.operation_name,
     executionMode: row.execution_mode,
     simulationId: row.simulation_id,
+    reservationRef: row.reservation_ref,
     argumentHash: row.argument_hash,
     authorizationContextHash: row.authorization_context_hash,
     traceId: row.trace_id,
@@ -3899,6 +3909,7 @@ function fromRow(row: TaskRow): TaskRecord {
     correlationId: row.correlation_id,
     executionMode: row.execution_mode,
     simulationId: row.simulation_id,
+    reservationRef: row.reservation_ref,
     arguments: row.arguments,
     argumentHash: row.argument_hash,
     externalExecutionId: row.external_execution_id,

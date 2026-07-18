@@ -10,7 +10,7 @@ import { JsonFileStore } from "./store.js";
 export interface MockAdapterOptions {
   providerId?: string;
   providerVersion?: string;
-  onStartSideEffect?: (taskId: string) => void;
+  onStartSideEffect?: (taskId: string, reservationRef?: string) => void;
   onControlSideEffect?: (taskId: string, command: string) => void;
   statePath?: string;
   startResponseDelayMs?: number;
@@ -513,6 +513,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           argumentHash?: string;
           invocationAttempt?: string | number;
           executionContext?: Record<string, unknown>;
+          reservationRef?: string;
         },
         unknown
       >,
@@ -592,7 +593,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         return;
       }
       const now = new Date();
-      options.onStartSideEffect?.(taskId);
+      options.onStartSideEffect?.(taskId, call.request.reservationRef);
       if (
         call.request.operationName === "flex_task" &&
         (result.scenario === "terminal" || result.scenario === "terminal_invalid_output")

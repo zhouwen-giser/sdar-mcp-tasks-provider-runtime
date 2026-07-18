@@ -8,6 +8,7 @@ const pointerPattern = /^(?:|(?:\/(?:[^~/]|~[01])*)*)$/;
 
 export function parseFrozenAvailability(request: FrozenJsonRpcRequest): AvailabilityCheck[] {
   if (request.method !== "io.sdar/taskExecution/checkAvailability") throw invalidParams();
+  exactKeys(request.params, ["profileVersion", "checks", "_meta"], true);
   if (request.params.profileVersion !== "1.0") throw invalidParams();
   if (!Array.isArray(request.params.checks)) throw invalidParams();
   if (request.params.checks.length < 1 || request.params.checks.length > 64) {

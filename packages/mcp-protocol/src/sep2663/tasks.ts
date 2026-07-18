@@ -50,6 +50,31 @@ export function parseTaskInputResponses(
   );
 }
 
+export function parseTaskObservations(params: Record<string, unknown>): {
+  taskId: string;
+  cursor?: number;
+  limit: number;
+} {
+  assertOnlyKeys(params, new Set(["taskId", "cursor", "limit", "_meta"]));
+  const taskId = parseTaskId(params);
+  const cursorValue = params.cursor;
+  let cursor: number | undefined;
+  if (cursorValue !== undefined) {
+    if (typeof cursorValue !== "string" || !/^[1-9][0-9]*$/.test(cursorValue)) {
+      throw new InvalidParamsError("OBSERVATION_CURSOR_INVALID");
+    }
+    cursor = Number(cursorValue);
+    if (!Number.isSafeInteger(cursor)) {
+      throw new InvalidParamsError("OBSERVATION_CURSOR_INVALID");
+    }
+  }
+  const limit = params.limit ?? 100;
+  if (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 100) {
+    throw new InvalidParamsError("OBSERVATION_PAGE_SIZE_INVALID");
+  }
+  return { taskId, ...(cursor === undefined ? {} : { cursor }), limit: limit as number };
+}
+
 function assertOnlyKeys(value: Record<string, unknown>, allowed: ReadonlySet<string>): void {
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new InvalidParamsError("UNKNOWN_TASK_FIELD");

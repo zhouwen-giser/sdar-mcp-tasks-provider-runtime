@@ -116,13 +116,17 @@ backfilled as `elicitation/create`; answered Legacy rows are represented as acce
 The Adapter proto adds `McpTaskInputRequest` and `McpTaskInputResponse` on new field numbers while
 marking the old `InputRequest` and `UpdateValue` fields deprecated without deleting them.
 
+`021_frozen_reservation_ref.sql` persists the optional frozen `reservationRef` on both Admission
+Intent and Provider Task rows so immediate, recovered, and scheduled starts forward the same
+bounded reference to the Adapter.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate
 Snapshot insertion, task lifecycle constraints, crash windows, applied-migration tamper
 detection, and a complete 001-006 rc.1 fixture containing pending/uncertain admissions,
 working/queued/input/stopping/scheduled/terminal Tasks, a pending command, observation/outbox and
 idempotency data. After 007-016 it proves data/backfills and executes Recovery, Dispatcher and
 Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter. v1.1 verifies all
-21 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths, including
+22 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths, including
 Provider Ops durable delivery and persisted Trace Context（持久化链路上下文）.
 
 rc.2 repository code reads the committed Task through the same client used for the publication

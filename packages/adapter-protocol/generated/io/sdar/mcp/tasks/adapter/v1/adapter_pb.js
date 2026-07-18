@@ -4965,7 +4965,8 @@ proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.toObject = function(inc
     timing: (f = msg.getTiming()) && proto.io.sdar.mcp.tasks.adapter.v1.TaskTiming.toObject(includeInstance, f),
     executionContext: (f = msg.getExecutionContext()) && proto.io.sdar.mcp.tasks.adapter.v1.ExecutionContext.toObject(includeInstance, f),
     argumentHash: jspb.Message.getFieldWithDefault(msg, 7, ""),
-    invocationAttempt: jspb.Message.getFieldWithDefault(msg, 8, 0)
+    invocationAttempt: jspb.Message.getFieldWithDefault(msg, 8, 0),
+    reservationRef: jspb.Message.getFieldWithDefault(msg, 9, "")
   };
 
   if (includeInstance) {
@@ -5037,6 +5038,10 @@ proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.deserializeBinaryFromRe
     case 8:
       var value = /** @type {number} */ (reader.readUint32());
       msg.setInvocationAttempt(value);
+      break;
+    case 9:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setReservationRef(value);
       break;
     default:
       reader.skipField();
@@ -5124,6 +5129,13 @@ proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.serializeBinaryToWriter
   if (f !== 0) {
     writer.writeUint32(
       8,
+      f
+    );
+  }
+  f = /** @type {string} */ (jspb.Message.getField(message, 9));
+  if (f != null) {
+    writer.writeString(
+      9,
       f
     );
   }
@@ -5347,6 +5359,42 @@ proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.prototype.getInvocation
  */
 proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.prototype.setInvocationAttempt = function(value) {
   return jspb.Message.setProto3IntField(this, 8, value);
+};
+
+
+/**
+ * optional string reservation_ref = 9;
+ * @return {string}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.prototype.getReservationRef = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 9, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.prototype.setReservationRef = function(value) {
+  return jspb.Message.setField(this, 9, value);
+};
+
+
+/**
+ * Clears the field making it undefined.
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.prototype.clearReservationRef = function() {
+  return jspb.Message.setField(this, 9, undefined);
+};
+
+
+/**
+ * Returns whether this field is set.
+ * @return {boolean}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.StartOperationRequest.prototype.hasReservationRef = function() {
+  return jspb.Message.getField(this, 9) != null;
 };
 
 

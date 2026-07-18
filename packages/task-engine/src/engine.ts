@@ -121,6 +121,7 @@ export class TaskEngine {
     ttlMs?: number,
     idempotencyKey?: string,
     timing: TaskExecutionTiming = defaultTiming,
+    reservationRef?: string,
   ): Promise<ToolInvocationResult> {
     const startedAt = performance.now();
     try {
@@ -129,6 +130,12 @@ export class TaskEngine {
         (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 31_536_000_000)
       ) {
         throw new InvalidParamsError("INVALID_TASK_TTL");
+      }
+      if (
+        reservationRef !== undefined &&
+        (reservationRef.length < 1 || reservationRef.length > 256)
+      ) {
+        throw new InvalidParamsError("INVALID_RESERVATION_REF");
       }
       operation.validateArguments(argumentsValue);
       let anchors: TimingAnchors;
@@ -163,6 +170,7 @@ export class TaskEngine {
                 argumentHash,
                 timing,
                 anchors,
+                reservationRef,
               ),
             ),
         );
@@ -178,6 +186,7 @@ export class TaskEngine {
         argumentHash,
         timing,
         anchors,
+        reservationRef,
       );
     } finally {
       const labels = { operation: operation.name, executionMode: authorization.executionMode };
@@ -189,6 +198,31 @@ export class TaskEngine {
         (performance.now() - startedAt) / 1_000,
       );
     }
+  }
+
+  async callFrozenOperation(
+    operation: ValidatedOperation,
+    argumentsValue: Record<string, unknown>,
+    authorization: AuthorizationContext,
+    idempotencyKey?: string,
+    timing?: TaskExecutionTiming,
+    reservationRef?: string,
+  ): Promise<Record<string, unknown>> {
+    const invocation = await this.callOperation(
+      operation,
+      argumentsValue,
+      authorization,
+      undefined,
+      idempotencyKey,
+      timing,
+      reservationRef,
+    );
+    if (invocation.kind === "result") {
+      return { resultType: "complete", ...invocation.result };
+    }
+    const taskId = invocation.task.taskId;
+    if (typeof taskId !== "string") throw new Error("CREATE_TASK_RESULT_TASK_ID_MISSING");
+    return this.getFrozenTask(taskId, authorization, "create");
   }
 
   async checkAvailability(
@@ -241,6 +275,7 @@ export class TaskEngine {
     argumentHash: string,
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
+    reservationRef?: string,
     persistedOperationSnapshotId?: string,
   ): Promise<ToolInvocationResult> {
     this.onTrace?.({
@@ -258,6 +293,7 @@ export class TaskEngine {
         taskId,
         argumentHash,
         timing: toAdapterTiming(timing),
+        ...(reservationRef === undefined ? {} : { reservationRef }),
       });
       validateStartResponseIdentity(response, {
         taskId,
@@ -287,6 +323,7 @@ export class TaskEngine {
       deadlineAt: anchors.deadlineAt,
       ttlMs: ttlMs ?? 259_200_000,
       timing,
+      reservationRef: reservationRef ?? null,
     };
     const inserted = await this.#repository.createAdmissionIntent(intent);
     if (!inserted || recovering) {
@@ -337,6 +374,7 @@ export class TaskEngine {
         ...executionOptions(authorization),
         invocationAttempt: 1,
         timing: toAdapterTiming(timing),
+        ...(reservationRef === undefined ? {} : { reservationRef }),
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
@@ -427,6 +465,7 @@ export class TaskEngine {
       deadlineAt: Date | null;
       ttlMs: number | null;
       timing: TaskExecutionTiming;
+      reservationRef: string | null;
     },
     externalExecutionId: string,
     snapshotValue: ExecutionSnapshot,
@@ -627,6 +666,7 @@ export class TaskEngine {
         latestStartAt: admission.latestStartAt,
         deadlineAt: admission.deadlineAt,
       },
+      admission.reservationRef ?? undefined,
       admission.operationSnapshotId,
     );
   }

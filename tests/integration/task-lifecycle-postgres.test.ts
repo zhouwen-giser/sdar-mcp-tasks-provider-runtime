@@ -54,6 +54,7 @@ let gateway: GrpcAdapterGateway;
 let engine: TaskEngine;
 let sideEffectCount = 0;
 let controlSideEffectCount = 0;
+let lastReservationRef: string | undefined;
 
 class FakeClock implements Clock {
   constructor(private value: Date) {}
@@ -73,8 +74,9 @@ beforeAll(async () => {
   await runMigrations(pool);
   adapter = createMockAdapterServer({
     providerId: "task-provider",
-    onStartSideEffect: () => {
+    onStartSideEffect: (_taskId, reservationRef) => {
       sideEffectCount += 1;
+      lastReservationRef = reservationRef;
     },
     onControlSideEffect: () => {
       controlSideEffectCount += 1;
@@ -97,6 +99,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  lastReservationRef = undefined;
   await pool.query(`TRUNCATE TABLE
     provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
     task_observation, provider_task, admission_intent
@@ -304,6 +307,34 @@ describe("durable task lifecycle", () => {
       },
     });
     expect(JSON.stringify(frozen)).not.toContain("requirementId");
+  });
+
+  it("returns flat frozen CreateTaskResult and immediately consistent tasks/get", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "flat-frozen-task", scenario: "queued_start" },
+      authorization,
+      "flat-frozen-idempotency",
+      undefined,
+      "reservation-flat-frozen",
+    );
+    expect(created).toMatchObject({
+      resultType: "task",
+      status: "working",
+      _meta: { "io.sdar/taskExecution": { runtimeRevision: "1" } },
+    });
+    expect(typeof created.ttlMs).toBe("number");
+    expect(created).not.toHaveProperty("task");
+    expect(created).not.toHaveProperty("ttl");
+    expect(created).not.toHaveProperty("pollInterval");
+    expect(lastReservationRef).toBe("reservation-flat-frozen");
+    const taskId = String(created.taskId);
+    const queried = await engine.getFrozenTask(taskId, authorization);
+    expect(queried).toMatchObject({
+      resultType: "complete",
+      taskId,
+      _meta: { "io.sdar/taskExecution": { runtimeRevision: "1" } },
+    });
   });
 
   it("returns an inline result for terminal task-capable admission", async () => {
@@ -722,6 +753,7 @@ describe("durable task lifecycle", () => {
         },
         maxElapsedMs: 5_000,
       },
+      "reservation-scheduled",
     );
     expect(created.kind).toBe("task");
     if (created.kind !== "task") throw new Error("Expected scheduled task");
@@ -734,6 +766,7 @@ describe("durable task lifecycle", () => {
     const claims = await Promise.all([firstWorker.tick(), secondWorker.tick()]);
     expect(claims.reduce((sum, tick) => sum + tick.started, 0)).toBe(1);
     expect(sideEffectCount - before).toBe(1);
+    expect(lastReservationRef).toBe("reservation-scheduled");
     expect(schedulerEvents).toEqual([
       ["scheduled", 1],
       ["claimed", 1],

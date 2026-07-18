@@ -52,6 +52,11 @@ describe("Adapter Protocol v1", () => {
     expect(source).not.toContain("requirement_id");
   });
 
+  it("adds the frozen reservation reference without renumbering StartOperation", () => {
+    const source = readFileSync(adapterProtoPath, "utf8");
+    expect(source).toContain("optional string reservation_ref = 9");
+  });
+
   it("has reproducibly generated JavaScript and TypeScript bindings", () => {
     const generated = resolve("packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1");
     expect(existsSync(resolve(generated, "adapter_pb.js"))).toBe(true);
