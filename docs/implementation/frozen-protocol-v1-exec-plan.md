@@ -1,6 +1,6 @@
 # Frozen SDAR MCP Tasks Protocol V1 Migration ExecPlan
 
-Status: Runtime implementation complete and exact-commit audit passed; publication pending
+Status: Runtime implementation and contract-alignment follow-up complete; publication pending
 
 Branch: `feature/sep2663-frozen-protocol-v1`
 
@@ -112,13 +112,33 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
 - The capacity baseline uses the frozen `/mcp` HTTP protocol and proves 100 synchronous calls,
   1,000 task admissions, 500 durable commands without duplicate Adapter side effects, watchdog
   processing, recovery candidate scans, durable growth and the Runtime image policy.
-- A detached worktree at exact implementation commit `0e54fdb` ran `pnpm verify:v2` with a
-  disposable PostgreSQL instance on 2026-07-18. The command completed with exit code 0 in 464.5
+- A detached worktree at exact implementation commit `78fae03` ran `pnpm verify:v2` with a
+  disposable PostgreSQL instance on 2026-07-18. The command completed with exit code 0 in 487.1
   seconds. The frozen protocol suite passed 68 tests, the catalog passed 74/74, and every format,
   lint, type, build, Proto, dependency, SBOM, deployment, image, unit, contract, integration,
   recovery, security, E2E, Adapter conformance, capacity and rc2 regression gate passed.
-- The measured image was non-root and 99,843,505 bytes, below the 350,000,000-byte limit; the
+- The measured image was non-root and 99,844,752 bytes, below the 350,000,000-byte limit; the
   repeated image filesystem/config check passed.
 - The maximum supported claim is **Component Conformant**. Runtime publication and all Provider
   branch migrations remain blocked on the normal protected PR/merge sequence, not on code or test
   completion.
+
+## Contract-alignment follow-up
+
+The migration task package was re-audited after the original Runtime implementation. The product
+contract hash and pinned MCP baseline did not change, but four more-specific delivery requirements
+were not yet represented exactly in the repository. Commit `78fae03` closes them:
+
+- Runtime, Compose, Kubernetes and tests now use the required opt-in name
+  `MCP_LEGACY_ENDPOINT_ENABLED`; the prior name is deliberately not accepted as an alias.
+- `reports/protocol-v1-conformance/` now contains separately verified Runtime, TypeScript Adapter
+  and Python Adapter component reports plus a summary that explicitly rejects Interop Certified.
+- Package scripts expose the requested frozen protocol, Notification, Evidence and report gates;
+  `verify:v2` validates the regenerated component reports after Adapter conformance.
+- C-055 now starts two independent Runtime HTTP servers sharing PostgreSQL, subscribes to both SSE
+  endpoints, commits cancellation through the Runtime, observes the terminal revision on both and
+  compares each Notification projection with authoritative `tasks/get`.
+
+Focused evidence passed before the full audit: Notification 17/17, Evidence 138/138, Runtime frozen
+protocol 68/68, numbered catalog 74/74, and both Adapter component suites 20/20. No source
+`.skip` or `.only` exists.

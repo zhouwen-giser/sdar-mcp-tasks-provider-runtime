@@ -27,12 +27,16 @@ The repository may claim **Component Conformant** only. It must not claim Intero
 - Explicit Legacy isolation at `/mcp/legacy` behind `MCP_LEGACY_ENDPOINT_ENABLED=true`.
 - Additive Adapter protocol support in both TypeScript and Python examples.
 - Numbered C-001 through C-074 machine conformance with real PostgreSQL lifecycle coverage.
+- Required `MCP_LEGACY_ENDPOINT_ENABLED` configuration across Runtime and deployment surfaces.
+- Real two-HTTP-replica SSE C-055 coverage against a shared PostgreSQL task authority.
+- Separate Runtime, TypeScript Adapter and Python Adapter component reports under
+  `reports/protocol-v1-conformance/`.
 - V2 CI, dependency/SBOM/deployment/image checks and frozen-protocol capacity baseline.
 
 ## Verification
 
-Exact implementation commit `0e54fdb` was checked out in a detached worktree and verified against a
-disposable PostgreSQL database. `pnpm verify:v2` completed with exit code 0 in 464.5 seconds on
+Exact implementation commit `78fae03` was checked out in a detached worktree and verified against a
+disposable PostgreSQL database. `pnpm verify:v2` completed with exit code 0 in 487.1 seconds on
 2026-07-18. The frozen catalog passed 74/74 and every constituent gate passed. Detailed counts and
 the shutdown-order warning are recorded in `reports/protocol-v1-migration/test-matrix.md`.
 
