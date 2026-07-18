@@ -39,6 +39,7 @@ beforeAll(async () => {
       PROVIDER_ID: "e2e-provider",
       ADAPTER_ENDPOINT: `127.0.0.1:${String(adapterPort)}`,
       AUTH_MODE: "trusted_headers",
+      LEGACY_MCP_ENABLED: "true",
       LOG_LEVEL: "warn",
       SCHEDULER_POLL_MS: "1000",
       RECOVERY_POLL_MS: "5000",
@@ -51,7 +52,7 @@ beforeAll(async () => {
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("Runtime did not bind");
-  runtimeUrl = new URL(`http://127.0.0.1:${String(address.port)}/mcp`);
+  runtimeUrl = new URL(`http://127.0.0.1:${String(address.port)}/mcp/legacy`);
   client = new Client({ name: "runtime-e2e", version: "1.0.0" });
   transport = clientTransport();
   await client.connect(transport as unknown as Transport);
@@ -64,6 +65,89 @@ afterAll(async () => {
 });
 
 describe("independently deployed Runtime stack", () => {
+  it("serves the frozen protocol on the primary endpoint", async () => {
+    const discovery = await frozenRequest("server/discover", {}, 1);
+    expect(discovery.statusCode).toBe(200);
+    expect(discovery.json()).toMatchObject({
+      result: {
+        supportedVersions: ["2026-07-28"],
+        _meta: { "io.modelcontextprotocol/serverInfo": { version: "2.0.0-rc.1" } },
+      },
+    });
+
+    const tools = await frozenRequest("tools/list", {}, 2);
+    expect(tools.json()).toMatchObject({ result: { resultType: "complete" } });
+    expect(
+      tools.json<{ result: { tools: { name: string }[] } }>().result.tools.map((tool) => tool.name),
+    ).toEqual(["echo_sync", "durable_task", "flex_task"]);
+
+    const synchronous = await frozenRequest(
+      "tools/call",
+      { name: "echo_sync", arguments: { message: "frozen-primary" } },
+      3,
+      "echo_sync",
+    );
+    expect(synchronous.json()).toMatchObject({
+      result: { resultType: "complete", structuredContent: { message: "frozen-primary" } },
+    });
+
+    const created = await frozenRequest(
+      "tools/call",
+      { name: "durable_task", arguments: { resourceId: "frozen-e2e-resource" } },
+      4,
+      "durable_task",
+      { "io.sdar/taskExecution": { profileVersion: "1.0", idempotencyKey: "frozen-e2e" } },
+    );
+    const createdBody = created.json<{ result: { taskId: string; resultType: string } }>();
+    expect(createdBody.result).toMatchObject({ resultType: "task" });
+    const queried = await frozenRequest(
+      "tasks/get",
+      { taskId: createdBody.result.taskId },
+      5,
+      createdBody.result.taskId,
+    );
+    expect(queried.json()).toMatchObject({
+      result: { resultType: "complete", taskId: createdBody.result.taskId, status: "working" },
+    });
+
+    const controller = new AbortController();
+    try {
+      const response = await fetch(new URL("/mcp", runtimeUrl), {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "subscriptions/listen",
+          "x-sdar-subject": "e2e-user",
+          "x-sdar-tenant": "e2e-tenant",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "frozen-subscription",
+          method: "subscriptions/listen",
+          params: {
+            notifications: { taskIds: [createdBody.result.taskId] },
+            _meta: frozenMeta(),
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+      const reader = response.body?.getReader();
+      if (reader === undefined) throw new Error("Frozen SSE response body is unavailable");
+      const first = await reader.read();
+      const chunk: unknown = first.value;
+      if (!(chunk instanceof Uint8Array)) throw new Error("Frozen SSE frame is unavailable");
+      const frames = new TextDecoder().decode(chunk);
+      expect(frames).toContain("notifications/subscriptions/acknowledged");
+      expect(frames).toContain(createdBody.result.taskId);
+    } finally {
+      controller.abort();
+    }
+  });
+
   it("becomes ready and publishes the bounded Adapter catalog", async () => {
     const ready = await runtime.app.inject({ method: "GET", url: "/health/ready" });
     expect(ready.statusCode).toBe(200);
@@ -146,6 +230,50 @@ function clientTransport(): StreamableHTTPClientTransport {
       headers: { "x-sdar-subject": "e2e-user", "x-sdar-tenant": "e2e-tenant" },
     },
   });
+}
+
+function frozenRequest(
+  method: string,
+  params: Record<string, unknown>,
+  id: number,
+  name?: string,
+  extraMeta: Record<string, unknown> = {},
+) {
+  return runtime.app.inject({
+    method: "POST",
+    url: "/mcp",
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": method,
+      ...(name === undefined ? {} : { "mcp-name": name }),
+      "x-sdar-subject": "e2e-user",
+      "x-sdar-tenant": "e2e-tenant",
+    },
+    payload: {
+      jsonrpc: "2.0",
+      id,
+      method,
+      params: {
+        ...params,
+        _meta: {
+          ...frozenMeta(),
+          ...extraMeta,
+        },
+      },
+    },
+  });
+}
+
+function frozenMeta(): Record<string, unknown> {
+  return {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientInfo": { name: "frozen-e2e", version: "1.0.0" },
+    "io.modelcontextprotocol/clientCapabilities": {
+      extensions: { "io.modelcontextprotocol/tasks": {} },
+    },
+  };
 }
 
 async function waitForReadiness(adapterStatus: "ready" | "failed") {

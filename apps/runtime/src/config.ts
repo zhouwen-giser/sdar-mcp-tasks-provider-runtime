@@ -45,6 +45,7 @@ const EnvironmentSchema = z
     ADAPTER_TLS_KEY_PATH: z.string().min(1).optional(),
     ADAPTER_RPC_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
     AUTH_MODE: z.enum(["development", "trusted_headers", "jwt_hs256"]).default("development"),
+    LEGACY_MCP_ENABLED: BooleanEnvironmentSchema.default(false),
     JWT_HS256_SECRET: z.string().min(32).optional(),
     JWT_ISSUER: z.string().min(1).optional(),
     JWT_AUDIENCE: z.string().min(1).optional(),

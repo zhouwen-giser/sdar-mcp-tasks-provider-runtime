@@ -1,5 +1,6 @@
 import * as grpc from "@grpc/grpc-js";
 import Fastify from "fastify";
+import type { FastifyReply, FastifyRequest } from "fastify";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
@@ -7,7 +8,9 @@ import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index
 import type { ProviderManifest } from "../../../packages/adapter-protocol/src/index.js";
 import {
   createAuthorizationResolver,
-  McpProtocolHandler,
+  LegacyMcpProtocolHandler,
+  ProtocolRouter,
+  Sep2663ProtocolHandler,
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
 import {
@@ -135,7 +138,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     providerTelemetryIngress: config.PROVIDER_TELEMETRY_INGRESS_ENABLED ? "starting" : "ready",
   };
   let manifest: ProviderManifest | undefined;
-  let mcpHandler: McpProtocolHandler | undefined;
+  let mcpRouter: ProtocolRouter | undefined;
   let schedulerTimer: NodeJS.Timeout | undefined;
   let recoveryTimer: NodeJS.Timeout | undefined;
   let commandDispatcherTimer: NodeJS.Timeout | undefined;
@@ -162,7 +165,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   );
 
   app.addHook("onRequest", async (request, reply) => {
-    if (request.url !== "/mcp") return;
+    const path = request.url.split("?", 1)[0];
+    if (path !== "/mcp" && !(config.LEGACY_MCP_ENABLED && path === "/mcp/legacy")) return;
     if (!rateLimiter.consume(request.ip).allowed) {
       metrics.increment("sdar_rate_limited_total");
       return reply.code(429).send({ error: "rate_limit_exceeded" });
@@ -228,7 +232,11 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (manifest === undefined) return reply.code(503).send({ error: "manifest_not_loaded" });
     return manifest;
   });
-  app.all("/mcp", async (request, reply) => {
+  const handleMcp = async (
+    path: "/mcp" | "/mcp/legacy",
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<unknown> => {
     if (request.method !== "POST") {
       return reply.code(405).send({
         jsonrpc: "2.0",
@@ -236,7 +244,10 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         id: null,
       });
     }
-    if (mcpHandler === undefined) {
+    if (path === "/mcp/legacy" && !config.LEGACY_MCP_ENABLED) {
+      return reply.code(404).send({ error: "legacy_mcp_disabled" });
+    }
+    if (mcpRouter === undefined) {
       return reply.code(503).send({
         jsonrpc: "2.0",
         error: { code: -32_003, message: "Provider not ready." },
@@ -249,8 +260,15 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       return reply.code(401).send({ error: "authentication_failed" });
     }
     reply.hijack();
-    await mcpHandler.handle(request.raw, reply.raw, request.body);
-  });
+    const handled = await mcpRouter.handle(path, request.raw, reply.raw, request.body);
+    if (!handled && !reply.raw.headersSent) {
+      reply.raw.statusCode = 404;
+      reply.raw.end(JSON.stringify({ error: "mcp_route_not_found" }));
+    }
+    return undefined;
+  };
+  app.all("/mcp", (request, reply) => handleMcp("/mcp", request, reply));
+  app.all("/mcp/legacy", (request, reply) => handleMcp("/mcp/legacy", request, reply));
 
   app.addHook("onClose", async () => {
     if (schedulerTimer !== undefined) clearInterval(schedulerTimer);
@@ -334,7 +352,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         metrics,
         (event) => logger.info(event, "task trace"),
       );
-      mcpHandler = new McpProtocolHandler(validated, gateway, taskEngine, {
+      const legacyHandler = new LegacyMcpProtocolHandler(validated, gateway, taskEngine, {
         resolveAuthorization,
         maxArgumentBytes: config.ARGUMENT_MAX_BYTES,
         maxJsonDepth: config.ARGUMENT_MAX_DEPTH,
@@ -350,6 +368,13 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         onProtocolError: (error, correlationId) =>
           logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
+      const frozenHandler = new Sep2663ProtocolHandler(
+        validated,
+        "2.0.0-rc.1",
+        taskEngine,
+        resolveAuthorization,
+      );
+      mcpRouter = new ProtocolRouter(frozenHandler, legacyHandler, config.LEGACY_MCP_ENABLED);
       const taskRepository = new TaskRepository(pool);
       if (
         config.PROVIDER_TELEMETRY_INGRESS_ENABLED &&

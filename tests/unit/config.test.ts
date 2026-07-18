@@ -14,6 +14,7 @@ describe("Runtime configuration", () => {
     expect(config.ADAPTER_TLS_MODE).toBe("disabled");
     expect(config.ADAPTER_RPC_TIMEOUT_MS).toBe(5_000);
     expect(config.AUTH_MODE).toBe("development");
+    expect(config.LEGACY_MCP_ENABLED).toBe(false);
     expect(config.HTTP_BODY_LIMIT_BYTES).toBe(1_048_576);
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);

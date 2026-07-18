@@ -17,6 +17,7 @@
     "ADAPTER_TLS_CERT_PATH": "/var/run/secrets/sdar-adapter/tls.crt",
     "ADAPTER_TLS_KEY_PATH": "/var/run/secrets/sdar-adapter/tls.key",
     "AUTH_MODE": "jwt_hs256",
+    "LEGACY_MCP_ENABLED": "false",
     "JWT_ISSUER": "replace-issuer",
     "JWT_AUDIENCE": "sdar-runtime",
     "HTTP_BODY_LIMIT_BYTES": "1048576",

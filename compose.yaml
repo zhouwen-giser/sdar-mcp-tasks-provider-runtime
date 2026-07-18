@@ -37,6 +37,7 @@ services:
       DATABASE_URL: postgresql://sdar:sdar@postgres:5432/sdar_runtime
       ADAPTER_ENDPOINT: adapter-typescript:7001
       ADAPTER_TLS_MODE: disabled
+      LEGACY_MCP_ENABLED: "false"
       OUTBOX_PUBLISHED_RETENTION_MS: 86400000
       OTEL_ENABLED: "false"
       PORT: 8080
