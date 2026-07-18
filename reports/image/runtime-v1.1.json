@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "measuredAt": "2026-07-18T03:57:41.868Z",
+  "measuredAt": "2026-07-18T05:59:08.971Z",
   "measurementEnvironment": "win32/x64 Docker Engine",
   "image": "sdar-runtime:v1.1-audit-primary",
   "base": "node:22-bookworm-slim",
-  "sizeBytes": 99810460,
+  "sizeBytes": 99880617,
   "maximumBytes": 350000000,
   "user": "node",
   "layers": 11,

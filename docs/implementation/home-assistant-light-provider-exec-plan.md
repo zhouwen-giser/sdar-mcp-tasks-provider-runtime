@@ -1,6 +1,6 @@
 # Home Assistant Light Provider ExecPlan
 
-Status: in progress
+Status: complete
 
 Base: `origin/main`
 
@@ -23,19 +23,23 @@ must not enter logs, snapshots, errors, results, or telemetry.
 
 | Phase   | Deliverable                                               | Required evidence                       | Status      |
 | ------- | --------------------------------------------------------- | --------------------------------------- | ----------- |
-| H0      | application/config/resource scaffold and manifest         | config, registry, manifest tests        | in progress |
-| H1      | REST/WebSocket client and state normalization             | client, conversion, reconnect tests     | pending     |
-| H2      | durable execution, confirmation, recovery and Adapter RPC | idempotency/reconcile/restart tests     | pending     |
-| H3      | durable resource and execution telemetry                  | stable ID/queue/failure-isolation tests | pending     |
-| H4      | security hardening and deployment assets                  | security tests and image/compose checks | pending     |
-| H5      | integration, Runtime E2E and documentation                | HA-provider tests and Runtime workflow  | pending     |
-| Release | full verification, phased commits, push and Draft PR      | clean SHA and protected CI              | pending     |
+| H0      | application/config/resource scaffold and manifest         | config, registry, manifest tests        | complete    |
+| H1      | REST/WebSocket client and state normalization             | client, conversion, reconnect tests     | complete    |
+| H2      | durable execution, confirmation, recovery and Adapter RPC | idempotency/reconcile/restart tests     | complete    |
+| H3      | durable resource and execution telemetry                  | stable ID/queue/failure-isolation tests | complete    |
+| H4      | security hardening and deployment assets                  | security tests and image/compose checks | complete    |
+| H5      | integration, Runtime E2E and documentation                | HA-provider tests and Runtime workflow  | complete    |
+| Release | full verification, phased commits, push and Draft PR      | clean SHA and protected CI              | in progress |
 
 ## Verification ledger
 
 | Date       | Command                                     | Result |
 | ---------- | ------------------------------------------- | ------ |
 | 2026-07-18 | repository and protocol baseline inspection | PASS   |
+| 2026-07-18 | `pnpm test:ha-light` (4 files, 9 tests)     | PASS   |
+| 2026-07-18 | `pnpm test:ha-light:e2e` with PostgreSQL    | PASS   |
+| 2026-07-18 | `pnpm audit:dependencies`                   | PASS   |
+| 2026-07-18 | `pnpm verify:v1.1` (380.5 seconds)          | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.
