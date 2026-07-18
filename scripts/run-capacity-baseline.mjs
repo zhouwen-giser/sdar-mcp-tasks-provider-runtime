@@ -5,9 +5,6 @@ import { dirname, resolve } from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { URL } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CreateTaskResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Pool } from "pg";
 import {
   bindMockAdapter,
@@ -78,10 +75,7 @@ try {
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("Runtime did not bind");
-  client = new Client({ name: "runtime-capacity-baseline", version: "1.1.0" });
-  await client.connect(
-    new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${String(address.port)}/mcp`)),
-  );
+  client = createFrozenCapacityClient(new URL(`http://127.0.0.1:${String(address.port)}/mcp`));
 
   progress("slow-adapter-pool");
   const growthBefore = await relationGrowth(runtime.pool);
@@ -267,13 +261,13 @@ try {
     throw new Error("Capacity workload did not persist Observation and Outbox evidence");
   }
 
-  const image = JSON.parse(readFileSync("reports/image/runtime-v1.1.json", "utf8"));
+  const image = JSON.parse(readFileSync("reports/image/runtime-v2.json", "utf8"));
   if (image.sizeBytes > image.maximumBytes || image.user === "root") {
-    throw new Error("Runtime image baseline violates the v1.1 image policy");
+    throw new Error("Runtime image baseline violates the v2 image policy");
   }
 
   const report = {
-    version: "1.1.0",
+    version: "2.0.0-rc.1",
     generatedAt: new Date().toISOString(),
     environment: {
       node: process.version,
@@ -331,7 +325,7 @@ try {
     },
   };
   const outputPath = resolve(
-    process.env.CAPACITY_REPORT_PATH ?? "reports/capacity/capacity-v1.1.json",
+    process.env.CAPACITY_REPORT_PATH ?? "reports/capacity/capacity-v2.json",
   );
   mkdirSync(dirname(outputPath), { recursive: true });
   writeFileSync(outputPath, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o644 });
@@ -348,47 +342,82 @@ try {
 }
 
 async function createScheduledTask(clientInstance, resourceId, scheduledAt) {
-  return clientInstance.request(
+  return clientInstance.callTool(
+    { name: "durable_task", arguments: { resourceId } },
     {
-      method: "tools/call",
-      params: {
-        name: "durable_task",
-        arguments: { resourceId },
-        _meta: {
-          "io.sdar/taskExecution": {
-            timing: {
-              start: { mode: "scheduled", scheduledAt, startToleranceMs: 30_000 },
-              maxElapsedMs: null,
-            },
-          },
-        },
+      timing: {
+        start: { mode: "scheduled", scheduledAt, startToleranceMs: 30_000 },
+        maxElapsedMs: null,
       },
     },
-    CreateTaskResultSchema,
-    { task: { ttl: 60_000 } },
   );
 }
 
 async function createImmediateWindowTask(clientInstance, resourceId) {
-  return clientInstance.request(
+  return clientInstance.callTool(
     {
-      method: "tools/call",
-      params: {
-        name: "durable_task",
-        arguments: { resourceId, scenario: "queued_start" },
-        _meta: {
-          "io.sdar/taskExecution": {
-            timing: {
-              start: { mode: "immediate", startToleranceMs: 100 },
-              maxElapsedMs: null,
-            },
-          },
-        },
+      name: "durable_task",
+      arguments: { resourceId, scenario: "queued_start" },
+    },
+    {
+      timing: {
+        start: { mode: "immediate", startToleranceMs: 100 },
+        maxElapsedMs: null,
       },
     },
-    CreateTaskResultSchema,
-    { task: { ttl: 60_000 } },
   );
+}
+
+function createFrozenCapacityClient(endpoint) {
+  let requestId = 0;
+  return {
+    async callTool(call, taskExecution) {
+      requestId += 1;
+      const response = await globalThis.fetch(endpoint, {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "tools/call",
+          "mcp-name": call.name,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          method: "tools/call",
+          params: {
+            name: call.name,
+            arguments: call.arguments,
+            _meta: {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientInfo": {
+                name: "runtime-capacity-baseline",
+                version: "2.0.0-rc.1",
+              },
+              "io.modelcontextprotocol/clientCapabilities": {
+                extensions: { "io.modelcontextprotocol/tasks": {} },
+              },
+              ...(taskExecution === undefined
+                ? {}
+                : {
+                    "io.sdar/taskExecution": {
+                      profileVersion: "1.0",
+                      ...taskExecution,
+                    },
+                  }),
+            },
+          },
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload.error !== undefined) {
+        throw new Error(`Frozen capacity request failed: ${JSON.stringify(payload.error)}`);
+      }
+      return payload.result;
+    },
+    close: () => Promise.resolve(),
+  };
 }
 
 async function seedRecoveryCandidates(pool, prefix, count) {

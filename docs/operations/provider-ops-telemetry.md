@@ -1,119 +1,74 @@
-# Provider Ops Telemetry
+# Provider 运维遥测
 
-Runtime v1.1 exports Provider operational telemetry over OTLP/HTTP while retaining the existing
-Prometheus `/metrics` endpoint. Telemetry is optional and never participates in health,
-readiness, Task state, command dispatch, safe stop, recovery, or Outbox delivery decisions.
+Runtime v1.1 通过 OTLP/HTTP 导出 Provider 运维遥测，同时保留 Prometheus `/metrics`（指标接口）。遥测不参与 Task、命令派发、安全停止、恢复、Outbox、存活或业务就绪决策。
 
-## Boundary and configuration
+## 对外边界与配置
 
-Runtime sends traces, logs/events, and metrics only to the configured OTLP endpoint. It has no
-ClickHouse or SDAR Core client and does not query either system. Enable export with
-`OTEL_ENABLED=true`; set `OTEL_EXPORTER_OTLP_ENDPOINT` to the collector base URL and optionally
-set a stable replica-specific `OTEL_SERVICE_INSTANCE_ID`. The exporter appends `/v1/traces`,
-`/v1/logs`, and `/v1/metrics`. Production rejects plaintext OTLP when telemetry is enabled. Supply
-collector authentication through `OTEL_EXPORTER_OTLP_HEADERS_FILE`, and enable mutual TLS with
-`OTEL_EXPORTER_OTLP_TLS_MODE=required` plus complete CA, client certificate, and private-key files.
-Header values and TLS material are exporter-only secrets and are never copied into logs, events,
-spans, or ConfigMaps.
+- `ProviderTelemetryIngress`（Provider 遥测入口）是 Provider 主动调用 Runtime 的 gRPC 接口；请求、响应、错误码和客户端样例见 [Provider 遥测入口](../protocol/provider-telemetry-ingress.md)。
+- `ProviderOpsEnvelope`（Provider 运维事件信封）是 Runtime 向外部 OTLP Collector 导出的稳定产品契约；OTel Log 只是传输载体。
+- `/metrics`（Prometheus 指标接口）继续提供拉取式指标。
 
-Every signal carries the OTel resource attributes `service.name`, `service.version`,
-`service.instance.id`, `deployment.environment`, `sdar.provider.id`, and
-`sdar.provider.version`. Each Runtime replica must use a different instance id.
+设置 `OTEL_ENABLED=true`（启用 OTLP）并通过 `OTEL_EXPORTER_OTLP_ENDPOINT`（Collector 基础地址）指定目标。导出器分别追加 `/v1/traces`、`/v1/logs` 和 `/v1/metrics`。生产环境拒绝明文 OTLP；认证请求头只能通过 `OTEL_EXPORTER_OTLP_HEADERS_FILE`（导出请求头文件）提供，mTLS 需要 `OTEL_EXPORTER_OTLP_TLS_MODE=required` 和完整的 CA、客户端证书、私钥文件。
 
-## Provider telemetry ingress
+每个信号都携带固定 OTel Resource（资源属性）：`service.name`（服务名）、`service.version`（服务版本）、`service.instance.id`（副本实例标识符）、`deployment.environment`（部署环境）、`sdar.provider.id`（Provider 标识符）和 `sdar.provider.version`（Provider 版本）。每个 Runtime 副本必须使用不同的实例标识符。
 
-Resource Providers do not need an OTel SDK. Runtime implements the separate batch-unary
-`io.sdar.mcp.tasks.telemetry.v1.ProviderTelemetryIngress` gRPC service. It accepts only
-`resource.state`, `resource.metric`, `resource.health`, and Task-bound `execution.progress` facts.
-This call direction is Provider to Runtime and does not modify `ResourceProviderAdapter`.
+## 外部输出样例
 
-For Task-bound events, Runtime verifies Provider, Task, external execution, and operation identity,
-then injects the committed Task's operation, execution mode, simulation id, argument hash,
-authorization-context hash, Adapter revision, and Observation revision. Resource-only events require
-a resource id. Production ingress requires mTLS, and the client certificate common name must match
-the Manifest Provider id.
+```json
+{
+  "schemaName": "sdar.provider.ops.event",
+  "schemaVersion": "1.1.0",
+  "recordId": "d56fda7f-f41a-5f54-96c8-0ee0edcb7de5",
+  "recordHash": "b7d7d7d865c61c1f13f4caf4dbe88da8ea603e1e3fb90e6729f2e321caa8be28",
+  "recordType": "provider.task.lifecycle",
+  "eventCategory": "audit",
+  "deliveryClass": "durable",
+  "providerId": "warehouse-provider",
+  "runtimeVersion": "1.1.0",
+  "instanceId": "runtime-replica-1",
+  "taskId": "59fc754f-47fa-4d8d-9fa8-146abdc47b87",
+  "operationName": "inventory.recount",
+  "observationRevision": 12,
+  "occurredAt": "2026-07-18T03:12:10.000Z",
+  "emittedAt": "2026-07-18T03:12:10.120Z",
+  "attributes": { "terminal": false },
+  "payload": { "previousState": "queued", "currentState": "working" }
+}
+```
 
-Accepted Provider events are inserted into `provider_ops_delivery` before the RPC acknowledges
-them. `(providerId, providerEventId)` is idempotent across replicas: identical retries return the
-same record id with `duplicate=true`; changed content is rejected with
-`PROVIDER_EVENT_ID_CONFLICT`. Batch, event-byte, JSON-depth/node, key/id, timestamp-skew, and rate
-limits are enforced before persistence.
+`recordId`（记录标识符）是基于稳定事件身份生成的 UUIDv5；`recordHash`（记录哈希）是 RFC 8785 规范 JSON 的 SHA-256，并排除 `emittedAt`（导出时间）、`instanceId`（副本标识符）等投递期元数据。示例 UUID 和哈希仅展示格式，消费者不得依赖固定值。
 
-## Stable event contract
+## 稳定事件契约
 
-`ProviderOpsEnvelope` is the product contract; OTel logs are only its transport. `recordId` is a
-deterministic UUIDv5 over stable event identity. `recordHash` is SHA-256 over RFC 8785 canonical
-JSON and excludes delivery-time metadata. Task lifecycle audit records come from committed
-transition/Outbox facts, never from API-handler intent. A rollback emits no lifecycle record.
+| 标识符                        | 中文解释              | 来源/覆盖范围                                                              |
+| ----------------------------- | --------------------- | -------------------------------------------------------------------------- |
+| `provider.task.lifecycle`     | Provider 任务生命周期 | 已提交的 Task 状态迁移；覆盖排队、运行、等待、暂停、恢复、停止、终态和过期 |
+| `provider.command.lifecycle`  | Provider 命令生命周期 | 命令创建、声明、重试、确认、拒绝、耗尽和取代                               |
+| `adapter.rpc`                 | Adapter 远程调用链路  | 真实 gRPC 边界的方法、耗时和状态，不含请求/响应正文                        |
+| `provider.scheduler.decision` | Provider 调度决策     | 定时、声明、启动、重试、截止时间和启动窗口结果                             |
+| `provider.recovery.lifecycle` | Provider 恢复生命周期 | 逐 Task 协调成功或失败                                                     |
+| `provider.ttl.lifecycle`      | Provider TTL 生命周期 | 逐 Task 过期、清除或阻塞                                                   |
 
-| Record or span                | Source                                 | Coverage                                                                |
-| ----------------------------- | -------------------------------------- | ----------------------------------------------------------------------- |
-| `provider.task.lifecycle`     | committed Task transition Outbox facts | queued/running/waiting/paused/resuming/stopping/terminal/expired        |
-| `provider.command.lifecycle`  | Durable Command Dispatcher facts       | created/claimed/retry/ack/reject/exhaust/supersede                      |
-| `adapter.rpc`                 | real gRPC Adapter boundary             | method, provider, safe identities, duration, status; never RPC payloads |
-| `provider.scheduler.decision` | Durable Scheduler results              | scheduled/claimed/started/retry/deadline/start-window miss              |
-| `provider.recovery.lifecycle` | Recovery Manager results               | per-Task reconcile success/failure                                      |
-| `provider.ttl.lifecycle`      | TTL Cleaner committed results          | per-Task expire/purge/blocked                                           |
+Task 生命周期审计记录来自已提交的状态迁移/Outbox 事实，而不是 API Handler（处理器）的意图；事务回滚不会产生生命周期记录。接受的 Provider 事件在 RPC 确认前写入 `provider_ops_delivery`（Provider 运维投递表）。`(providerId, providerEventId)` 在多副本间幂等：相同重试返回相同 `recordId` 且 `duplicate=true`（重复），内容变化则返回 `PROVIDER_EVENT_ID_CONFLICT`（事件标识冲突）。
 
-Lifecycle payloads include previous/current state and substate, reason, Observation and Adapter
-revisions, terminal flag, and result class. Command payloads include command type/sequence,
-previous/current durable command state, attempt, retry delay, reason, and Adapter RPC status.
+## 指标
 
-## Metrics
+OTel Counter（计数器）包括 `provider_task_transition_total`（任务迁移总数）、`provider_command_total`（命令总数）、`adapter_rpc_total`（Adapter RPC 总数）、`provider_error_total`（Provider 错误总数）和 `provider_recovery_total`（恢复总数）。
 
-Prometheus compatibility is unchanged. OTel counters are `provider_task_transition_total`,
-`provider_command_total`, `adapter_rpc_total`, `provider_error_total`, and
-`provider_recovery_total`. Telemetry self-monitoring counters are
-`telemetry_events_emitted_total`, `telemetry_events_dropped_total`,
-`telemetry_export_attempt_total`, `telemetry_export_failed_total`, and
-`telemetry_audit_retry_total`. Histograms are `adapter_rpc_duration`, `command_dispatch_duration`,
-`task_transition_duration`, and `recovery_duration`. Gauges are `active_tasks`,
-`pending_commands`, `outbox_pending`, `recovery_backlog`, `telemetry_queue_depth`,
-`telemetry_audit_backlog`, and `telemetry_audit_oldest_age_seconds`. The self-monitoring counters
-and gauges are also exposed by the Prometheus endpoint.
+自监控 Counter 包括 `telemetry_events_emitted_total`（已发事件总数）、`telemetry_events_dropped_total`（丢弃事件总数）、`telemetry_export_attempt_total`（导出尝试总数）、`telemetry_export_failed_total`（导出失败总数）和 `telemetry_audit_retry_total`（审计重试总数）。Histogram（直方图）包括 `adapter_rpc_duration`、`command_dispatch_duration`、`task_transition_duration` 和 `recovery_duration`，分别表示 Adapter RPC、命令派发、任务迁移和恢复耗时。
 
-Metric labels are allowlisted and bounded by both key and value. Unknown values become `other`;
-arbitrary Adapter reason text cannot create a series. Self-monitoring labels are limited to
-`signal=trace|log|metric|audit|other` and
-`reason=queue_full|timeout|exporter_error|serialization|invalid|other`. Task ids, execution ids,
-correlation ids, user ids, argument hashes, and authorization hashes are never metric labels.
+Gauge（仪表）包括 `active_tasks`（活动任务数）、`pending_commands`（待处理命令数）、`outbox_pending`（待发布 Outbox 数）、`recovery_backlog`（恢复积压）、`telemetry_queue_depth`（遥测队列深度）、`telemetry_audit_backlog`（审计积压）和 `telemetry_audit_oldest_age_seconds`（最老审计积压秒数）。
 
-## Trace propagation
+指标标签经过白名单和长度限制。未知值归一化为 `other`（其他）；Task、执行、关联、用户、参数哈希和授权哈希绝不能成为指标标签。
 
-Runtime creates `mcp.tools.call`, `mcp.tasks.get`, `mcp.tasks.cancel`, `mcp.tasks.update`,
-`mcp.tasks.pause`, and `mcp.tasks.resume` server spans. Valid W3C `traceparent`/`tracestate` HTTP
-headers become the parent; otherwise Runtime starts a new root. Adapter client spans wrap the real
-gRPC call and inject W3C context into gRPC metadata before invocation. They never include request or
-response payloads or raw exceptions.
+## 链路传播
 
-Migration 018 stores the Task trace id, Runtime root `traceparent`/`tracestate`, and correlation id on
-both admission intent and Task. Scheduler, command dispatcher, watchdog, and recovery Adapter calls
-restore that parent after restart. Task-bound Provider events carry the Provider span identity when
-valid and include the persisted Task trace id as a link attribute.
+Runtime 为 MCP 调用创建服务端 Span（链路片段），并接受有效的 W3C `traceparent`（父链路上下文）和 `tracestate`（供应商链路状态）。Adapter 客户端 Span 包裹真实 gRPC 调用并注入 W3C 上下文，不记录请求/响应载荷或原始异常。
 
-## Privacy and failure behavior
+迁移 018 将 Task 链路标识符、根上下文和关联标识符同时保存到接纳意图与 Task。Scheduler、命令派发器、看门狗和恢复工作在重启后恢复该上下文。Task 关联的 Provider 事件在上下文有效时保留 Provider Span 身份，并把已持久化 Task 链路作为 Link（链路链接），但不能改写 Task 权威状态。
 
-The sanitizer recursively removes passwords, secrets, API keys, cookies, tokens,
-authorization/JWT material, raw arguments, input/answer values, and Adapter payloads before
-export. It applies depth, node, per-string, and total-byte budgets to objects, arrays, maps, and
-sets; cycles and exceeded limits become stable redaction/truncation markers. `argumentHash`,
-`authorizationContextHash`, `simulationId`, and `executionMode` are allowed where the event
-contract requires them. Adapter spans never contain request or response bodies.
+## 隐私和失败语义
 
-Provider event payloads use event-specific allowlists. `resource.state` accepts `state`,
-`reasonCode`, and bounded `attributes`; `resource.metric` accepts `metricName`, `value`, `unit`, and
-`quality`; `resource.health` accepts `health` and `reasonCode`; `execution.progress` accepts
-`current`, `total`, `percentage`, and `unit`. Unknown payload fields are dropped before durable
-persistence.
+Sanitizer（脱敏器）递归移除密码、密钥、Cookie、Token、授权/JWT 材料、原始参数、输入/答案值和 Adapter 载荷，并对对象、数组、Map、Set 和循环引用执行深度、节点、字符串和总字节预算。Provider 事件载荷使用按事件类型定义的字段白名单，未知字段在持久化前删除。
 
-Diagnostic processors use bounded queues, batches, and export timeouts. Audit facts use the durable
-delivery table, lease-safe claims, bounded backoff, and exporter acknowledgement before marking a
-record delivered. Collector outage never changes business processing or readiness; audit records
-remain retryable. An exporter security-file or initialization failure produces a sanitized warning,
-leaves telemetry disabled, and does not make telemetry a readiness dependency. On shutdown, Runtime
-stops both publisher loops, force-flushes telemetry providers, and closes the Provider ingress
-server.
-
-No telemetry development stack is shipped in v1.1. CI uses in-memory, timeout, and queue-pressure
-exporters, keeping the default Compose stack and production image free of Collector/ClickHouse
-dependencies.
+诊断信号使用有界队列、批次和超时；审计事实使用持久化投递表、租约安全声明、有界退避，并且只在导出器确认后标记已投递。Collector 故障不会改变业务或就绪状态，审计记录保持可重试。导出器密钥/初始化失败会产生脱敏告警并禁用遥测。关闭时 Runtime 停止发布循环、强制刷新遥测 Provider，并关闭 Provider 遥测入口。

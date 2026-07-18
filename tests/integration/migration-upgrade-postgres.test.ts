@@ -91,9 +91,23 @@ describe("pre-012 database forward upgrade", () => {
       "SELECT 1 FROM runtime_schema_migration WHERE version = '012_idempotency_claim_lease.sql'",
     );
     expect(applied.rowCount).toBe(1);
+    const runtimeRevision = await upgradePool.query<{
+      column_name: string;
+      is_nullable: string;
+    }>(
+      `SELECT column_name, is_nullable FROM information_schema.columns
+       WHERE table_schema=$1 AND table_name='provider_task'
+         AND column_name IN ('runtime_revision','runtime_updated_at')
+       ORDER BY column_name`,
+      [schema],
+    );
+    expect(runtimeRevision.rows).toEqual([
+      { column_name: "runtime_revision", is_nullable: "NO" },
+      { column_name: "runtime_updated_at", is_nullable: "NO" },
+    ]);
     const current = await upgradePool.query<{ count: string }>(
       "SELECT count(*) FROM runtime_schema_migration",
     );
-    expect(current.rows[0]?.count).toBe("19");
+    expect(current.rows[0]?.count).toBe("22");
   });
 });

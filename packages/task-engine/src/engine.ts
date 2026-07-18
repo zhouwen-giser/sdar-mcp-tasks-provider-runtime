@@ -49,6 +49,7 @@ import {
   synchronousResult,
   validatedSnapshotTransition,
 } from "./result-contract.js";
+import { mapTaskToDetailedTask, type DetailedTaskProjection } from "./detailed-task.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -120,6 +121,7 @@ export class TaskEngine {
     ttlMs?: number,
     idempotencyKey?: string,
     timing: TaskExecutionTiming = defaultTiming,
+    reservationRef?: string,
   ): Promise<ToolInvocationResult> {
     const startedAt = performance.now();
     try {
@@ -128,6 +130,12 @@ export class TaskEngine {
         (!Number.isSafeInteger(ttlMs) || ttlMs < 1 || ttlMs > 31_536_000_000)
       ) {
         throw new InvalidParamsError("INVALID_TASK_TTL");
+      }
+      if (
+        reservationRef !== undefined &&
+        (reservationRef.length < 1 || reservationRef.length > 256)
+      ) {
+        throw new InvalidParamsError("INVALID_RESERVATION_REF");
       }
       operation.validateArguments(argumentsValue);
       let anchors: TimingAnchors;
@@ -162,6 +170,7 @@ export class TaskEngine {
                 argumentHash,
                 timing,
                 anchors,
+                reservationRef,
               ),
             ),
         );
@@ -177,6 +186,7 @@ export class TaskEngine {
         argumentHash,
         timing,
         anchors,
+        reservationRef,
       );
     } finally {
       const labels = { operation: operation.name, executionMode: authorization.executionMode };
@@ -190,14 +200,42 @@ export class TaskEngine {
     }
   }
 
+  async callFrozenOperation(
+    operation: ValidatedOperation,
+    argumentsValue: Record<string, unknown>,
+    authorization: AuthorizationContext,
+    idempotencyKey?: string,
+    timing?: TaskExecutionTiming,
+    reservationRef?: string,
+  ): Promise<Record<string, unknown>> {
+    const invocation = await this.callOperation(
+      operation,
+      argumentsValue,
+      authorization,
+      undefined,
+      idempotencyKey,
+      timing,
+      reservationRef,
+    );
+    if (invocation.kind === "result") {
+      return { resultType: "complete", ...invocation.result };
+    }
+    const taskId = invocation.task.taskId;
+    if (typeof taskId !== "string") throw new Error("CREATE_TASK_RESULT_TASK_ID_MISSING");
+    return this.getFrozenTask(taskId, authorization, "create");
+  }
+
   async checkAvailability(
     checks: AvailabilityCheck[],
     authorization: AuthorizationContext,
   ): Promise<AvailabilityResponseValue> {
-    if (checks.length < 1 || checks.length > 128) throw new Error("INVALID_AVAILABILITY_BATCH");
+    if (checks.length < 1 || checks.length > 64) throw new Error("INVALID_AVAILABILITY_BATCH");
     const requestIds = new Set<string>();
     for (const check of checks) {
-      if (!check.requestId || requestIds.has(check.requestId)) {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(check.requestId) ||
+        requestIds.has(check.requestId)
+      ) {
         throw new Error("INVALID_AVAILABILITY_REQUEST_ID");
       }
       requestIds.add(check.requestId);
@@ -207,7 +245,11 @@ export class TaskEngine {
       if (!operation?.capabilities.availability) {
         throw new CapabilityNotSupportedError("AVAILABILITY_NOT_SUPPORTED");
       }
-      if (!isUnresolvedArguments(check.arguments)) operation.validateArguments(check.arguments);
+      if (check.arguments.state === "complete") {
+        operation.validateArguments(check.arguments.value);
+      } else {
+        assertUnresolvedPointers(check.arguments.unresolvedPaths);
+      }
     }
     try {
       const response = await this.gateway.checkAvailability(
@@ -233,6 +275,7 @@ export class TaskEngine {
     argumentHash: string,
     timing: TaskExecutionTiming,
     anchors: TimingAnchors,
+    reservationRef?: string,
     persistedOperationSnapshotId?: string,
   ): Promise<ToolInvocationResult> {
     this.onTrace?.({
@@ -250,6 +293,7 @@ export class TaskEngine {
         taskId,
         argumentHash,
         timing: toAdapterTiming(timing),
+        ...(reservationRef === undefined ? {} : { reservationRef }),
       });
       validateStartResponseIdentity(response, {
         taskId,
@@ -279,6 +323,7 @@ export class TaskEngine {
       deadlineAt: anchors.deadlineAt,
       ttlMs: ttlMs ?? 259_200_000,
       timing,
+      reservationRef: reservationRef ?? null,
     };
     const inserted = await this.#repository.createAdmissionIntent(intent);
     if (!inserted || recovering) {
@@ -329,6 +374,7 @@ export class TaskEngine {
         ...executionOptions(authorization),
         invocationAttempt: 1,
         timing: toAdapterTiming(timing),
+        ...(reservationRef === undefined ? {} : { reservationRef }),
       });
     } catch (error) {
       await this.#repository.markAdmissionUncertain(taskId);
@@ -419,6 +465,7 @@ export class TaskEngine {
       deadlineAt: Date | null;
       ttlMs: number | null;
       timing: TaskExecutionTiming;
+      reservationRef: string | null;
     },
     externalExecutionId: string,
     snapshotValue: ExecutionSnapshot,
@@ -553,6 +600,33 @@ export class TaskEngine {
     );
   }
 
+  async getFrozenTask(
+    taskId: string,
+    authorization: AuthorizationContext,
+    projection: DetailedTaskProjection = "get",
+  ): Promise<Record<string, unknown>> {
+    const [task, inputRequests] = await Promise.all([
+      this.#repository.getAuthorized(taskId, authorization),
+      this.#repository.listInputRequests(taskId),
+    ]);
+    return mapTaskToDetailedTask(task, inputRequests, projection);
+  }
+
+  async cancelTaskCooperatively(
+    taskId: string,
+    authorization: AuthorizationContext,
+  ): Promise<void> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    if (isTerminalState(task.internalState)) return;
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (operation.capabilities.cancel) {
+      const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
+      await this.#repository.beginCancel(taskId, requestHash);
+      return;
+    }
+    await this.#repository.recordCooperativeCancellationIntent(taskId);
+  }
+
   async getTaskObservations(
     taskId: string,
     authorization: AuthorizationContext,
@@ -592,6 +666,7 @@ export class TaskEngine {
         latestStartAt: admission.latestStartAt,
         deadlineAt: admission.deadlineAt,
       },
+      admission.reservationRef ?? undefined,
       admission.operationSnapshotId,
     );
   }
@@ -757,6 +832,44 @@ export class TaskEngine {
       return this.#resolveExistingCommand(taskId, authorization, "UPDATE", command);
     }
     return this.#taskWithCommandReceipt(taskId, authorization, command);
+  }
+
+  async updateTaskInputResponses(
+    taskId: string,
+    inputResponses: Record<string, { action: "accept" | "decline" | "cancel"; content?: unknown }>,
+    authorization: AuthorizationContext,
+  ): Promise<void> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (!operation.capabilities.inputRequired) {
+      throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
+    }
+    const requests = await this.#repository.listInputRequests(taskId);
+    const ajv = new Ajv2020({ strict: true, allErrors: true });
+    const pending: [string, { action: "accept" | "decline" | "cancel"; content?: unknown }][] = [];
+    for (const [key, response] of Object.entries(inputResponses)) {
+      const request = requests.find((candidate) => candidate.key === key);
+      if (request === undefined) continue;
+      const hash = createHash("sha256").update(canonicalize(response)).digest("hex");
+      if (request.status === "ANSWERED") {
+        if (request.responseHash !== hash) {
+          throw new InvalidParamsError("INPUT_RESPONSE_CONFLICT");
+        }
+        continue;
+      }
+      if (response.action === "accept" && !ajv.compile(request.schema)(response.content)) {
+        throw new InvalidParamsError("INVALID_INPUT_RESPONSE");
+      }
+      pending.push([key, response]);
+    }
+    if (pending.length === 0) return;
+    const normalized = Object.fromEntries(
+      pending.sort(([left], [right]) => left.localeCompare(right)),
+    );
+    const requestHash = createHash("sha256").update(canonicalize(normalized)).digest("hex");
+    await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
+      inputResponses: normalized,
+    });
   }
 
   async controlTask(
@@ -987,11 +1100,47 @@ function expectedTaskIdentity(task: TaskRecord, operationName: string) {
 }
 
 function normalizeInputRequests(snapshot: ExecutionSnapshot) {
-  return (snapshot.inputRequests ?? []).map((request) => ({
+  const frozen = snapshot.mcpInputRequests ?? [];
+  const legacy = snapshot.inputRequests ?? [];
+  if (frozen.length > 0 && legacy.length > 0) throw new Error("ADAPTER_MRTR_WIRE_MIXED");
+  if (frozen.length > 0) {
+    return frozen.map((request) => {
+      const method: unknown = request.method;
+      if (method !== "elicitation/create") {
+        throw new Error("ADAPTER_MRTR_METHOD_UNSUPPORTED");
+      }
+      const params = protoStructToJson(request.params);
+      const description = typeof params.message === "string" ? params.message : "Input required";
+      const requestedSchema = params.requestedSchema;
+      const schema =
+        typeof requestedSchema === "object" &&
+        requestedSchema !== null &&
+        !Array.isArray(requestedSchema)
+          ? (requestedSchema as Record<string, unknown>)
+          : {};
+      return {
+        key: request.key,
+        description,
+        schema,
+        required: true,
+        requestJson: { method: "elicitation/create" as const, params },
+        status: "OPEN" as const,
+      };
+    });
+  }
+  return legacy.map((request) => ({
     key: request.key,
     description: request.description,
     schema: protoStructToJson(request.inputSchema),
     required: request.required,
+    requestJson: {
+      method: "elicitation/create" as const,
+      params: {
+        mode: "form",
+        message: request.description,
+        requestedSchema: protoStructToJson(request.inputSchema),
+      },
+    },
     status: "OPEN" as const,
   }));
 }
@@ -1329,12 +1478,12 @@ function resourceReference(
 }
 
 function toAdapterAvailabilityCheck(check: AvailabilityCheck): AvailabilityCheckInput {
-  if (isUnresolvedArguments(check.arguments)) {
+  if (check.arguments.state === "partial") {
     return {
       requestId: check.requestId,
       operationName: check.operationName,
       unresolvedArguments: {
-        knownArguments: check.arguments.knownArguments,
+        knownArguments: check.arguments.knownValue,
         unresolvedPaths: check.arguments.unresolvedPaths,
       },
       timing: toAdapterTiming(check.timing),
@@ -1343,17 +1492,20 @@ function toAdapterAvailabilityCheck(check: AvailabilityCheck): AvailabilityCheck
   return {
     requestId: check.requestId,
     operationName: check.operationName,
-    arguments: check.arguments,
+    arguments: check.arguments.value,
     timing: toAdapterTiming(check.timing),
   };
 }
 
-function isUnresolvedArguments(value: AvailabilityCheck["arguments"]): value is {
-  unresolved: true;
-  knownArguments: Record<string, unknown>;
-  unresolvedPaths: string[];
-} {
-  return "unresolved" in value && value.unresolved === true;
+function assertUnresolvedPointers(pointers: string[]): void {
+  if (pointers.length < 1 || pointers.length > 128 || new Set(pointers).size !== pointers.length) {
+    throw new InvalidParamsError("INVALID_UNRESOLVED_PATHS");
+  }
+  for (const pointer of pointers) {
+    if (pointer.length > 512 || !/^(?:|(?:\/(?:[^~/]|~[01])*)*)$/.test(pointer)) {
+      throw new InvalidParamsError("INVALID_UNRESOLVED_PATH");
+    }
+  }
 }
 
 function toAdapterTiming(timing: AvailabilityCheck["timing"]): Record<string, unknown> {
@@ -1390,8 +1542,10 @@ function fromAdapterAvailability(result: {
     operationName: result.operationName,
     availability: result.availability.toLowerCase() as
       "available" | "restricted" | "disabled" | "unknown",
-    riskLevel: result.riskLevel.toLowerCase() as
-      "low" | "medium" | "high" | "critical" | "unspecified",
+    riskLevel:
+      result.riskLevel === "UNSPECIFIED"
+        ? ("critical" as const)
+        : (result.riskLevel.toLowerCase() as "low" | "medium" | "high" | "critical"),
     ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}),
     ...(result.description ? { description: result.description } : {}),
     ...(hasTimestamp(result.validUntil)

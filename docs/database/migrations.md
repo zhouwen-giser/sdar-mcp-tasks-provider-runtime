@@ -91,13 +91,43 @@ backoff so persistent failures cannot starve newly recoverable Tasks.
 expiry. Dispatchers renew ownership during slow Adapter RPCs and use owner-CAS completion,
 preventing expired batch claims from producing duplicate side effects across Runtime replicas.
 
+`017_provider_ops_audit_delivery.sql`（Provider 运维审计持久化投递）创建
+`provider_ops_delivery`（Provider 运维投递表）。Task、Command 和 Provider Event 的 Audit
+Record（审计记录）先以稳定 `event_key`（事件键）和 `record_id`（记录标识）提交到数据库，
+再由多副本 Publisher（发布器）通过带过期时间的 claim lease（领取租约）投递。Collector
+失败只会进入 `RETRY_WAIT`（等待重试），不会回滚业务事务或阻塞 Product Outbox（产品事件
+发件箱）。
+
+`018_runtime_trace_context.sql`（Runtime 链路上下文持久化）为 `admission_intent`（准入意图）
+和 `provider_task`（Provider Task）增加 `trace_id`（链路标识）、`root_traceparent`（根级 W3C
+父上下文）、`root_tracestate`（根级厂商上下文）和 `correlation_id`（关联标识）。Scheduler、
+Command Dispatcher、Watchdog 和 Recovery Worker 可以在进程重启后恢复原 Task Trace（任务
+链路），而不需要保存原始请求负载。
+
+`019_runtime_revision.sql` separates the frozen externally visible Task projection clock from
+internal persistence maintenance. New and upgraded Tasks start with a positive
+`runtime_revision`; `runtime_updated_at` advances atomically with that revision only when the
+authoritative `DetailedTask` projection changes. Lease renewals and recovery bookkeeping may
+continue to update the internal `updated_at` without changing frozen Wire output.
+
+`020_frozen_protocol_mrtr.sql` stores the exact MCP server-to-client request JSON and the exact
+keyed response JSON/hash alongside the retained Legacy input columns. Existing requests are
+backfilled as `elicitation/create`; answered Legacy rows are represented as accepted responses.
+The Adapter proto adds `McpTaskInputRequest` and `McpTaskInputResponse` on new field numbers while
+marking the old `InputRequest` and `UpdateValue` fields deprecated without deleting them.
+
+`021_frozen_reservation_ref.sql` persists the optional frozen `reservationRef` on both Admission
+Intent and Provider Task rows so immediate, recovered, and scheduled starts forward the same
+bounded reference to the Adapter.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate
 Snapshot insertion, task lifecycle constraints, crash windows, applied-migration tamper
 detection, and a complete 001-006 rc.1 fixture containing pending/uncertain admissions,
 working/queued/input/stopping/scheduled/terminal Tasks, a pending command, observation/outbox and
 idempotency data. After 007-016 it proves data/backfills and executes Recovery, Dispatcher and
-Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter. rc.3 also verifies all
-17 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths.
+Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter. v1.1 verifies all
+22 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths, including
+Provider Ops durable delivery and persisted Trace Context（持久化链路上下文）.
 
 rc.2 repository code reads the committed Task through the same client used for the publication
 transaction, then releases it. This is a runtime access-pattern fix and requires no schema

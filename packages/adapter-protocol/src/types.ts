@@ -52,9 +52,26 @@ export interface ExecutionSnapshot {
   observedAt?: unknown;
   result?: unknown;
   inputRequests?: AdapterInputRequest[];
+  mcpInputRequests?: McpTaskInputRequest[];
+  evidence?: AdapterEvidenceItem[];
   operationName: string;
   argumentHash: string;
   executionContext?: AdapterExecutionContext;
+}
+
+export interface AdapterEvidenceItem {
+  evidenceId: string;
+  evidenceType: string;
+  observedAt: string;
+  subjectRef?: string;
+  payloadRef?: {
+    kind: string;
+    jsonPointer?: string;
+    uri?: string;
+    mediaType?: string;
+    sha256?: string;
+  };
+  producer?: string[];
 }
 
 export interface AdapterExecutionContext {
@@ -69,6 +86,20 @@ export interface AdapterInputRequest {
   description: string;
   inputSchema: unknown;
   required: boolean;
+}
+
+export interface McpTaskInputRequest {
+  key: string;
+  method: "elicitation/create";
+  params: unknown;
+}
+
+export interface McpTaskInputResponse {
+  key: string;
+  result: {
+    action: "accept" | "decline" | "cancel";
+    content?: unknown;
+  };
 }
 
 export interface StartOperationResponse {

@@ -4,7 +4,7 @@ import { jsonToProtoStruct, protoStructToJson } from "../../adapter-protocol/src
 import type { OperationDefinition, ProviderManifest } from "../../adapter-protocol/src/index.js";
 import { AdapterContractError, InvalidParamsError } from "../../domain/src/index.js";
 
-const OPERATION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+const OPERATION_NAME = /^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$/;
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 export interface ValidatedOperation extends Omit<
@@ -174,15 +174,13 @@ export class OperationRegistry {
             _meta: {
               "io.sdar/taskExecution": {
                 profileVersion: "1.0",
-                execution: operation.execution.toLowerCase(),
+                taskBehavior: taskBehavior(operation.execution),
                 availability: operation.capabilities.availability ? "dynamic" : "not_supported",
                 supportsScheduling: operation.capabilities.scheduling,
                 supportsMaxElapsed: operation.capabilities.maxElapsed,
                 supportsObservations: operation.capabilities.observations,
                 supportsInputRequired: operation.capabilities.inputRequired,
-                supportsCancel: operation.capabilities.cancel,
-                supportsIdempotency: operation.capabilities.idempotency,
-                outputSchemaVersion: manifestHash,
+                idempotency: operation.capabilities.idempotency ? "server_managed" : "none",
               },
             },
           },
@@ -229,5 +227,18 @@ export class OperationRegistry {
     }).operations[0];
     if (resolved === undefined) throw new Error("INVALID_OPERATION_SNAPSHOT");
     return { ...resolved, manifestHash: metadata.manifestHash, definition };
+  }
+}
+
+function taskBehavior(
+  execution: OperationDefinition["execution"],
+): "synchronous_only" | "server_directed" | "task_required" {
+  switch (execution) {
+    case "SYNCHRONOUS":
+      return "synchronous_only";
+    case "TASK_CAPABLE":
+      return "server_directed";
+    case "TASK_REQUIRED":
+      return "task_required";
   }
 }

@@ -571,6 +571,11 @@ export class StartOperationRequest extends jspb.Message {
     getInvocationAttempt(): number;
     setInvocationAttempt(value: number): StartOperationRequest;
 
+    hasReservationRef(): boolean;
+    clearReservationRef(): void;
+    getReservationRef(): string | undefined;
+    setReservationRef(value: string): StartOperationRequest;
+
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): StartOperationRequest.AsObject;
     static toObject(includeInstance: boolean, msg: StartOperationRequest): StartOperationRequest.AsObject;
@@ -591,6 +596,7 @@ export namespace StartOperationRequest {
         executionContext?: ExecutionContext.AsObject,
         argumentHash: string,
         invocationAttempt: number,
+        reservationRef?: string,
     }
 }
 
@@ -730,6 +736,148 @@ export namespace InputRequest {
     }
 }
 
+export class McpTaskInputRequest extends jspb.Message {
+    getKey(): string;
+    setKey(value: string): McpTaskInputRequest;
+    getMethod(): string;
+    setMethod(value: string): McpTaskInputRequest;
+
+    hasParams(): boolean;
+    clearParams(): void;
+    getParams(): google_protobuf_struct_pb.Struct | undefined;
+    setParams(value?: google_protobuf_struct_pb.Struct): McpTaskInputRequest;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): McpTaskInputRequest.AsObject;
+    static toObject(includeInstance: boolean, msg: McpTaskInputRequest): McpTaskInputRequest.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: McpTaskInputRequest, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): McpTaskInputRequest;
+    static deserializeBinaryFromReader(message: McpTaskInputRequest, reader: jspb.BinaryReader): McpTaskInputRequest;
+}
+
+export namespace McpTaskInputRequest {
+    export type AsObject = {
+        key: string,
+        method: string,
+        params?: google_protobuf_struct_pb.Struct.AsObject,
+    }
+}
+
+export class McpTaskInputResponse extends jspb.Message {
+    getKey(): string;
+    setKey(value: string): McpTaskInputResponse;
+
+    hasResult(): boolean;
+    clearResult(): void;
+    getResult(): google_protobuf_struct_pb.Struct | undefined;
+    setResult(value?: google_protobuf_struct_pb.Struct): McpTaskInputResponse;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): McpTaskInputResponse.AsObject;
+    static toObject(includeInstance: boolean, msg: McpTaskInputResponse): McpTaskInputResponse.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: McpTaskInputResponse, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): McpTaskInputResponse;
+    static deserializeBinaryFromReader(message: McpTaskInputResponse, reader: jspb.BinaryReader): McpTaskInputResponse;
+}
+
+export namespace McpTaskInputResponse {
+    export type AsObject = {
+        key: string,
+        result?: google_protobuf_struct_pb.Struct.AsObject,
+    }
+}
+
+export class EvidencePayloadRef extends jspb.Message {
+    getKind(): string;
+    setKind(value: string): EvidencePayloadRef;
+
+    hasJsonPointer(): boolean;
+    clearJsonPointer(): void;
+    getJsonPointer(): string | undefined;
+    setJsonPointer(value: string): EvidencePayloadRef;
+
+    hasUri(): boolean;
+    clearUri(): void;
+    getUri(): string | undefined;
+    setUri(value: string): EvidencePayloadRef;
+
+    hasMediaType(): boolean;
+    clearMediaType(): void;
+    getMediaType(): string | undefined;
+    setMediaType(value: string): EvidencePayloadRef;
+
+    hasSha256(): boolean;
+    clearSha256(): void;
+    getSha256(): string | undefined;
+    setSha256(value: string): EvidencePayloadRef;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): EvidencePayloadRef.AsObject;
+    static toObject(includeInstance: boolean, msg: EvidencePayloadRef): EvidencePayloadRef.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: EvidencePayloadRef, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): EvidencePayloadRef;
+    static deserializeBinaryFromReader(message: EvidencePayloadRef, reader: jspb.BinaryReader): EvidencePayloadRef;
+}
+
+export namespace EvidencePayloadRef {
+    export type AsObject = {
+        kind: string,
+        jsonPointer?: string,
+        uri?: string,
+        mediaType?: string,
+        sha256?: string,
+    }
+}
+
+export class EvidenceItem extends jspb.Message {
+    getEvidenceId(): string;
+    setEvidenceId(value: string): EvidenceItem;
+    getEvidenceType(): string;
+    setEvidenceType(value: string): EvidenceItem;
+    getObservedAt(): string;
+    setObservedAt(value: string): EvidenceItem;
+
+    hasSubjectRef(): boolean;
+    clearSubjectRef(): void;
+    getSubjectRef(): string | undefined;
+    setSubjectRef(value: string): EvidenceItem;
+
+    hasPayloadRef(): boolean;
+    clearPayloadRef(): void;
+    getPayloadRef(): EvidencePayloadRef | undefined;
+    setPayloadRef(value?: EvidencePayloadRef): EvidenceItem;
+    clearProducerList(): void;
+    getProducerList(): Array<string>;
+    setProducerList(value: Array<string>): EvidenceItem;
+    addProducer(value: string, index?: number): string;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): EvidenceItem.AsObject;
+    static toObject(includeInstance: boolean, msg: EvidenceItem): EvidenceItem.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: EvidenceItem, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): EvidenceItem;
+    static deserializeBinaryFromReader(message: EvidenceItem, reader: jspb.BinaryReader): EvidenceItem;
+}
+
+export namespace EvidenceItem {
+    export type AsObject = {
+        evidenceId: string,
+        evidenceType: string,
+        observedAt: string,
+        subjectRef?: string,
+        payloadRef?: EvidencePayloadRef.AsObject,
+        producerList: Array<string>,
+    }
+}
+
 export class ExecutionSnapshot extends jspb.Message {
     getTaskId(): string;
     setTaskId(value: string): ExecutionSnapshot;
@@ -777,6 +925,14 @@ export class ExecutionSnapshot extends jspb.Message {
     clearExecutionContext(): void;
     getExecutionContext(): ExecutionContext | undefined;
     setExecutionContext(value?: ExecutionContext): ExecutionSnapshot;
+    clearEvidenceList(): void;
+    getEvidenceList(): Array<EvidenceItem>;
+    setEvidenceList(value: Array<EvidenceItem>): ExecutionSnapshot;
+    addEvidence(value?: EvidenceItem, index?: number): EvidenceItem;
+    clearMcpInputRequestsList(): void;
+    getMcpInputRequestsList(): Array<McpTaskInputRequest>;
+    setMcpInputRequestsList(value: Array<McpTaskInputRequest>): ExecutionSnapshot;
+    addMcpInputRequests(value?: McpTaskInputRequest, index?: number): McpTaskInputRequest;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): ExecutionSnapshot.AsObject;
@@ -805,6 +961,8 @@ export namespace ExecutionSnapshot {
         operationName: string,
         argumentHash: string,
         executionContext?: ExecutionContext.AsObject,
+        evidenceList: Array<EvidenceItem.AsObject>,
+        mcpInputRequestsList: Array<McpTaskInputRequest.AsObject>,
     }
 }
 
@@ -1021,6 +1179,10 @@ export class UpdateExecutionRequest extends jspb.Message {
     getInputsList(): Array<UpdateValue>;
     setInputsList(value: Array<UpdateValue>): UpdateExecutionRequest;
     addInputs(value?: UpdateValue, index?: number): UpdateValue;
+    clearInputResponsesList(): void;
+    getInputResponsesList(): Array<McpTaskInputResponse>;
+    setInputResponsesList(value: Array<McpTaskInputResponse>): UpdateExecutionRequest;
+    addInputResponses(value?: McpTaskInputResponse, index?: number): McpTaskInputResponse;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): UpdateExecutionRequest.AsObject;
@@ -1037,6 +1199,7 @@ export namespace UpdateExecutionRequest {
         metadata?: RequestMetadata.AsObject,
         identity?: SideEffectIdentity.AsObject,
         inputsList: Array<UpdateValue.AsObject>,
+        inputResponsesList: Array<McpTaskInputResponse.AsObject>,
     }
 }
 

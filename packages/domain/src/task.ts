@@ -36,6 +36,7 @@ export interface TaskRecord {
   correlationId?: string | null;
   executionMode: ExecutionMode;
   simulationId: string | null;
+  reservationRef: string | null;
   arguments: Record<string, unknown>;
   argumentHash: string;
   externalExecutionId: string | null;
@@ -47,6 +48,7 @@ export interface TaskRecord {
   error: Record<string, unknown> | null;
   adapterRevision: number;
   observationRevision: number;
+  runtimeRevision: string;
   ttlMs: number | null;
   handleExpiresAt: Date | null;
   terminalAt: Date | null;
@@ -56,6 +58,7 @@ export interface TaskRecord {
   pollIntervalMs: number;
   createdAt: Date;
   updatedAt: Date;
+  runtimeUpdatedAt: Date;
   version: number;
   acceptedAt: Date;
   notBefore: Date | null;

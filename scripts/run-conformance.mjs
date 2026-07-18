@@ -6,6 +6,10 @@ import { delimiter, resolve } from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import Ajv2020 from "ajv/dist/2020.js";
+import {
+  writeAdapterComponentReport,
+  writeProtocolV1Summary,
+} from "./protocol/component-conformance-reports.mjs";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for conformance");
@@ -122,7 +126,9 @@ try {
       `${JSON.stringify(report, null, 2)}\n`,
       "utf8",
     );
+    writeAdapterComponentReport(report, root);
   }
+  writeProtocolV1Summary(root);
   const failed = reports.filter((report) => report.status !== "passed");
   if (failed.length > 0) {
     for (const report of failed) {

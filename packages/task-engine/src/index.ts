@@ -1,4 +1,5 @@
 export * from "./engine.js";
+export * from "./detailed-task.js";
 export * from "./scheduler.js";
 export * from "./recovery.js";
 export * from "./command-dispatcher.js";

@@ -155,8 +155,9 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         arguments = MessageToDict(request.arguments)
         existing = self.store.get(request.task_id)
         binding = self._binding(request)
+        reservation_ref = request.reservation_ref if request.HasField("reservation_ref") else None
         if existing is not None:
-            if existing["binding"] != binding:
+            if existing["binding"] != binding or existing.get("reservation_ref") != reservation_ref:
                 await context.abort(grpc.StatusCode.ALREADY_EXISTS, "taskId identity conflict")
             return self._accepted(existing)
 
@@ -198,7 +199,9 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             snapshot = self._snapshot_dict(
                 task_id, external_id, "SUCCEEDED", 1, "SUCCESS", "Echo completed.", output, binding
             )
-            execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
+            execution = self._execution(
+                binding, external_id, snapshot, snapshot, arguments, reservation_ref
+            )
         elif request.operation_name == "flex_task" and arguments.get("scenario") in {
             "terminal",
             "terminal_invalid_output",
@@ -218,9 +221,15 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 output,
                 binding,
             )
-            execution = self._execution(binding, external_id, snapshot, snapshot, arguments)
+            execution = self._execution(
+                binding, external_id, snapshot, snapshot, arguments, reservation_ref
+            )
         else:
-            input_required = arguments.get("scenario") in {"input_required", "multi_round_input"}
+            input_required = arguments.get("scenario") in {
+                "input_required",
+                "input_required_frozen",
+                "multi_round_input",
+            }
             snapshot = self._snapshot_dict(
                 task_id,
                 external_id,
@@ -232,14 +241,27 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                 binding,
             )
             if input_required:
-                snapshot["input_requests"] = [
-                    {
-                        "key": "approval",
-                        "description": "Approve the reference operation.",
-                        "schema": {"type": "boolean"},
-                        "required": True,
-                    }
-                ]
+                if arguments.get("scenario") == "input_required_frozen":
+                    snapshot["mcp_input_requests"] = [
+                        {
+                            "key": "approval",
+                            "method": "elicitation/create",
+                            "params": {
+                                "mode": "form",
+                                "message": "Approve the reference operation.",
+                                "requestedSchema": {"type": "boolean"},
+                            },
+                        }
+                    ]
+                else:
+                    snapshot["input_requests"] = [
+                        {
+                            "key": "approval",
+                            "description": "Approve the reference operation.",
+                            "schema": {"type": "boolean"},
+                            "required": True,
+                        }
+                    ]
             terminal = self._snapshot_dict(
                 task_id,
                 external_id,
@@ -252,6 +274,22 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             )
             if arguments.get("scenario") == "output_invalid":
                 terminal["result"] = {"resourceId": 42, "completed": "yes"}
+            elif arguments.get("scenario") == "evidence_success":
+                terminal["evidence"] = [
+                    {
+                        "evidence_id": f"evidence-{task_id}",
+                        "evidence_type": "resource.completion",
+                        "observed_at": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                        "subject_ref": f"resource:{arguments.get('resourceId')}",
+                        "payload_ref": {
+                            "kind": "structured_content",
+                            "json_pointer": "/resourceId",
+                        },
+                        "producer": [os.getenv("PROVIDER_ID", "mock-provider-python")],
+                    }
+                ]
             elif arguments.get("scenario") == "partial_valid":
                 snapshot.update(
                     state="PARTIALLY_COMPLETED",
@@ -279,7 +317,9 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     reason_code="ADAPTER_EXECUTION_FAILED",
                     message="Reference Adapter reported a technical failure.",
                 )
-            execution = self._execution(binding, external_id, snapshot, terminal, arguments)
+            execution = self._execution(
+                binding, external_id, snapshot, terminal, arguments, reservation_ref
+            )
             execution["waiting_for_input"] = input_required
             execution["input_round"] = 1 if arguments.get("scenario") == "multi_round_input" else 0
 
@@ -395,9 +435,16 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         if existing is not None:
             return adapter_pb2.CommandAck(**existing)
         expected = "comment" if execution.get("input_round") == 2 else "approval"
-        accepted = execution.get("waiting_for_input") and all(
-            value.input_request_key == expected for value in request.inputs
-        )
+        if request.input_responses:
+            accepted = execution.get("waiting_for_input") and all(
+                value.key == expected
+                and MessageToDict(value.result).get("action") == "accept"
+                for value in request.input_responses
+            )
+        else:
+            accepted = execution.get("waiting_for_input") and all(
+                value.input_request_key == expected for value in request.inputs
+            )
         if accepted and execution["arguments"].get("scenario") == "multi_round_input" and expected == "approval":
             execution["input_round"] = 2
             execution["snapshot"] = self._snapshot_dict(
@@ -418,6 +465,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     "required": True,
                 }
             ]
+            execution["snapshot"]["mcp_input_requests"] = []
         elif accepted:
             execution["waiting_for_input"] = False
             revision = 3 if execution.get("input_round") == 2 else 2
@@ -488,13 +536,14 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
         }
 
     @staticmethod
-    def _execution(binding, external_id, snapshot, terminal, arguments):
+    def _execution(binding, external_id, snapshot, terminal, arguments, reservation_ref):
         return {
             "binding": binding,
             "external_execution_id": external_id,
             "snapshot": snapshot,
             "terminal_snapshot": terminal,
             "arguments": arguments,
+            "reservation_ref": reservation_ref,
             "waiting_for_input": False,
             "hold_snapshot": False,
             "input_round": 0,
@@ -514,6 +563,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             "retryable": False,
             "result": result,
             "input_requests": [],
+            "mcp_input_requests": [],
+            "evidence": [],
             "operation_name": binding.get("operation_name", ""),
             "argument_hash": binding.get("argument_hash", ""),
             "execution_context": {
@@ -534,6 +585,29 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             )
             for item in value.get("input_requests", [])
         ]
+        mcp_requests = [
+            adapter_pb2.McpTaskInputRequest(
+                key=item["key"],
+                method=item["method"],
+                params=json_struct(item["params"]),
+            )
+            for item in value.get("mcp_input_requests", [])
+        ]
+        evidence = [
+            adapter_pb2.EvidenceItem(
+                evidence_id=item["evidence_id"],
+                evidence_type=item["evidence_type"],
+                observed_at=item["observed_at"],
+                payload_ref=adapter_pb2.EvidencePayloadRef(**item["payload_ref"]),
+                producer=item.get("producer", []),
+                **(
+                    {"subject_ref": item["subject_ref"]}
+                    if item.get("subject_ref") is not None
+                    else {}
+                ),
+            )
+            for item in value.get("evidence", [])
+        ]
         return adapter_pb2.ExecutionSnapshot(
             task_id=value["task_id"],
             external_execution_id=value["external_execution_id"],
@@ -544,6 +618,8 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             retryable=value.get("retryable", False),
             result=json_struct(value["result"] or {}),
             input_requests=requests,
+            mcp_input_requests=mcp_requests,
+            evidence=evidence,
             observed_at=now_timestamp(),
             operation_name=value["operation_name"],
             argument_hash=value["argument_hash"],
