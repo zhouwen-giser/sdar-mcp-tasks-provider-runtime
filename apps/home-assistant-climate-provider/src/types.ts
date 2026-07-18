@@ -57,6 +57,7 @@ export interface ClimateExecution {
   createdAt: string;
   updatedAt: string;
   confirmationDeadlineAt: string;
+  confirmedState?: NormalizedClimateState;
   lastSnapshot: Record<string, unknown>;
   commandAcks: Record<string, Record<string, unknown>>;
 }

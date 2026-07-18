@@ -216,6 +216,16 @@ export class ClimateProviderServer {
               reasonCode: "HOME_ASSISTANT_STATE_READ",
               message: "Climate state read.",
               result: jsonToProtoStruct(result),
+              evidence: [
+                {
+                  evidenceId: `home-assistant-climate-state-${resourceId}-${state.observedAt}`,
+                  evidenceType: "climate.state.observation",
+                  observedAt: state.observedAt,
+                  subjectRef: `resource:${resourceId}`,
+                  payloadRef: { kind: "structured_content", jsonPointer: "/hvacMode" },
+                  producer: [this.options.providerId, "home-assistant"],
+                },
+              ],
               observedAt: timestamp(state.observedAt),
             },
           },

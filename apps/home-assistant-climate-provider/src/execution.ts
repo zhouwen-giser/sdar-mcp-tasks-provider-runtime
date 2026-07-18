@@ -111,7 +111,7 @@ export class ClimateExecutionEngine {
     await this.telemetry.observed(state);
     for (const x of this.store.list())
       if (x.resourceId === state.resourceId && x.state === "CONFIRMING" && confirmed(x, state)) {
-        const done = advance(x, "SUCCEEDED");
+        const done = advance({ ...x, confirmedState: state }, "SUCCEEDED");
         this.store.set(done);
         await this.telemetry.progress(done);
       }
@@ -136,6 +136,7 @@ export class ClimateExecutionEngine {
   }
 }
 export function snapshot(x: ClimateExecution): Record<string, unknown> {
+  const completedResult = x.state === "SUCCEEDED" ? result(x) : undefined;
   return {
     taskId: x.taskId,
     externalExecutionId: x.externalExecutionId,
@@ -163,31 +164,57 @@ export function snapshot(x: ClimateExecution): Record<string, unknown> {
         : x.state === "TECHNICAL_FAILED"
           ? "Climate state confirmation timed out."
           : "Waiting for observed Home Assistant climate state.",
-    ...(x.state === "SUCCEEDED" ? { result: jsonToProtoStruct(result(x)) } : {}),
+    ...(completedResult === undefined
+      ? {}
+      : { result: jsonToProtoStruct(completedResult), evidence: [completionEvidence(x)] }),
     retryable: x.state === "TECHNICAL_FAILED",
     observedAt: timestamp(x.updatedAt),
   };
 }
 function result(x: ClimateExecution): Record<string, unknown> {
+  const confirmedState = x.confirmedState;
+  if (confirmedState === undefined) throw new Error("CONFIRMED_CLIMATE_STATE_MISSING");
   if (x.desiredState.type === "power")
     return {
       resourceId: x.resourceId,
-      power: x.desiredState.power,
+      power: confirmedState.power,
       confirmed: true,
-      observedAt: x.updatedAt,
+      observedAt: confirmedState.observedAt,
     };
   if (x.desiredState.type === "hvac_mode")
     return {
       resourceId: x.resourceId,
-      hvacMode: x.desiredState.hvacMode,
+      hvacMode: confirmedState.hvacMode,
       confirmed: true,
-      observedAt: x.updatedAt,
+      observedAt: confirmedState.observedAt,
     };
   return {
     resourceId: x.resourceId,
-    targetTemperature: x.desiredState.temperature,
+    targetTemperature: confirmedState.targetTemperature,
     confirmed: true,
-    observedAt: x.updatedAt,
+    observedAt: confirmedState.observedAt,
+  };
+}
+
+function completionEvidence(x: ClimateExecution): Record<string, unknown> {
+  const confirmedState = x.confirmedState;
+  if (confirmedState === undefined) throw new Error("CONFIRMED_CLIMATE_STATE_MISSING");
+  const evidence =
+    x.desiredState.type === "power"
+      ? { evidenceType: "climate.state.observation", jsonPointer: "/power" }
+      : x.desiredState.type === "hvac_mode"
+        ? { evidenceType: "climate.hvac_mode.observation", jsonPointer: "/hvacMode" }
+        : {
+            evidenceType: "climate.target_temperature.observation",
+            jsonPointer: "/targetTemperature",
+          };
+  return {
+    evidenceId: `home-assistant-climate-${x.taskId}-${String(x.revision)}`,
+    evidenceType: evidence.evidenceType,
+    observedAt: confirmedState.observedAt,
+    subjectRef: `resource:${x.resourceId}`,
+    payloadRef: { kind: "structured_content", jsonPointer: evidence.jsonPointer },
+    producer: ["home-assistant"],
   };
 }
 function advance(x: ClimateExecution, state: ClimateExecution["state"]): ClimateExecution {
