@@ -17,6 +17,8 @@
     "build": "pnpm proto:generate && tsc -p tsconfig.build.json",
     "proto:generate": "node scripts/generate-proto.mjs",
     "proto:check": "pnpm proto:generate && git diff --exit-code -- packages/adapter-protocol/generated",
+    "protocol:fetch": "node scripts/protocol/fetch-pinned-mcp-schema.mjs",
+    "protocol:check:frozen": "node scripts/protocol/check-frozen-contract.mjs",
     "db:migrate": "pnpm build && node dist/apps/runtime/src/migrate.js",
     "adapter:python:smoke": "pnpm build && node scripts/python-adapter-smoke.mjs",
     "test:unit": "vitest run tests/unit",

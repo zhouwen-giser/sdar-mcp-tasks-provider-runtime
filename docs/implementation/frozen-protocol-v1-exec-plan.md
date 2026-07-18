@@ -20,17 +20,17 @@ documentation are not substitute sources.
 
 ## Ordered execution
 
-| Phase               | Deliverable                                                                                             | Gate                                                            | Status                                |
-| ------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------- |
-| A                   | remote branch and PR inventory                                                                          | inventory report matches GitHub and local refs                  | complete                              |
-| H0                  | exact frozen contract, pinned MCP schema, derived schemas and protocol lock                             | byte hash, Git blob and lock verification                       | blocked: contract source bytes absent |
-| H1-H3               | isolated SEP-2663 handler, routing, request meta, headers, discovery, tool profile and availability     | focused protocol tests                                          | pending                               |
-| H4-H7               | flat task results, detailed task mapping, runtime revision, true TTL, MRTR and cooperative cancellation | PostgreSQL integration and migration upgrade tests              | pending                               |
-| H8-H10              | type-only evidence, durable SSE task notifications and non-standard method migration                    | evidence, multi-replica notification and legacy isolation tests | pending                               |
-| H11-H13             | Adapter migration, 74-case conformance, CI, version and reports                                         | `verify:v2` and machine reports                                 | pending                               |
-| Runtime publication | phased commits, Draft PR, protected CI, normal merge                                                    | merged Runtime PR with green required checks                    | pending                               |
-| Provider migration  | merge new `origin/main` into every active Provider branch and update existing PRs                       | Provider conformance and Runtime E2E                            | pending                               |
-| Completion audit    | requirement-by-requirement evidence review                                                              | all Definition of Done items proven                             | pending                               |
+| Phase               | Deliverable                                                                                             | Gate                                                            | Status                          |
+| ------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------- |
+| A                   | remote branch and PR inventory                                                                          | inventory report matches GitHub and local refs                  | complete                        |
+| H0                  | exact frozen contract, pinned MCP schema, derived schemas and protocol lock                             | byte hash, Git blob and lock verification                       | partial: pinned schema verified |
+| H1-H3               | isolated SEP-2663 handler, routing, request meta, headers, discovery, tool profile and availability     | focused protocol tests                                          | pending                         |
+| H4-H7               | flat task results, detailed task mapping, runtime revision, true TTL, MRTR and cooperative cancellation | PostgreSQL integration and migration upgrade tests              | pending                         |
+| H8-H10              | type-only evidence, durable SSE task notifications and non-standard method migration                    | evidence, multi-replica notification and legacy isolation tests | pending                         |
+| H11-H13             | Adapter migration, 74-case conformance, CI, version and reports                                         | `verify:v2` and machine reports                                 | pending                         |
+| Runtime publication | phased commits, Draft PR, protected CI, normal merge                                                    | merged Runtime PR with green required checks                    | pending                         |
+| Provider migration  | merge new `origin/main` into every active Provider branch and update existing PRs                       | Provider conformance and Runtime E2E                            | pending                         |
+| Completion audit    | requirement-by-requirement evidence review                                                              | all Definition of Done items proven                             | pending                         |
 
 ## Governance invariants
 
@@ -48,3 +48,8 @@ The migration task package was received, but the exact frozen contract document 
 `SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0_FROZEN.md` was not. Its bytes are required before H0
 can be implemented without violating the immutable-baseline rule. See
 `reports/protocol-v1-migration/branch-inventory.md` for the evidence search and observed hashes.
+
+The independently pinned upstream schema was fetched from the exact source commit and verified as
+Git blob `cc44564e33305dbc07e820cdd0a97648f3852019`; its SHA-256 is
+`9281c4890630e2d1e61792fa23b4084c4ea360cd58519610cd050545ab7b8708`. This does not replace the
+missing SDAR frozen contract or authorize derived SDAR schemas.
