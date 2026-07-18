@@ -19,9 +19,11 @@ if (databaseUrl === undefined) throw new Error("TEST_DATABASE_URL is required fo
 let adapter: grpc.Server;
 let adapterPort: number;
 let runtime: RuntimeApplication;
+let runtimeReplica: RuntimeApplication;
 let client: Client;
 let transport: StreamableHTTPClientTransport;
 let runtimeUrl: URL;
+let runtimeReplicaUrl: URL;
 
 beforeAll(async () => {
   const pool = new Pool({ connectionString: databaseUrl });
@@ -33,26 +35,21 @@ beforeAll(async () => {
 
   adapter = createMockAdapterServer({ providerId: "e2e-provider" });
   adapterPort = await bindMockAdapter(adapter, "127.0.0.1:0");
-  runtime = createRuntime(
-    loadRuntimeConfig({
-      DATABASE_URL: databaseUrl,
-      PROVIDER_ID: "e2e-provider",
-      ADAPTER_ENDPOINT: `127.0.0.1:${String(adapterPort)}`,
-      AUTH_MODE: "trusted_headers",
-      LEGACY_MCP_ENABLED: "true",
-      LOG_LEVEL: "warn",
-      SCHEDULER_POLL_MS: "1000",
-      RECOVERY_POLL_MS: "5000",
-      ADAPTER_RPC_TIMEOUT_MS: "250",
-      ADAPTER_HEALTH_POLL_MS: "100",
-      ADAPTER_HEALTH_FAILURE_THRESHOLD: "1",
-    }),
-  );
+  runtime = createRuntime(runtimeConfig(true));
   await runtime.initialize();
   await runtime.app.listen({ host: "127.0.0.1", port: 0 });
   const address = runtime.app.server.address();
   if (address === null || typeof address === "string") throw new Error("Runtime did not bind");
   runtimeUrl = new URL(`http://127.0.0.1:${String(address.port)}/mcp/legacy`);
+
+  runtimeReplica = createRuntime(runtimeConfig(false));
+  await runtimeReplica.initialize();
+  await runtimeReplica.app.listen({ host: "127.0.0.1", port: 0 });
+  const replicaAddress = runtimeReplica.app.server.address();
+  if (replicaAddress === null || typeof replicaAddress === "string") {
+    throw new Error("Runtime replica did not bind");
+  }
+  runtimeReplicaUrl = new URL(`http://127.0.0.1:${String(replicaAddress.port)}/mcp`);
   client = new Client({ name: "runtime-e2e", version: "1.0.0" });
   transport = clientTransport();
   await client.connect(transport as unknown as Transport);
@@ -60,6 +57,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client.close();
+  await runtimeReplica.app.close();
   await runtime.app.close();
   await new Promise<void>((resolve) => adapter.tryShutdown(() => resolve()));
 });
@@ -148,6 +146,62 @@ describe("independently deployed Runtime stack", () => {
     }
   });
 
+  it("C-055 publishes one PostgreSQL task revision through two Runtime SSE replicas", async () => {
+    const created = await frozenRequest(
+      "tools/call",
+      {
+        name: "durable_task",
+        arguments: { resourceId: "multi-replica-notification", scenario: "queued_start" },
+      },
+      40,
+      "durable_task",
+      {
+        "io.sdar/taskExecution": {
+          profileVersion: "1.0",
+          idempotencyKey: "multi-replica-notification",
+        },
+      },
+    );
+    const taskId = created.json<{ result: { taskId: string } }>().result.taskId;
+    const streams = await Promise.all([
+      openFrozenSubscription(new URL("/mcp", runtimeUrl), taskId, "runtime-a-subscription"),
+      openFrozenSubscription(runtimeReplicaUrl, taskId, "runtime-b-subscription"),
+    ]);
+    try {
+      for (const stream of streams) {
+        await expect(stream.next()).resolves.toMatchObject({
+          method: "notifications/subscriptions/acknowledged",
+          params: { notifications: { taskIds: [taskId] } },
+        });
+        await expect(stream.next()).resolves.toMatchObject({
+          method: "notifications/tasks",
+          params: { taskId, status: "working" },
+        });
+      }
+
+      const cancelled = await frozenRequest("tasks/cancel", { taskId }, 41, taskId);
+      expect(cancelled.json()).toMatchObject({ result: { resultType: "complete" } });
+      const terminal = await Promise.all(
+        streams.map((stream) =>
+          stream.nextUntil(
+            (message) =>
+              message.method === "notifications/tasks" &&
+              (message.params as Record<string, unknown>).status === "cancelled",
+          ),
+        ),
+      );
+      const queried = await frozenRequest("tasks/get", { taskId }, 42, taskId);
+      const authoritative = queried.json<{ result: Record<string, unknown> }>().result;
+      for (const message of terminal) {
+        expect(normalizeNotificationTask(message.params as Record<string, unknown>)).toEqual(
+          normalizeGetTask(authoritative),
+        );
+      }
+    } finally {
+      await Promise.all(streams.map((stream) => stream.close()));
+    }
+  }, 20_000);
+
   it("becomes ready and publishes the bounded Adapter catalog", async () => {
     const ready = await runtime.app.inject({ method: "GET", url: "/health/ready" });
     expect(ready.statusCode).toBe(200);
@@ -229,6 +283,135 @@ function clientTransport(): StreamableHTTPClientTransport {
     requestInit: {
       headers: { "x-sdar-subject": "e2e-user", "x-sdar-tenant": "e2e-tenant" },
     },
+  });
+}
+
+function runtimeConfig(legacyEndpoint: boolean) {
+  return loadRuntimeConfig({
+    DATABASE_URL: databaseUrl,
+    PROVIDER_ID: "e2e-provider",
+    ADAPTER_ENDPOINT: `127.0.0.1:${String(adapterPort)}`,
+    AUTH_MODE: "trusted_headers",
+    MCP_LEGACY_ENDPOINT_ENABLED: String(legacyEndpoint),
+    LOG_LEVEL: "warn",
+    SCHEDULER_POLL_MS: "1000",
+    COMMAND_DISPATCH_CONCURRENCY: "2",
+    RECOVERY_POLL_MS: "5000",
+    ADAPTER_RPC_TIMEOUT_MS: "250",
+    ADAPTER_HEALTH_POLL_MS: "100",
+    ADAPTER_HEALTH_FAILURE_THRESHOLD: "1",
+  });
+}
+
+async function openFrozenSubscription(url: URL, taskId: string, requestId: string) {
+  const controller = new AbortController();
+  const response = await fetch(url, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      accept: "application/json, text/event-stream",
+      "content-type": "application/json",
+      "mcp-protocol-version": "2026-07-28",
+      "mcp-method": "subscriptions/listen",
+      "x-sdar-subject": "e2e-user",
+      "x-sdar-tenant": "e2e-tenant",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "subscriptions/listen",
+      params: { notifications: { taskIds: [taskId] }, _meta: frozenMeta() },
+    }),
+  });
+  expect(response.status).toBe(200);
+  const reader = response.body?.getReader();
+  if (reader === undefined) throw new Error("Frozen SSE response body is unavailable");
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const messages: Record<string, unknown>[] = [];
+
+  const next = async (): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const queued = messages.shift();
+      if (queued !== undefined) return queued;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`Timed out waiting for SSE message ${requestId}`);
+      const read = await withTimeout(
+        reader.read(),
+        remaining,
+        `Timed out waiting for SSE bytes ${requestId}`,
+      );
+      if (read.done) throw new Error(`SSE stream ${requestId} closed before the expected message`);
+      const chunk: unknown = read.value;
+      if (!(chunk instanceof Uint8Array)) throw new Error(`Invalid SSE bytes ${requestId}`);
+      buffer += decoder.decode(chunk, { stream: true });
+      for (;;) {
+        const boundary = buffer.indexOf("\n\n");
+        if (boundary < 0) break;
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame
+          .split("\n")
+          .filter((line) => line.startsWith("data: "))
+          .map((line) => line.slice(6))
+          .join("\n");
+        if (data.length === 0) continue;
+        const parsed: unknown = JSON.parse(data);
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          throw new Error("Invalid SSE JSON-RPC message");
+        }
+        messages.push(parsed as Record<string, unknown>);
+      }
+    }
+  };
+
+  return {
+    next,
+    async nextUntil(predicate: (message: Record<string, unknown>) => boolean) {
+      for (;;) {
+        const message = await next();
+        if (predicate(message)) return message;
+      }
+    },
+    async close() {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    },
+  };
+}
+
+function normalizeNotificationTask(task: Record<string, unknown>): Record<string, unknown> {
+  const value = structuredClone(task);
+  const meta = value._meta as Record<string, Record<string, unknown>>;
+  delete meta["io.modelcontextprotocol/subscriptionId"];
+  const execution = meta["io.sdar/taskExecution"];
+  if (execution !== undefined) {
+    delete execution.eventId;
+    delete execution.observedAt;
+  }
+  return value;
+}
+
+function normalizeGetTask(task: Record<string, unknown>): Record<string, unknown> {
+  const value = structuredClone(task);
+  delete value.resultType;
+  return value;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    void promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
   });
 }
 

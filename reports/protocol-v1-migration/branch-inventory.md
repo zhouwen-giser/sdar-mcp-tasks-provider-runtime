@@ -15,10 +15,10 @@ gh pr list --state open
 
 ## A. Main
 
-| Branch                               | Remote head                                                | Classification         | Action                                  |
-| ------------------------------------ | ---------------------------------------------------------- | ---------------------- | --------------------------------------- |
-| `main`                               | `d55d64649b7a1cd53197ea393e7af0bb07eabfff`                 | current protected main | migration source                        |
-| `feature/sep2663-frozen-protocol-v1` | local branch at `d55d64649b7a1cd53197ea393e7af0bb07eabfff` | Runtime migration      | migrate, then open a Draft PR to `main` |
+| Branch                               | Remote head                                | Classification         | Action                                     |
+| ------------------------------------ | ------------------------------------------ | ---------------------- | ------------------------------------------ |
+| `main`                               | `d55d64649b7a1cd53197ea393e7af0bb07eabfff` | current protected main | migration source                           |
+| `feature/sep2663-frozen-protocol-v1` | `45bbffd6600c5d500254e949bcbb00c3fbbaf60e` | Runtime migration      | update Draft PR #13 and rerun protected CI |
 
 The migration branch was created directly from the observed remote `main`; no Provider commits are
 included.
@@ -55,12 +55,17 @@ No branch was rebased, force-pushed, deleted, or otherwise rewritten during inve
 
 ## Contract source finding
 
-The referenced attachment directory contains only `pasted-text-1.txt` (35,884 bytes, SHA-256
-`7c27e62e43f0358f3a50718caac4c73001cbc807d5eb2521fced794c81db8ff6`). It is the migration task
-package, not the required frozen contract. Neither the latest `origin/main` tree nor the available
-attachment corpus contains `SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0_FROZEN.md` or any file with
-the required SHA-256 `d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845`.
+The current referenced attachment remains the 35,884-byte migration task package with SHA-256
+`7c27e62e43f0358f3a50718caac4c73001cbc807d5eb2521fced794c81db8ff6`. Its requirements are now
+audited separately from the product contract.
 
-The frozen document cannot be fabricated or reconstructed from the task summary. H0 contract
-vendoring, schema derivation, and conformance implementation remain gated on receiving the exact
-source bytes.
+The earlier source-byte blocker is resolved. The user supplied
+`D:\downloads\SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0_FROZEN.md`, and the byte-preserving
+repository copy is locked at SHA-256
+`d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845`. The pinned MCP commit,
+schema Git blob and protocol lock remain unchanged.
+
+The refreshed remote inventory found no additional open Provider PR. The local-only
+`feature/home-assistant-climate-provider` branch still exists and must remain unpublished until the
+Runtime migration is normally merged, after which both Provider branches must merge the new
+`origin/main` without rebase or force-push.

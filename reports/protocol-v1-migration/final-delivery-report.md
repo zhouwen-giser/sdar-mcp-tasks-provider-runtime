@@ -24,7 +24,7 @@ The repository may claim **Component Conformant** only. It must not claim Intero
 - Durable keyed MRTR, reservation identity and cooperative cancellation.
 - Type-only Evidence validation and projection without `requirementId`.
 - Authorization-filtered durable SSE notifications with backpressure and cancellation behavior.
-- Explicit Legacy isolation at `/mcp/legacy` behind `LEGACY_MCP_ENABLED=true`.
+- Explicit Legacy isolation at `/mcp/legacy` behind `MCP_LEGACY_ENDPOINT_ENABLED=true`.
 - Additive Adapter protocol support in both TypeScript and Python examples.
 - Numbered C-001 through C-074 machine conformance with real PostgreSQL lifecycle coverage.
 - V2 CI, dependency/SBOM/deployment/image checks and frozen-protocol capacity baseline.

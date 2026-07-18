@@ -14,7 +14,7 @@ describe("Runtime configuration", () => {
     expect(config.ADAPTER_TLS_MODE).toBe("disabled");
     expect(config.ADAPTER_RPC_TIMEOUT_MS).toBe(5_000);
     expect(config.AUTH_MODE).toBe("development");
-    expect(config.LEGACY_MCP_ENABLED).toBe(false);
+    expect(config.MCP_LEGACY_ENDPOINT_ENABLED).toBe(false);
     expect(config.HTTP_BODY_LIMIT_BYTES).toBe(1_048_576);
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);
@@ -25,6 +25,17 @@ describe("Runtime configuration", () => {
     expect(config.OUTBOX_SINK).toBe("internal_noop");
     expect(config.OUTBOX_BATCH_SIZE).toBe(100);
     expect(config.OUTBOX_PUBLISHED_RETENTION_MS).toBe(86_400_000);
+  });
+
+  it("uses only the frozen Legacy endpoint opt-in name", () => {
+    expect(loadRuntimeConfig({ MCP_LEGACY_ENDPOINT_ENABLED: "true" })).toHaveProperty(
+      "MCP_LEGACY_ENDPOINT_ENABLED",
+      true,
+    );
+    expect(loadRuntimeConfig({ LEGACY_MCP_ENABLED: "true" })).toHaveProperty(
+      "MCP_LEGACY_ENDPOINT_ENABLED",
+      false,
+    );
   });
 
   it("parses opt-in OTLP configuration without making telemetry a readiness dependency", () => {

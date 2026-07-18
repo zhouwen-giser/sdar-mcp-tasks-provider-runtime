@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { relative, resolve } from "node:path";
 import process from "node:process";
 import { format } from "prettier";
+import { writeRuntimeComponentReport } from "./component-conformance-reports.mjs";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 if (typeof databaseUrl !== "string" || databaseUrl.length === 0) {
@@ -76,6 +77,7 @@ const report = {
 const reportPath = resolve("reports/protocol-v1-migration/conformance-74.json");
 mkdirSync(resolve("reports/protocol-v1-migration"), { recursive: true });
 writeFileSync(reportPath, await format(JSON.stringify(report), { parser: "json" }));
+writeRuntimeComponentReport(report);
 
 process.stdout.write(
   `Frozen conformance: ${String(passed)}/${String(results.length)} passed; report ${reportPath}\n`,

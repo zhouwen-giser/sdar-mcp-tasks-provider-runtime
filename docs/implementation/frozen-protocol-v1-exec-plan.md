@@ -96,7 +96,7 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   two independent stream instances against the same authoritative reader and observe revisions
   `1` then `2` on both.
 - Runtime now routes `/mcp` exclusively to the frozen handler. `/mcp/legacy` returns 404 unless
-  `LEGACY_MCP_ENABLED=true`; the opt-in is explicit in local and Kubernetes configuration. Real
+  `MCP_LEGACY_ENDPOINT_ENABLED=true`; the opt-in is explicit in local and Kubernetes configuration. Real
   HTTP E2E covers discovery, tools/list, synchronous and Task-producing tools/call, immediately
   consistent tasks/get, the SSE acknowledgement frame, and the isolated Legacy compatibility
   endpoint.

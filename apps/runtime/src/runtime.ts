@@ -167,7 +167,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
 
   app.addHook("onRequest", async (request, reply) => {
     const path = request.url.split("?", 1)[0];
-    if (path !== "/mcp" && !(config.LEGACY_MCP_ENABLED && path === "/mcp/legacy")) return;
+    if (path !== "/mcp" && !(config.MCP_LEGACY_ENDPOINT_ENABLED && path === "/mcp/legacy")) return;
     if (!rateLimiter.consume(request.ip).allowed) {
       metrics.increment("sdar_rate_limited_total");
       return reply.code(429).send({ error: "rate_limit_exceeded" });
@@ -245,7 +245,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         id: null,
       });
     }
-    if (path === "/mcp/legacy" && !config.LEGACY_MCP_ENABLED) {
+    if (path === "/mcp/legacy" && !config.MCP_LEGACY_ENDPOINT_ENABLED) {
       return reply.code(404).send({ error: "legacy_mcp_disabled" });
     }
     if (mcpRouter === undefined) {
@@ -375,7 +375,11 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         taskEngine,
         resolveAuthorization,
       );
-      mcpRouter = new ProtocolRouter(frozenHandler, legacyHandler, config.LEGACY_MCP_ENABLED);
+      mcpRouter = new ProtocolRouter(
+        frozenHandler,
+        legacyHandler,
+        config.MCP_LEGACY_ENDPOINT_ENABLED,
+      );
       const taskRepository = new TaskRepository(pool);
       if (
         config.PROVIDER_TELEMETRY_INGRESS_ENABLED &&
