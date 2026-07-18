@@ -194,10 +194,13 @@ export class TaskEngine {
     checks: AvailabilityCheck[],
     authorization: AuthorizationContext,
   ): Promise<AvailabilityResponseValue> {
-    if (checks.length < 1 || checks.length > 128) throw new Error("INVALID_AVAILABILITY_BATCH");
+    if (checks.length < 1 || checks.length > 64) throw new Error("INVALID_AVAILABILITY_BATCH");
     const requestIds = new Set<string>();
     for (const check of checks) {
-      if (!check.requestId || requestIds.has(check.requestId)) {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(check.requestId) ||
+        requestIds.has(check.requestId)
+      ) {
         throw new Error("INVALID_AVAILABILITY_REQUEST_ID");
       }
       requestIds.add(check.requestId);
@@ -207,7 +210,11 @@ export class TaskEngine {
       if (!operation?.capabilities.availability) {
         throw new CapabilityNotSupportedError("AVAILABILITY_NOT_SUPPORTED");
       }
-      if (!isUnresolvedArguments(check.arguments)) operation.validateArguments(check.arguments);
+      if (check.arguments.state === "complete") {
+        operation.validateArguments(check.arguments.value);
+      } else {
+        assertUnresolvedPointers(check.arguments.unresolvedPaths);
+      }
     }
     try {
       const response = await this.gateway.checkAvailability(
@@ -1329,12 +1336,12 @@ function resourceReference(
 }
 
 function toAdapterAvailabilityCheck(check: AvailabilityCheck): AvailabilityCheckInput {
-  if (isUnresolvedArguments(check.arguments)) {
+  if (check.arguments.state === "partial") {
     return {
       requestId: check.requestId,
       operationName: check.operationName,
       unresolvedArguments: {
-        knownArguments: check.arguments.knownArguments,
+        knownArguments: check.arguments.knownValue,
         unresolvedPaths: check.arguments.unresolvedPaths,
       },
       timing: toAdapterTiming(check.timing),
@@ -1343,17 +1350,20 @@ function toAdapterAvailabilityCheck(check: AvailabilityCheck): AvailabilityCheck
   return {
     requestId: check.requestId,
     operationName: check.operationName,
-    arguments: check.arguments,
+    arguments: check.arguments.value,
     timing: toAdapterTiming(check.timing),
   };
 }
 
-function isUnresolvedArguments(value: AvailabilityCheck["arguments"]): value is {
-  unresolved: true;
-  knownArguments: Record<string, unknown>;
-  unresolvedPaths: string[];
-} {
-  return "unresolved" in value && value.unresolved === true;
+function assertUnresolvedPointers(pointers: string[]): void {
+  if (pointers.length < 1 || pointers.length > 128 || new Set(pointers).size !== pointers.length) {
+    throw new InvalidParamsError("INVALID_UNRESOLVED_PATHS");
+  }
+  for (const pointer of pointers) {
+    if (pointer.length > 512 || !/^(?:|(?:\/(?:[^~/]|~[01])*)*)$/.test(pointer)) {
+      throw new InvalidParamsError("INVALID_UNRESOLVED_PATH");
+    }
+  }
 }
 
 function toAdapterTiming(timing: AvailabilityCheck["timing"]): Record<string, unknown> {
@@ -1390,8 +1400,10 @@ function fromAdapterAvailability(result: {
     operationName: result.operationName,
     availability: result.availability.toLowerCase() as
       "available" | "restricted" | "disabled" | "unknown",
-    riskLevel: result.riskLevel.toLowerCase() as
-      "low" | "medium" | "high" | "critical" | "unspecified",
+    riskLevel:
+      result.riskLevel === "UNSPECIFIED"
+        ? ("critical" as const)
+        : (result.riskLevel.toLowerCase() as "low" | "medium" | "high" | "critical"),
     ...(result.reasonCode ? { reasonCode: result.reasonCode } : {}),
     ...(result.description ? { description: result.description } : {}),
     ...(hasTimestamp(result.validUntil)

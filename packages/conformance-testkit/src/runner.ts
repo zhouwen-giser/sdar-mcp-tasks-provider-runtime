@@ -120,31 +120,35 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     await test(groups, "P1", "P1 checkAvailability four states, risk and windows", async () => {
       const availability = await engine.checkAvailability(
         [
-          { requestId: "available", operationName: "durable_task", arguments: { resourceId: "a" } },
+          {
+            requestId: "available",
+            operationName: "durable_task",
+            arguments: { state: "complete", value: { resourceId: "a" } },
+          },
           {
             requestId: "restricted",
             operationName: "durable_task",
-            arguments: { resourceId: "b", scenario: "restricted" },
+            arguments: { state: "complete", value: { resourceId: "b", scenario: "restricted" } },
           },
           {
             requestId: "disabled",
             operationName: "durable_task",
-            arguments: { resourceId: "c", scenario: "disabled" },
+            arguments: { state: "complete", value: { resourceId: "c", scenario: "disabled" } },
           },
           {
             requestId: "unknown",
             operationName: "durable_task",
-            arguments: { resourceId: "d", scenario: "unknown" },
+            arguments: { state: "complete", value: { resourceId: "d", scenario: "unknown" } },
           },
         ],
         authorization,
       );
       assert(
-        availability.checks.map((item) => item.availability).join(",") ===
+        availability.results.map((item) => item.availability).join(",") ===
           "available,restricted,disabled,unknown",
         "availability state mismatch",
       );
-      const restricted = availability.checks[1];
+      const restricted = availability.results[1];
       assert(restricted?.riskLevel === "high", "restricted risk level mismatch");
       assert(restricted.validUntil !== undefined, "restricted validUntil missing");
       assert(restricted.earliestStartTime !== undefined, "restricted earliest start missing");

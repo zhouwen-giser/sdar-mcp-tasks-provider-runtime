@@ -516,21 +516,25 @@ describe("durable task lifecycle", () => {
   it("maps batched Availability and returns unknown on Adapter transport failure", async () => {
     const response = await engine.checkAvailability(
       [
-        { requestId: "available", operationName: "durable_task", arguments: { resourceId: "a" } },
+        {
+          requestId: "available",
+          operationName: "durable_task",
+          arguments: { state: "complete", value: { resourceId: "a" } },
+        },
         {
           requestId: "restricted",
           operationName: "durable_task",
-          arguments: { resourceId: "b", scenario: "restricted" },
+          arguments: { state: "complete", value: { resourceId: "b", scenario: "restricted" } },
         },
         {
           requestId: "disabled",
           operationName: "durable_task",
-          arguments: { resourceId: "c", scenario: "disabled" },
+          arguments: { state: "complete", value: { resourceId: "c", scenario: "disabled" } },
         },
       ],
       authorization,
     );
-    expect(response.checks.map((check) => check.availability)).toEqual([
+    expect(response.results.map((check) => check.availability)).toEqual([
       "available",
       "restricted",
       "disabled",
@@ -549,10 +553,16 @@ describe("durable task lifecycle", () => {
         new TaskRepository(pool),
       );
       const fallback = await fallbackEngine.checkAvailability(
-        [{ requestId: "unknown", operationName: "durable_task", arguments: { resourceId: "u" } }],
+        [
+          {
+            requestId: "unknown",
+            operationName: "durable_task",
+            arguments: { state: "complete", value: { resourceId: "u" } },
+          },
+        ],
         authorization,
       );
-      expect(fallback.checks[0]).toMatchObject({
+      expect(fallback.results[0]).toMatchObject({
         availability: "unknown",
         reasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
       });

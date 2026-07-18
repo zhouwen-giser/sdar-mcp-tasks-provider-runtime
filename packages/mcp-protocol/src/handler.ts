@@ -243,9 +243,17 @@ export class McpProtocolHandler {
       server.setRequestHandler(
         CheckAvailabilityRequestSchema,
         ({ params }) =>
-          this.#protocolResult(authorization.correlationId ?? null, () =>
-            taskEngine.checkAvailability(params.checks as AvailabilityCheck[], authorization),
-          ) as never,
+          this.#protocolResult(authorization.correlationId ?? null, async () => {
+            const result = await taskEngine.checkAvailability(
+              legacyAvailabilityChecks(params.checks),
+              authorization,
+            );
+            return {
+              profileVersion: result.profileVersion,
+              checkedAt: new Date().toISOString(),
+              checks: result.results,
+            };
+          }) as never,
       );
       server.setRequestHandler(GetTaskRequestSchema, ({ params }) =>
         this.#tracedProtocolResult(
@@ -477,6 +485,54 @@ function taskTiming(meta: unknown): TaskExecutionTiming | undefined {
     });
   }
   return parsed.data;
+}
+
+function legacyAvailabilityChecks(
+  checks: z.infer<typeof AvailabilityCheckSchema>[],
+): AvailabilityCheck[] {
+  return checks.map((check) => {
+    const unresolved = check.arguments as Record<string, unknown>;
+    return {
+      requestId: check.requestId,
+      operationName: check.operationName,
+      arguments:
+        unresolved.unresolved === true &&
+        typeof unresolved.knownArguments === "object" &&
+        unresolved.knownArguments !== null &&
+        !Array.isArray(unresolved.knownArguments) &&
+        Array.isArray(unresolved.unresolvedPaths)
+          ? {
+              state: "partial" as const,
+              knownValue: unresolved.knownArguments as Record<string, unknown>,
+              unresolvedPaths: unresolved.unresolvedPaths.filter(
+                (value): value is string => typeof value === "string",
+              ),
+            }
+          : { state: "complete" as const, value: unresolved },
+      ...(check.timing === undefined ? {} : { timing: legacyAvailabilityTiming(check.timing) }),
+    };
+  });
+}
+
+function legacyAvailabilityTiming(
+  timing: NonNullable<z.infer<typeof AvailabilityCheckSchema>["timing"]>,
+): NonNullable<AvailabilityCheck["timing"]> {
+  return {
+    ...(timing.start === undefined
+      ? {}
+      : {
+          start: {
+            mode: timing.start.mode,
+            ...(timing.start.scheduledAt === undefined
+              ? {}
+              : { scheduledAt: timing.start.scheduledAt }),
+            ...(timing.start.startToleranceMs === undefined
+              ? {}
+              : { startToleranceMs: timing.start.startToleranceMs }),
+          },
+        }),
+    ...(timing.maxElapsedMs === undefined ? {} : { maxElapsedMs: timing.maxElapsedMs }),
+  };
 }
 
 function profileMetadata(meta: unknown): Record<string, unknown> | undefined {
