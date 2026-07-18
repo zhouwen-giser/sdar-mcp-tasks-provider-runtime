@@ -13,6 +13,11 @@ export function parseTaskId(params: Record<string, unknown>): string {
   return taskId;
 }
 
+export function parseTaskReference(params: Record<string, unknown>): string {
+  assertOnlyKeys(params, new Set(["taskId", "_meta"]));
+  return parseTaskId(params);
+}
+
 export function parseTaskInputResponses(
   params: Record<string, unknown>,
 ): Record<string, FrozenInputResponse> {

@@ -2225,6 +2225,35 @@ export class TaskRepository {
     }
   }
 
+  async recordCooperativeCancellationIntent(taskId: string): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const applied = await transitionTask(client, {
+        taskId,
+        update: { cancelRequested: true, stopReason: "USER_REQUESTED" },
+        observation: {
+          type: "task.cancel_requested",
+          occurredAt: new Date(),
+          reasonCode: "ADAPTER_CANCEL_UNSUPPORTED",
+          message: "Cancellation intent recorded; Adapter does not support immediate stop.",
+          substate: null,
+          source: "runtime",
+        },
+        outboxType: "task.cancel_intent_recorded",
+        eventKey: `${taskId}:cancel-intent:user-requested`,
+        outboxPayload: { adapterDispatch: false },
+      });
+      await client.query("COMMIT");
+      return fromRow(applied.row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async beginCommand(
     taskId: string,
     commandType: "UPDATE" | "PAUSE" | "RESUME",

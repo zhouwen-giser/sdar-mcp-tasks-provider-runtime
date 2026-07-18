@@ -74,3 +74,9 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   `McpTaskInputResponse`; Legacy `InputRequest` and `UpdateValue` retain their field numbers and
   are explicitly deprecated. A real gRPC/PostgreSQL lifecycle case proves persistence,
   Command Sequence dispatch, Adapter acknowledgement, and completion.
+- Frozen `tasks/update` and `tasks/cancel` return only `{ "resultType": "complete" }`. Cancellation
+  persists a cooperative intent for every known and authorized Task: capable Adapters receive the
+  existing durable Cancel Command, while incapable Adapters receive no impossible RPC and the
+  Runtime still commits an audit event and a new Runtime revision.
+- Runtime `/mcp` remains on the Legacy handler until frozen `tools/call` and mandatory Task
+  notifications are implemented; partial capability publication is not enabled.

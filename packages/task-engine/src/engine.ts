@@ -49,6 +49,7 @@ import {
   synchronousResult,
   validatedSnapshotTransition,
 } from "./result-contract.js";
+import { mapTaskToDetailedTask, type DetailedTaskProjection } from "./detailed-task.js";
 
 export type ToolInvocationResult =
   | { kind: "result"; result: Record<string, unknown> }
@@ -558,6 +559,33 @@ export class TaskEngine {
       await this.#repository.listInputRequests(task.taskId),
       await this.#repository.listObservationPage(task.taskId),
     );
+  }
+
+  async getFrozenTask(
+    taskId: string,
+    authorization: AuthorizationContext,
+    projection: DetailedTaskProjection = "get",
+  ): Promise<Record<string, unknown>> {
+    const [task, inputRequests] = await Promise.all([
+      this.#repository.getAuthorized(taskId, authorization),
+      this.#repository.listInputRequests(taskId),
+    ]);
+    return mapTaskToDetailedTask(task, inputRequests, projection);
+  }
+
+  async cancelTaskCooperatively(
+    taskId: string,
+    authorization: AuthorizationContext,
+  ): Promise<void> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    if (isTerminalState(task.internalState)) return;
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (operation.capabilities.cancel) {
+      const requestHash = createHash("sha256").update("cancel:user_requested").digest("hex");
+      await this.#repository.beginCancel(taskId, requestHash);
+      return;
+    }
+    await this.#repository.recordCooperativeCancellationIntent(taskId);
   }
 
   async getTaskObservations(

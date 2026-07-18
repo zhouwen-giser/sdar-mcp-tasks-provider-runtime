@@ -248,6 +248,34 @@ describe("durable task lifecycle", () => {
     expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
   });
 
+  it("records cooperative cancellation when the Adapter cannot stop", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("flex_task"),
+      { resourceId: "cooperative-cancel", scenario: "running" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task-capable Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+
+    await engine.cancelTaskCooperatively(taskId, authorization);
+
+    const after = await repository.getById(taskId);
+    expect(after).toMatchObject({
+      cancelRequested: true,
+      stopReason: "USER_REQUESTED",
+      mcpStatus: "working",
+    });
+    expect(after?.internalState).not.toBe("STOPPING");
+    expect(BigInt(after?.runtimeRevision ?? "0")).toBeGreaterThan(
+      BigInt(before?.runtimeRevision ?? "0"),
+    );
+    expect(
+      await pool.query("SELECT 1 FROM task_command WHERE task_id=$1", [taskId]),
+    ).toHaveProperty("rowCount", 0);
+  });
+
   it("returns an inline result for terminal task-capable admission", async () => {
     const before = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
     const result = await engine.callOperation(
