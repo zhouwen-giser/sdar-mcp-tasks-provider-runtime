@@ -52,3 +52,4 @@ vendor protocols, pause/resume, and cancellation after dispatch are out of scope
 | 2026-07-19 | merge protected Runtime main                 | PASS   |
 | 2026-07-19 | `pnpm test:ha-climate:protocol-v1` (8 tests) | PASS   |
 | 2026-07-19 | `pnpm protocol:ha-climate:check` (8/8)       | PASS   |
+| 2026-07-19 | exact `225b09c` `pnpm verify:v2` (474.1s)    | PASS   |

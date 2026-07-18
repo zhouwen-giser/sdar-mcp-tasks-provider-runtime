@@ -23,6 +23,9 @@ Base: protected Runtime merge `798656827ea747fb824df2975f8e66135e80fcc2`
 
 ## Verification
 
+Exact implementation commit `225b09c` passed `pnpm verify:v2` in a clean detached worktree in
+474.1 seconds. This report-only follow-up commit requires independent protected CI validation.
+
 | Check                                           | Result                                                                  |
 | ----------------------------------------------- | ----------------------------------------------------------------------- |
 | TypeScript and ESLint                           | PASS                                                                    |
@@ -30,6 +33,9 @@ Base: protected Runtime merge `798656827ea747fb824df2975f8e66135e80fcc2`
 | Runtime/PostgreSQL climate E2E (1 file, 1 test) | PASS                                                                    |
 | `pnpm test:ha-climate:protocol-v1`              | PASS, 5 files / 8 tests                                                 |
 | `pnpm protocol:ha-climate:check`                | PASS, 8/8 SHA-locked Provider cases                                     |
+| Frozen protocol / numbered catalog              | PASS, 68/68 and 74/74                                                   |
+| Unit / contract / integration                   | PASS, 78 / 9 / 199 tests                                                |
+| Recovery / security                             | PASS, 9 / 29 tests                                                      |
 | `pnpm verify:v1.1`                              | PASS (exit 0, 343.1 seconds)                                            |
 | Dependency audit                                | PASS, no known vulnerabilities                                          |
 | Production SBOM                                 | PASS, 221 components                                                    |
@@ -39,6 +45,10 @@ Base: protected Runtime merge `798656827ea747fb824df2975f8e66135e80fcc2`
 The complete repository gate also exercised unit, contract, integration, recovery, security, E2E,
 TypeScript/Python conformance, capacity, and repeat-image checks. Generated conformance, capacity,
 and image reports are committed with this delivery.
+
+The exact v2 audit rebuilt the Runtime image as non-root, reproducible filesystem/config, at
+99,910,238 bytes. Dependency audit, SBOM, Kubernetes, rc.2 regressions, protocol locks, and the
+Provider 8/8 report verifier also passed.
 
 ## Verification boundary
 
