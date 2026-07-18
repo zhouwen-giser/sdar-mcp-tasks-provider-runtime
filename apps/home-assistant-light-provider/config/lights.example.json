@@ -1,0 +1,11 @@
+{
+  "resources": [
+    {
+      "resourceId": "living-room-main-light",
+      "entityId": "light.living_room_main_light",
+      "displayName": "Living room main light",
+      "enabled": true,
+      "expectedCapabilities": { "power": true, "brightness": true }
+    }
+  ]
+}
