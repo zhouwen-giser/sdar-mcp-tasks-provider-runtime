@@ -10,6 +10,7 @@ import {
   isTerminalState,
   TaskExpiredError,
   TaskNotFoundOrUnauthorizedError,
+  RUNTIME_VERSION,
 } from "../../domain/src/index.js";
 import { createProviderOpsEnvelope } from "../../observability/src/index.js";
 import { captureProviderOpsDelivery } from "./provider-ops-delivery.js";
@@ -309,7 +310,7 @@ export async function captureTaskOperationalEvent(
     eventCategory: input.recordType.replace("provider.", ""),
     deliveryClass: "operational",
     providerId: task.provider_id,
-    runtimeVersion: "1.1.0",
+    runtimeVersion: RUNTIME_VERSION,
     instanceId: "",
     taskId,
     resourceId: taskId,
@@ -3673,7 +3674,7 @@ async function captureTaskProviderOpsDelivery(
     eventCategory: isCommand ? "command.lifecycle" : "task.lifecycle",
     deliveryClass: "audit",
     providerId: task.provider_id,
-    runtimeVersion: "1.1.0",
+    runtimeVersion: RUNTIME_VERSION,
     instanceId: "",
     taskId: task.task_id,
     resourceId: task.task_id,

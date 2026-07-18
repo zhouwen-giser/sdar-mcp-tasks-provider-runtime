@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { GrpcAdapterGateway } from "../../../packages/adapter-protocol/src/index.js";
 import type { ProviderManifest } from "../../../packages/adapter-protocol/src/index.js";
+import { RUNTIME_VERSION } from "../../../packages/domain/src/index.js";
 import {
   createAuthorizationResolver,
   LegacyMcpProtocolHandler,
@@ -313,7 +314,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             otlpTimeoutMillis: config.OTEL_EXPORTER_OTLP_TIMEOUT_MS,
             ...security,
             resource: {
-              serviceVersion: "1.1.0",
+              serviceVersion: RUNTIME_VERSION,
               instanceId: telemetryInstanceId,
               deploymentEnvironment: config.RUNTIME_ENV,
               providerId: validated.providerId,
@@ -370,7 +371,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       });
       const frozenHandler = new Sep2663ProtocolHandler(
         validated,
-        "2.0.0-rc.1",
+        RUNTIME_VERSION,
         taskEngine,
         resolveAuthorization,
       );
@@ -383,7 +384,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         providerTelemetryServer ??= new ProviderTelemetryGrpcServer(
           new ProviderTelemetryIngress(pool, {
             providerId: validated.providerId,
-            runtimeVersion: "1.1.0",
+            runtimeVersion: RUNTIME_VERSION,
             instanceId: telemetryInstanceId,
             maxBatch: config.PROVIDER_TELEMETRY_MAX_BATCH,
             maxEventBytes: config.PROVIDER_TELEMETRY_MAX_EVENT_BYTES,

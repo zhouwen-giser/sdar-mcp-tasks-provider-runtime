@@ -28,6 +28,7 @@ import {
   isRuntimeError,
   TaskExpiredError,
   TaskNotFoundOrUnauthorizedError,
+  RUNTIME_VERSION,
 } from "../../domain/src/index.js";
 import type { TaskEngine } from "../../task-engine/src/index.js";
 import { z } from "zod";
@@ -170,7 +171,7 @@ export class McpProtocolHandler {
     // validated Draft 2020-12 documents, not Zod schemas owned by the Runtime.
     // eslint-disable-next-line @typescript-eslint/no-deprecated
     const server = new Server(
-      { name: "sdar-mcp-tasks-provider-runtime", version: "1.1.0" },
+      { name: "sdar-mcp-tasks-provider-runtime", version: RUNTIME_VERSION },
       {
         capabilities,
       },

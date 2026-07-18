@@ -1,6 +1,6 @@
 {
   "name": "sdar-mcp-tasks-provider-runtime",
-  "version": "1.1.0",
+  "version": "2.0.0-rc.1",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.13.1",
@@ -46,6 +46,7 @@
     "verify:rc2": "pnpm verify && pnpm test:rc2:red",
     "verify:rc3": "pnpm verify && pnpm test:rc2:red",
     "verify:v1.1": "pnpm verify && pnpm test:rc2:red",
+    "verify:v2": "pnpm verify:frozen-protocol && pnpm test:frozen-74 && pnpm verify && pnpm test:rc2:red",
     "dev:runtime": "tsx apps/runtime/src/main.ts",
     "dev:adapter:ts": "tsx examples/mock-adapter-typescript/src/main.ts"
   },

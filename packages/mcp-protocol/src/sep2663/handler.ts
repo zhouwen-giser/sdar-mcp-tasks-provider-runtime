@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { ValidatedManifest } from "../../../operation-registry/src/index.js";
 import type { AuthorizationContext } from "../../../domain/src/index.js";
-import { isRuntimeError } from "../../../domain/src/index.js";
+import { isRuntimeError, RUNTIME_VERSION } from "../../../domain/src/index.js";
 import type { TaskEngine } from "../../../task-engine/src/index.js";
 import { createAuthorizationResolver, type AuthorizationResolver } from "../security.js";
 import { frozenDiscoveryResult } from "./discovery.js";
@@ -31,7 +31,7 @@ export class Sep2663ProtocolHandler {
 
   constructor(
     readonly manifest: ValidatedManifest,
-    readonly serverVersion = "2.0.0-rc.1",
+    readonly serverVersion = RUNTIME_VERSION,
     readonly taskEngine?: TaskEngine,
     readonly resolveAuthorization: AuthorizationResolver = developmentAuthorization,
     notificationStream?: TaskNotificationStream,

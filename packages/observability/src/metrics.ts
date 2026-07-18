@@ -1,3 +1,5 @@
+import { RUNTIME_VERSION } from "../../domain/src/index.js";
+
 export class RuntimeMetrics {
   readonly #counters = new Map<string, number>();
 
@@ -10,7 +12,7 @@ export class RuntimeMetrics {
     const lines = [
       "# HELP sdar_runtime_info Runtime build information.",
       "# TYPE sdar_runtime_info gauge",
-      'sdar_runtime_info{version="1.1.0"} 1',
+      `sdar_runtime_info{version="${RUNTIME_VERSION}"} 1`,
     ];
     for (const [key, value] of [...this.#counters].sort(([left], [right]) =>
       left.localeCompare(right),
