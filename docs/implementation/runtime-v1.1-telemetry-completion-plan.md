@@ -33,28 +33,29 @@ final-report repair are explicitly out of scope.
 
 ## Ordered phases
 
-| Phase | Deliverable                                               | Primary regression evidence         | Status   | Commit  |
-| ----- | --------------------------------------------------------- | ----------------------------------- | -------- | ------- |
-| H0    | clean main baseline, red completion guards, this ExecPlan | baseline plus red suite             | complete | pending |
-| H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | pending  | pending |
-| H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | pending  | pending |
-| H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | pending  | pending |
-| H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | pending  | pending |
-| H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | pending  | pending |
-| H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | pending  | pending |
-| H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | pending  | pending |
-| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | pending  | pending |
-| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | pending  | pending |
-| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | pending  | pending |
+| Phase | Deliverable                                               | Primary regression evidence         | Status      | Commit    |
+| ----- | --------------------------------------------------------- | ----------------------------------- | ----------- | --------- |
+| H0    | clean main baseline, red completion guards, this ExecPlan | baseline plus red suite             | complete    | `a01ae20` |
+| H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | complete    | pending   |
+| H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | in progress | pending   |
+| H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | pending     | pending   |
+| H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | pending     | pending   |
+| H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | pending     | pending   |
+| H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | pending     | pending   |
+| H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | pending     | pending   |
+| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | pending     | pending   |
+| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | pending     | pending   |
+| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | pending     | pending   |
 
 ## Verification ledger
 
-| Date       | Command                                           | Result                                                                           |
-| ---------- | ------------------------------------------------- | -------------------------------------------------------------------------------- |
-| 2026-07-18 | tag preflight: `git tag --list "v1.1*"`           | PASS, no tag                                                                     |
-| 2026-07-18 | `pnpm verify:v1.1` on clean merged main           | PASS, 375.2 seconds                                                              |
-| 2026-07-18 | baseline test counts                              | 49 unit, 4 contract, 164 integration, 9 recovery, 18 security, 4 E2E, 6 rc.2 red |
-| 2026-07-18 | completion regression guard before implementation | RED as expected, 7/7 failed                                                      |
+| Date       | Command                                              | Result                                                                           |
+| ---------- | ---------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 2026-07-18 | tag preflight: `git tag --list "v1.1*"`              | PASS, no tag                                                                     |
+| 2026-07-18 | `pnpm verify:v1.1` on clean merged main              | PASS, 375.2 seconds                                                              |
+| 2026-07-18 | baseline test counts                                 | 49 unit, 4 contract, 164 integration, 9 recovery, 18 security, 4 E2E, 6 rc.2 red |
+| 2026-07-18 | completion regression guard before implementation    | RED as expected, 7/7 failed                                                      |
+| 2026-07-18 | H1 typecheck, lint and envelope/outbox focused tests | PASS, 18 tests                                                                   |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.

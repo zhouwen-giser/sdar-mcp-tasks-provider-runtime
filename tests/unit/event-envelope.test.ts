@@ -53,6 +53,14 @@ describe("ProviderOpsEnvelope", () => {
     expect(calculateProviderOpsRecordHash(first)).toBe(first.recordHash);
   });
 
+  it("keeps the record hash stable across Runtime replicas", () => {
+    const first = createProviderOpsEnvelope({ ...baseInput, instanceId: "runtime-a" });
+    const second = createProviderOpsEnvelope({ ...baseInput, instanceId: "runtime-b" });
+
+    expect(first.recordId).toBe(second.recordId);
+    expect(first.recordHash).toBe(second.recordHash);
+  });
+
   it("changes the record hash when stable payload content changes", () => {
     const first = createProviderOpsEnvelope(baseInput);
     const changed = createProviderOpsEnvelope({

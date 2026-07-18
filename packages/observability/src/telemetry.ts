@@ -218,12 +218,12 @@ export class ProviderTelemetry {
       !Array.isArray(envelope.payload)
         ? envelope.payload
         : {};
-    if (envelope.recordType === "provider.task_lifecycle") {
+    if (envelope.recordType === "provider.task.lifecycle") {
       this.metric("provider_task_transition_total", 1, {
         state: stringAttribute(payload.currentState),
         resultClass: stringAttribute(payload.resultClass),
       });
-    } else if (envelope.recordType === "provider.command_dispatch") {
+    } else if (envelope.recordType === "provider.command.lifecycle") {
       this.metric("provider_command_total", 1, {
         commandType: stringAttribute(payload.commandType),
         state: stringAttribute(payload.currentState),

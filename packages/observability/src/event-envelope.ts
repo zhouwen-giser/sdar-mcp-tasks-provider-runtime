@@ -2,7 +2,7 @@ import { canonicalizeJson, sha256CanonicalJson, uuidV5 } from "./hash.js";
 import type { CanonicalJsonValue } from "./hash.js";
 
 export const PROVIDER_OPS_SCHEMA_NAME = "sdar.provider.ops.event";
-export const PROVIDER_OPS_SCHEMA_VERSION = "1.0.0";
+export const PROVIDER_OPS_SCHEMA_VERSION = "1.1.0";
 
 // Stable, project-owned namespace. UUIDv5 uses SHA-1 only as its standardized name mapping.
 const PROVIDER_OPS_RECORD_NAMESPACE = "670c4482-8e75-58ae-a0d9-60c923de6432";
@@ -19,10 +19,16 @@ export interface ProviderOpsEnvelope {
   runtimeVersion: string;
   instanceId: string;
   taskId?: string;
+  resourceId?: string;
+  resourceType?: string;
   externalExecutionId?: string;
   operationName?: string;
   correlationId?: string;
   traceId?: string;
+  spanId?: string;
+  providerEventId?: string;
+  providerEventSequence?: number;
+  eventType?: string;
   executionMode?: string;
   simulationId?: string;
   argumentHash?: string;
@@ -76,8 +82,10 @@ export function calculateProviderOpsRecordHash(
   const deliveryMetadata = new Set([
     "recordHash",
     "emittedAt",
+    "instanceId",
     "exportRetryCount",
     "collectorTimestamp",
+    "exporterHost",
   ]);
   const hashMaterial = Object.fromEntries(
     Object.entries(envelope).filter(([key]) => !deliveryMetadata.has(key)),
