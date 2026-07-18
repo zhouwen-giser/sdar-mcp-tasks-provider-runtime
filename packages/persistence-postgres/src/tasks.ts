@@ -217,6 +217,10 @@ interface TaskRow {
   operation_name: string;
   operation_snapshot_id: string;
   authorization_context_hash: string;
+  trace_id: string | null;
+  root_traceparent: string | null;
+  root_tracestate: string | null;
+  correlation_id: string | null;
   execution_mode: TaskRecord["executionMode"];
   simulation_id: string | null;
   arguments: Record<string, unknown>;
@@ -271,8 +275,9 @@ export class TaskRepository {
         (task_id, provider_id, operation_name, operation_snapshot_id,
          authorization_context_hash, execution_mode, simulation_id, arguments,
          argument_hash, state, accepted_at, not_before, latest_start_at,
-         deadline_at, ttl_ms, timing)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING',$10,$11,$12,$13,$14,$15::jsonb)
+         deadline_at, ttl_ms, timing, trace_id, root_traceparent, root_tracestate, correlation_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING',$10,$11,$12,$13,$14,$15::jsonb,
+               $16,$17,$18,$19)
        ON CONFLICT (task_id) DO NOTHING`,
       [
         input.taskId,
@@ -290,6 +295,10 @@ export class TaskRepository {
         input.deadlineAt,
         input.ttlMs,
         JSON.stringify(input.timing),
+        input.authorization.traceId ?? null,
+        input.authorization.rootTraceparent ?? null,
+        input.authorization.rootTracestate ?? null,
+        input.authorization.correlationId ?? null,
       ],
     );
     return result.rowCount === 1;
@@ -313,6 +322,10 @@ export class TaskRepository {
       deadline_at: Date | null;
       ttl_ms: string | null;
       timing: TaskExecutionTiming;
+      trace_id: string | null;
+      root_traceparent: string | null;
+      root_tracestate: string | null;
+      correlation_id: string | null;
     }>("SELECT * FROM admission_intent WHERE task_id=$1", [taskId]);
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -325,6 +338,10 @@ export class TaskRepository {
         hash: row.authorization_context_hash,
         executionMode: row.execution_mode,
         simulationId: row.simulation_id,
+        ...(row.trace_id === null ? {} : { traceId: row.trace_id }),
+        ...(row.root_traceparent === null ? {} : { rootTraceparent: row.root_traceparent }),
+        ...(row.root_tracestate === null ? {} : { rootTracestate: row.root_tracestate }),
+        ...(row.correlation_id === null ? {} : { correlationId: row.correlation_id }),
       },
       arguments: row.arguments,
       argumentHash: row.argument_hash,
@@ -382,7 +399,7 @@ export class TaskRepository {
            substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, actual_started_at,
            invocation_attempt, observation_revision, terminal_at, handle_expires_at,
-           last_confirmed_at)
+           last_confirmed_at, trace_id, root_traceparent, root_tracestate, correlation_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
                  $16::jsonb,$17,$18,$19,$20::jsonb,$21,$22,$23,
                  $24,$25,1,
@@ -391,7 +408,7 @@ export class TaskRepository {
                    WHEN $19::bigint IS NULL AND $11 NOT LIKE 'TERMINAL_%' THEN NULL
                    ELSE clock_timestamp() + (COALESCE($19::bigint,86400000) * interval '1 millisecond')
                  END,
-                 clock_timestamp())`,
+                 clock_timestamp(),$26,$27,$28,$29)`,
         [
           input.taskId,
           input.providerId,
@@ -418,6 +435,10 @@ export class TaskRepository {
           input.deadlineAt,
           input.actualStartedAt ?? null,
           1,
+          input.authorization.traceId ?? null,
+          input.authorization.rootTraceparent ?? null,
+          input.authorization.rootTracestate ?? null,
+          input.authorization.correlationId ?? null,
         ],
       );
       await insertObservation(client, input.taskId, 1, input.transition, {
@@ -462,9 +483,11 @@ export class TaskRepository {
            argument_hash, external_execution_id, internal_state, mcp_status,
            substate, status_message, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, invocation_attempt,
-           next_start_attempt_at, observation_revision)
+           next_start_attempt_at, observation_revision, trace_id, root_traceparent,
+           root_tracestate, correlation_id)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,NULL,'SCHEDULED','working',
-                 'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15,0,$13,1)`,
+                 'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15,0,$13,1,
+                 $16,$17,$18,$19)`,
         [
           input.taskId,
           input.providerId,
@@ -481,6 +504,10 @@ export class TaskRepository {
           input.notBefore,
           input.latestStartAt,
           input.deadlineAt,
+          input.authorization.traceId ?? null,
+          input.authorization.rootTraceparent ?? null,
+          input.authorization.rootTracestate ?? null,
+          input.authorization.correlationId ?? null,
         ],
       );
       await initializeTaskRetention(
@@ -2689,6 +2716,10 @@ async function transitionTask(
     simulationId: row.simulation_id,
     argumentHash: row.argument_hash,
     authorizationContextHash: row.authorization_context_hash,
+    traceId: row.trace_id,
+    rootTraceparent: row.root_traceparent,
+    rootTracestate: row.root_tracestate,
+    correlationId: row.correlation_id,
     observationRevision: revision,
     adapterRevision: Number(row.adapter_revision),
     occurredAt: occurredAt.toISOString(),
@@ -3198,6 +3229,10 @@ function fromRow(row: TaskRow): TaskRecord {
     operationName: row.operation_name,
     operationSnapshotId: row.operation_snapshot_id,
     authorizationContextHash: row.authorization_context_hash,
+    traceId: row.trace_id,
+    rootTraceparent: row.root_traceparent,
+    rootTracestate: row.root_tracestate,
+    correlationId: row.correlation_id,
     executionMode: row.execution_mode,
     simulationId: row.simulation_id,
     arguments: row.arguments,

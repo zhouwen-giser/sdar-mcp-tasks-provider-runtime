@@ -44,6 +44,10 @@ const authorization: AuthorizationContext = {
   hash: "a".repeat(64),
   executionMode: "live",
   simulationId: null,
+  traceId: "1".repeat(32),
+  rootTraceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
+  rootTracestate: "vendor=test",
+  correlationId: "trace-persistence-test",
 };
 let adapter: grpc.Server;
 let gateway: GrpcAdapterGateway;
@@ -106,6 +110,22 @@ afterAll(async () => {
 });
 
 describe("durable task lifecycle", () => {
+  it("task_trace_context_survives_restart", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "trace-context" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected durable task");
+    const restored = await new TaskRepository(pool).getById(String(created.task.taskId));
+    expect(restored).toMatchObject({
+      traceId: "1".repeat(32),
+      rootTraceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
+      rootTracestate: "vendor=test",
+      correlationId: "trace-persistence-test",
+    });
+  });
+
   it("publishes before returning, maps working to completed, and survives engine restart", async () => {
     const operation = requiredOperation("durable_task");
     const created = await engine.callOperation(

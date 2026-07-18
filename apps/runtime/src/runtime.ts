@@ -92,12 +92,34 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     providerId: config.PROVIDER_ID,
     credentials: adapterCredentials(config),
     timeoutMs: config.ADAPTER_RPC_TIMEOUT_MS,
-    onRpc: (method, outcome, durationMs, context) => {
+    onRpc: (method, outcome, durationMs) => {
       metrics.increment("sdar_adapter_rpc_total", { method, outcome });
-      telemetry?.adapterRpc(method, outcome, durationMs, context);
       telemetry?.metric("adapter_rpc_total", 1, { method, outcome });
       telemetry?.metric("adapter_rpc_duration", durationMs, { method, outcome }, "histogram");
     },
+    traceRpc: (method, rpcContext, operation) =>
+      telemetry?.traceAdapterRpc(
+        method,
+        {
+          ...(rpcContext.taskId === undefined ? {} : { taskId: rpcContext.taskId }),
+          ...(rpcContext.externalExecutionId === undefined
+            ? {}
+            : { externalExecutionId: rpcContext.externalExecutionId }),
+          ...(rpcContext.operationName === undefined
+            ? {}
+            : { operationName: rpcContext.operationName }),
+          ...(rpcContext.commandSequence === undefined
+            ? {}
+            : { commandSequence: rpcContext.commandSequence }),
+        },
+        operation,
+        rpcContext.traceparent === undefined
+          ? undefined
+          : {
+              traceparent: rpcContext.traceparent,
+              ...(rpcContext.tracestate === undefined ? {} : { tracestate: rpcContext.tracestate }),
+            },
+      ) ?? operation(new grpc.Metadata()),
   });
   const dependencies: RuntimeDependencies = {
     database: "starting",
@@ -292,6 +314,14 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         maxArgumentBytes: config.ARGUMENT_MAX_BYTES,
         maxJsonDepth: config.ARGUMENT_MAX_DEPTH,
         maxJsonNodes: config.ARGUMENT_MAX_NODES,
+        traceRequest: (name, headers, action) =>
+          telemetry?.traceRequest(
+            name,
+            headers,
+            { "sdar.provider.id": validated.providerId },
+            action,
+          ) ?? action(),
+        currentTraceContext: () => telemetry?.currentTraceContext() ?? null,
         onProtocolError: (error, correlationId) =>
           logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
@@ -310,6 +340,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             maxDepth: config.PROVIDER_TELEMETRY_MAX_DEPTH,
             maxNodes: config.PROVIDER_TELEMETRY_MAX_NODES,
             rateLimit: config.PROVIDER_TELEMETRY_RATE_LIMIT,
+            traceEvent: (traceContext, operation) =>
+              telemetry?.traceProviderEvent(traceContext, operation) ?? operation(),
           }),
           {
             host: config.PROVIDER_TELEMETRY_HOST,

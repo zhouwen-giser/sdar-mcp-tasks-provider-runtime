@@ -30,6 +30,16 @@ export interface ProviderTelemetryIngressOptions {
   maxTimestampSkewMs?: number;
   rateLimit?: number;
   rateLimitWindowMs?: number;
+  traceEvent?: <T>(
+    traceContext: {
+      providerTraceparent?: string;
+      providerTracestate?: string;
+      taskTraceparent?: string;
+      taskTracestate?: string;
+      eventType: string;
+    },
+    operation: () => Promise<T>,
+  ) => Promise<T>;
 }
 
 export class ProviderTelemetryIngress {
@@ -96,7 +106,8 @@ export class ProviderTelemetryIngress {
     const sanitizedPayload = this.#sanitizer.sanitize(event.payload) as CanonicalJsonValue;
     const authoritativeExternalExecutionId = task?.externalExecutionId;
     const authoritativeSimulationId = task?.simulationId;
-    const traceId = traceIdFromTraceparent(event.traceparent);
+    const providerTrace = contextFromTraceparent(event.traceparent);
+    const traceId = providerTrace?.traceId ?? task?.traceId ?? undefined;
     const envelope = createProviderOpsEnvelope({
       recordType: `provider.${eventCategory}`,
       eventCategory,
@@ -124,6 +135,7 @@ export class ProviderTelemetryIngress {
       providerEventSequence: Number(event.providerEventSequence),
       eventType: eventCategory,
       ...(traceId === undefined ? {} : { traceId }),
+      ...(providerTrace === undefined ? {} : { spanId: providerTrace.spanId }),
       stableAggregateIdentity: task?.taskId ?? event.resourceId,
       eventIdentity: `${this.options.providerId}:${event.providerEventId}`,
       revision: event.providerEventSequence,
@@ -132,43 +144,60 @@ export class ProviderTelemetryIngress {
         ...(sanitizedAttributes as Record<string, CanonicalJsonValue>),
         ...(event.traceparent.length === 0 ? {} : { traceparent: event.traceparent }),
         ...(event.tracestate.length === 0 ? {} : { tracestate: event.tracestate }),
+        ...(task?.traceId === undefined || task.traceId === null
+          ? {}
+          : { linkedTaskTraceId: task.traceId }),
       },
       payload: sanitizedPayload,
     });
     const eventKey = `provider:${this.options.providerId}:${event.providerEventId}`;
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const duplicate = await existingRecord(client, eventKey);
-      if (duplicate !== undefined) {
-        await client.query("ROLLBACK");
-        if (duplicate.recordHash !== envelope.recordHash) {
-          return rejected(event, "PROVIDER_EVENT_ID_CONFLICT");
+    const persist = async (): Promise<ProviderTelemetryEventResult> => {
+      const client = await this.pool.connect();
+      try {
+        await client.query("BEGIN");
+        const duplicate = await existingRecord(client, eventKey);
+        if (duplicate !== undefined) {
+          await client.query("ROLLBACK");
+          if (duplicate.recordHash !== envelope.recordHash) {
+            return rejected(event, "PROVIDER_EVENT_ID_CONFLICT");
+          }
+          return accepted(event, duplicate.recordId, true);
         }
-        return accepted(event, duplicate.recordId, true);
-      }
-      const inserted = await captureProviderOpsDelivery(client, {
-        envelope,
-        eventKey,
-        aggregateType: task === null ? "provider" : "task",
-        aggregateId: task?.taskId ?? event.resourceId,
-      });
-      if (!inserted) {
-        const concurrent = await existingRecord(client, eventKey);
-        await client.query("ROLLBACK");
-        if (concurrent?.recordHash !== envelope.recordHash) {
-          return rejected(event, "PROVIDER_EVENT_ID_CONFLICT");
+        const inserted = await captureProviderOpsDelivery(client, {
+          envelope,
+          eventKey,
+          aggregateType: task === null ? "provider" : "task",
+          aggregateId: task?.taskId ?? event.resourceId,
+        });
+        if (!inserted) {
+          const concurrent = await existingRecord(client, eventKey);
+          await client.query("ROLLBACK");
+          if (concurrent?.recordHash !== envelope.recordHash) {
+            return rejected(event, "PROVIDER_EVENT_ID_CONFLICT");
+          }
+          return accepted(event, concurrent.recordId, true);
         }
-        return accepted(event, concurrent.recordId, true);
+        await client.query("COMMIT");
+        return accepted(event, envelope.recordId, false);
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        return rejected(event, "PROVIDER_EVENT_PERSISTENCE_FAILED", safeErrorName(error));
+      } finally {
+        client.release();
       }
-      await client.query("COMMIT");
-      return accepted(event, envelope.recordId, false);
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      return rejected(event, "PROVIDER_EVENT_PERSISTENCE_FAILED", safeErrorName(error));
-    } finally {
-      client.release();
-    }
+    };
+    const traceContext = {
+      ...(event.traceparent.length === 0 ? {} : { providerTraceparent: event.traceparent }),
+      ...(event.tracestate.length === 0 ? {} : { providerTracestate: event.tracestate }),
+      ...(task?.rootTraceparent === undefined || task.rootTraceparent === null
+        ? {}
+        : { taskTraceparent: task.rootTraceparent }),
+      ...(task?.rootTracestate === undefined || task.rootTracestate === null
+        ? {}
+        : { taskTracestate: task.rootTracestate }),
+      eventType: eventCategory,
+    };
+    return this.options.traceEvent?.(traceContext, persist) ?? persist();
   }
 
   #validate(event: ProviderTelemetryEventInput): string | null {
@@ -176,6 +205,12 @@ export class ProviderTelemetryIngress {
     const sequence = Number(event.providerEventSequence);
     if (!Number.isSafeInteger(sequence) || sequence < 0) return "PROVIDER_EVENT_SEQUENCE_INVALID";
     if (!allowedEventTypes.has(event.eventType)) return "PROVIDER_EVENT_TYPE_INVALID";
+    if (event.traceparent.length > 0 && contextFromTraceparent(event.traceparent) === undefined) {
+      return "PROVIDER_EVENT_TRACEPARENT_INVALID";
+    }
+    if (event.tracestate.length > 512 || /[\r\n]/.test(event.tracestate)) {
+      return "PROVIDER_EVENT_TRACESTATE_INVALID";
+    }
     if (event.eventType === "EXECUTION_PROGRESS" && event.taskId.length === 0) {
       return "PROVIDER_EVENT_TASK_REQUIRED";
     }
@@ -291,9 +326,13 @@ function timestampToDate(timestamp: ProviderTelemetryEventInput["occurredAt"]): 
   return new Date(Number(timestamp.seconds) * 1_000 + Math.floor(timestamp.nanos / 1_000_000));
 }
 
-function traceIdFromTraceparent(traceparent: string): string | undefined {
-  const match = /^00-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/.exec(traceparent);
-  return match?.[1];
+function contextFromTraceparent(
+  traceparent: string,
+): { traceId: string; spanId: string } | undefined {
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/.exec(traceparent);
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  if (/^0+$/.test(match[1]) || /^0+$/.test(match[2])) return undefined;
+  return { traceId: match[1], spanId: match[2] };
 }
 
 function jsonShape(value: unknown, depth = 1): { depth: number; nodes: number } {

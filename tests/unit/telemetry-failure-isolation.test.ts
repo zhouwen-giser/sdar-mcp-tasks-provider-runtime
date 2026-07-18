@@ -34,9 +34,14 @@ describe("Provider telemetry failure isolation", () => {
     });
     telemetry.start();
 
+    let executions = 0;
     await expect(
-      telemetry.trace("provider.business", {}, () => Promise.resolve("task_create_success")),
+      telemetry.trace("provider.business", {}, () => {
+        executions += 1;
+        return Promise.resolve("task_create_success");
+      }),
     ).resolves.toBe("task_create_success");
+    expect(executions).toBe(1);
     for (let index = 0; index < 20; index += 1) {
       telemetry.event("provider.queue_pressure", { index });
       telemetry.metric("provider_command_total", 1, { outcome: "success" });

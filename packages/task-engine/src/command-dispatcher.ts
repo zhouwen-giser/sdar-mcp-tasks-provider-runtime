@@ -214,9 +214,7 @@ export class DurableCommandDispatcher {
     }
     const reconciled = await this.withClaimHeartbeat(command, () =>
       this.gateway.reconcileExecution(task.taskId, operationName, task.argumentHash, {
-        authorizationContextHash: task.authorizationContextHash,
-        executionMode: task.executionMode,
-        simulationId: task.simulationId,
+        ...executionOptions(task),
         externalExecutionId: task.externalExecutionId,
       }),
     );
@@ -487,10 +485,18 @@ function executionOptions(task: {
   authorizationContextHash: string;
   executionMode: ExecutionMode;
   simulationId: string | null;
+  rootTraceparent?: string | null;
+  rootTracestate?: string | null;
 }): Record<string, unknown> {
   return {
     authorizationContextHash: task.authorizationContextHash,
     executionMode: task.executionMode,
     simulationId: task.simulationId,
+    ...(task.rootTraceparent === undefined || task.rootTraceparent === null
+      ? {}
+      : { rootTraceparent: task.rootTraceparent }),
+    ...(task.rootTracestate === undefined || task.rootTracestate === null
+      ? {}
+      : { rootTracestate: task.rootTracestate }),
   };
 }

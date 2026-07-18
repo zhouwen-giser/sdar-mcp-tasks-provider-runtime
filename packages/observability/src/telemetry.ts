@@ -1,5 +1,8 @@
-import { SpanStatusCode } from "@opentelemetry/api";
-import type { Attributes } from "@opentelemetry/api";
+import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import type { Attributes, Context, Link, TextMapGetter, TextMapSetter } from "@opentelemetry/api";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import * as grpc from "@grpc/grpc-js";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
@@ -42,12 +45,6 @@ export interface ProviderTelemetryOptions {
 
 export type ProviderMetricKind = "counter" | "histogram" | "gauge";
 
-export interface AdapterRpcTelemetryContext {
-  taskId?: string;
-  externalExecutionId?: string;
-  commandSequence?: number;
-}
-
 interface ProviderMetricInstrument {
   add?: (value: number, attributes?: Attributes) => void;
   record?: (value: number, attributes?: Attributes) => void;
@@ -77,6 +74,8 @@ export class ProviderTelemetry {
   #shutdown = false;
   readonly #metricInstruments = new Map<string, ProviderMetricInstrument>();
   readonly #sanitizer = new TelemetrySanitizer();
+  readonly #propagator = new W3CTraceContextPropagator();
+  readonly #contextManager = new AsyncLocalStorageContextManager().enable();
 
   constructor(options: ProviderTelemetryOptions) {
     this.#options = options;
@@ -137,74 +136,177 @@ export class ProviderTelemetry {
     ].filter((provider) => provider !== undefined);
     await Promise.allSettled(providers.map((provider) => provider.forceFlush()));
     await Promise.allSettled(providers.map((provider) => provider.shutdown()));
+    this.#contextManager.disable();
   }
 
   async trace<T>(name: string, attributes: Attributes, operation: () => Promise<T>): Promise<T> {
-    if (!this.#started || this.#tracerProvider === undefined) return operation();
-    const invocation = { started: false };
+    return this.#traceInContext(
+      this.#contextManager.active(),
+      name,
+      attributes,
+      SpanKind.INTERNAL,
+      operation,
+    );
+  }
+
+  traceRequest<T>(
+    name: string,
+    headers: Record<string, string | string[] | undefined>,
+    attributes: Attributes,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    let parent = ROOT_CONTEXT;
     try {
-      const tracer = this.#tracerProvider.getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
-      return await tracer.startActiveSpan(
-        name,
-        { attributes: this.#sanitizer.sanitizeAttributes(attributes) },
-        async (span) => {
-          invocation.started = true;
-          try {
-            const result = await operation();
-            span.setStatus({ code: SpanStatusCode.OK });
-            return result;
-          } catch (error) {
-            span.setStatus({ code: SpanStatusCode.ERROR });
-            if (error instanceof Error) span.recordException(error);
-            throw error;
-          } finally {
-            span.end();
-          }
-        },
-      );
+      parent = this.#propagator.extract(ROOT_CONTEXT, headers, httpHeaderGetter);
+    } catch {
+      // Invalid upstream propagation becomes a new root span.
+    }
+    return this.#traceInContext(parent, name, attributes, SpanKind.SERVER, operation);
+  }
+
+  traceAdapterRpc<T>(
+    method: string,
+    attributes: Attributes,
+    operation: (metadata: grpc.Metadata) => Promise<T>,
+    persistedParent?: { traceparent: string; tracestate?: string },
+  ): Promise<T> {
+    let parent = this.#contextManager.active();
+    if (persistedParent !== undefined) {
+      try {
+        parent = this.#propagator.extract(ROOT_CONTEXT, persistedParent, httpHeaderGetter);
+      } catch {
+        parent = this.#contextManager.active();
+      }
+    }
+    return this.#traceInContext(
+      parent,
+      "adapter.rpc",
+      {
+        "rpc.system": "grpc",
+        "rpc.method": method,
+        "server.address": this.#options.resource.providerId,
+        ...attributes,
+      },
+      SpanKind.CLIENT,
+      async () => {
+        const metadata = new grpc.Metadata();
+        try {
+          this.#propagator.inject(this.#contextManager.active(), metadata, grpcMetadataSetter);
+        } catch {
+          // Propagation failure cannot block the Adapter call.
+        }
+        return operation(metadata);
+      },
+    );
+  }
+
+  currentTraceContext(): {
+    traceId: string;
+    rootTraceparent: string;
+    rootTracestate?: string;
+  } | null {
+    const spanContext = trace.getSpanContext(this.#contextManager.active());
+    if (spanContext === undefined) return null;
+    const carrier: Record<string, string> = {};
+    try {
+      this.#propagator.inject(this.#contextManager.active(), carrier, recordSetter);
+    } catch {
+      return null;
+    }
+    const rootTraceparent = carrier.traceparent;
+    if (rootTraceparent === undefined) return null;
+    return {
+      traceId: spanContext.traceId,
+      rootTraceparent,
+      ...(carrier.tracestate === undefined ? {} : { rootTracestate: carrier.tracestate }),
+    };
+  }
+
+  traceProviderEvent<T>(
+    input: {
+      providerTraceparent?: string;
+      providerTracestate?: string;
+      taskTraceparent?: string;
+      taskTracestate?: string;
+      eventType: string;
+    },
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const providerParent = propagationContext(
+      this.#propagator,
+      input.providerTraceparent,
+      input.providerTracestate,
+    );
+    const taskParent = propagationContext(
+      this.#propagator,
+      input.taskTraceparent,
+      input.taskTracestate,
+    );
+    const taskSpanContext = taskParent === undefined ? undefined : trace.getSpanContext(taskParent);
+    const links: Link[] = taskSpanContext === undefined ? [] : [{ context: taskSpanContext }];
+    return this.#traceInContext(
+      providerParent ?? taskParent ?? this.#contextManager.active(),
+      "provider.event",
+      { eventType: input.eventType },
+      SpanKind.SERVER,
+      operation,
+      links,
+    );
+  }
+
+  async #traceInContext<T>(
+    parent: Context,
+    name: string,
+    attributes: Attributes,
+    kind: SpanKind,
+    operation: () => Promise<T>,
+    links: Link[] = [],
+  ): Promise<T> {
+    if (!this.#started || this.#tracerProvider === undefined) return operation();
+    let span;
+    try {
+      span = this.#tracerProvider
+        .getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION)
+        .startSpan(
+          name,
+          { kind, links, attributes: this.#sanitizer.sanitizeAttributes(attributes) },
+          parent,
+        );
+    } catch {
+      return operation();
+    }
+    const invocation = { started: false };
+    const invoke = async (): Promise<T> => {
+      invocation.started = true;
+      try {
+        const result = await operation();
+        try {
+          span.setStatus({ code: SpanStatusCode.OK });
+        } catch {
+          // Span mutation cannot replace a business result.
+        }
+        return result;
+      } catch (error) {
+        try {
+          span.setStatus({ code: SpanStatusCode.ERROR });
+          span.setAttribute("error.type", error instanceof Error ? error.name : "unknown");
+        } catch {
+          // Raw exception content is never exported.
+        }
+        throw error;
+      } finally {
+        try {
+          span.end();
+        } catch {
+          // Span shutdown cannot replace a business result.
+        }
+      }
+    };
+    try {
+      return await this.#contextManager.with(trace.setSpan(parent, span), invoke);
     } catch (error) {
       if (invocation.started) throw error;
       return operation();
-    }
-  }
-
-  adapterRpc(
-    method: string,
-    outcome: "success" | "error",
-    durationMs: number,
-    context: AdapterRpcTelemetryContext = {},
-  ): void {
-    if (!this.#started || this.#tracerProvider === undefined) return;
-    try {
-      const endTime = Date.now();
-      const span = this.#tracerProvider
-        .getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION)
-        .startSpan("adapter.rpc", {
-          attributes: {
-            "adapter.provider": this.#options.resource.providerId,
-            "rpc.system": "grpc",
-            "rpc.method": method,
-            ...(context.taskId === undefined || context.taskId.length === 0
-              ? {}
-              : { taskId: context.taskId }),
-            ...(context.externalExecutionId === undefined ||
-            context.externalExecutionId.length === 0
-              ? {}
-              : { externalExecutionId: context.externalExecutionId }),
-            ...(context.commandSequence === undefined
-              ? {}
-              : { commandSequence: context.commandSequence }),
-            duration: durationMs,
-            status: outcome,
-          },
-          startTime: new Date(endTime - Math.max(0, durationMs)),
-        });
-      span.setStatus({
-        code: outcome === "success" ? SpanStatusCode.OK : SpanStatusCode.ERROR,
-      });
-      span.end(endTime);
-    } catch {
-      // Instrumentation must never alter Adapter RPC behavior.
     }
   }
 
@@ -338,6 +440,38 @@ function boundedMetricAttributes(attributes: Attributes): Attributes {
 
 function stringAttribute(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+const httpHeaderGetter: TextMapGetter<Record<string, string | string[] | undefined>> = {
+  keys: (carrier) => Object.keys(carrier),
+  get: (carrier, key) => carrier[key.toLowerCase()],
+};
+
+const grpcMetadataSetter: TextMapSetter<grpc.Metadata> = {
+  set: (carrier, key, value) => carrier.set(key, value),
+};
+
+const recordSetter: TextMapSetter<Record<string, string>> = {
+  set: (carrier, key, value) => {
+    carrier[key] = value;
+  },
+};
+
+function propagationContext(
+  propagator: W3CTraceContextPropagator,
+  traceparent: string | undefined,
+  tracestate: string | undefined,
+): Context | undefined {
+  if (traceparent === undefined) return undefined;
+  try {
+    return propagator.extract(
+      ROOT_CONTEXT,
+      { traceparent, ...(tracestate === undefined ? {} : { tracestate }) },
+      httpHeaderGetter,
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function signalEndpoint(base: string | undefined, signal: "traces" | "metrics" | "logs"): string {

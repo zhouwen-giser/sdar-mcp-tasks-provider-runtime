@@ -66,6 +66,19 @@ Prometheus compatibility is unchanged. OTel counters are `provider_task_transiti
 Metric labels are allowlisted and bounded. Task ids, execution ids, correlation ids, user ids,
 argument hashes, and authorization hashes are never metric labels.
 
+## Trace propagation
+
+Runtime creates `mcp.tools.call`, `mcp.tasks.get`, `mcp.tasks.cancel`, `mcp.tasks.update`,
+`mcp.tasks.pause`, and `mcp.tasks.resume` server spans. Valid W3C `traceparent`/`tracestate` HTTP
+headers become the parent; otherwise Runtime starts a new root. Adapter client spans wrap the real
+gRPC call and inject W3C context into gRPC metadata before invocation. They never include request or
+response payloads or raw exceptions.
+
+Migration 018 stores the Task trace id, Runtime root `traceparent`/`tracestate`, and correlation id on
+both admission intent and Task. Scheduler, command dispatcher, watchdog, and recovery Adapter calls
+restore that parent after restart. Task-bound Provider events carry the Provider span identity when
+valid and include the persisted Task trace id as a link attribute.
+
 ## Privacy and failure behavior
 
 The sanitizer recursively removes passwords, tokens, authorization/JWT material, raw arguments,

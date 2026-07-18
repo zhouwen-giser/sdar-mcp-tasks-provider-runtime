@@ -38,11 +38,13 @@ beforeAll(async () => {
     `INSERT INTO provider_task
        (task_id,provider_id,operation_name,operation_snapshot_id,authorization_context_hash,
         execution_mode,simulation_id,arguments,argument_hash,external_execution_id,
-        internal_state,mcp_status,substate,accepted_at,timing,adapter_revision,observation_revision)
+        internal_state,mcp_status,substate,accepted_at,timing,adapter_revision,observation_revision,
+        trace_id,root_traceparent,root_tracestate,correlation_id)
      VALUES ('00000000-0000-4000-8000-000000000402','provider-1','durable_task',
        '00000000-0000-4000-8000-000000000401',repeat('b',64),'simulation','sim-1',
        '{}'::jsonb,repeat('c',64),'execution-1','RUNNING','working','running',
-       clock_timestamp(),'{}'::jsonb,7,9)`,
+       clock_timestamp(),'{}'::jsonb,7,9,repeat('d',32),
+       '00-dddddddddddddddddddddddddddddddd-eeeeeeeeeeeeeeee-01','vendor=task','task-correlation')`,
   );
 });
 
@@ -88,6 +90,7 @@ describe("Runtime ProviderTelemetryIngress", () => {
       authorizationContextHash: "b".repeat(64),
       adapterRevision: "7",
       observationRevision: 9,
+      attributes: { linkedTaskTraceId: "d".repeat(32) },
     });
   });
 

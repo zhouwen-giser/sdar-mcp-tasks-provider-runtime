@@ -13,52 +13,23 @@ import type {
   StartOperationResponse,
 } from "./types.js";
 
+type UnaryAdapterMethod<T> = (
+  request: unknown,
+  metadata: grpc.Metadata,
+  options: grpc.CallOptions,
+  callback: grpc.requestCallback<T>,
+) => grpc.ClientUnaryCall;
+
 type AdapterClient = grpc.Client & {
-  describeProvider(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<ProviderManifest>,
-  ): grpc.ClientUnaryCall;
-  getExecution(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<ExecutionSnapshot>,
-  ): grpc.ClientUnaryCall;
-  startOperation(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<StartOperationResponse>,
-  ): grpc.ClientUnaryCall;
-  checkAvailability(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<CheckAvailabilityResponse>,
-  ): grpc.ClientUnaryCall;
-  reconcileExecution(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<ReconcileExecutionResponse>,
-  ): grpc.ClientUnaryCall;
-  requestCancel(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<CommandAck>,
-  ): grpc.ClientUnaryCall;
-  updateExecution(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<CommandAck>,
-  ): grpc.ClientUnaryCall;
-  pauseExecution(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<CommandAck>,
-  ): grpc.ClientUnaryCall;
-  resumeExecution(
-    request: unknown,
-    options: grpc.CallOptions,
-    callback: grpc.requestCallback<CommandAck>,
-  ): grpc.ClientUnaryCall;
+  describeProvider: UnaryAdapterMethod<ProviderManifest>;
+  getExecution: UnaryAdapterMethod<ExecutionSnapshot>;
+  startOperation: UnaryAdapterMethod<StartOperationResponse>;
+  checkAvailability: UnaryAdapterMethod<CheckAvailabilityResponse>;
+  reconcileExecution: UnaryAdapterMethod<ReconcileExecutionResponse>;
+  requestCancel: UnaryAdapterMethod<CommandAck>;
+  updateExecution: UnaryAdapterMethod<CommandAck>;
+  pauseExecution: UnaryAdapterMethod<CommandAck>;
+  resumeExecution: UnaryAdapterMethod<CommandAck>;
 };
 
 export interface AdapterGatewayOptions {
@@ -72,12 +43,20 @@ export interface AdapterGatewayOptions {
     durationMs: number,
     context: AdapterRpcContext,
   ) => void;
+  traceRpc?: <T>(
+    method: string,
+    context: AdapterRpcContext,
+    operation: (metadata: grpc.Metadata) => Promise<T>,
+  ) => Promise<T>;
 }
 
 export interface AdapterRpcContext {
   taskId?: string;
   externalExecutionId?: string;
+  operationName?: string;
   commandSequence?: number;
+  traceparent?: string;
+  tracestate?: string;
 }
 
 export interface StartOperationOptions {
@@ -90,6 +69,8 @@ export interface StartOperationOptions {
   invocationAttempt?: number;
   timing?: Record<string, unknown>;
   correlationId?: string;
+  rootTraceparent?: string;
+  rootTracestate?: string;
 }
 
 export class GrpcAdapterGateway {
@@ -97,6 +78,7 @@ export class GrpcAdapterGateway {
   readonly #providerId: string;
   readonly #timeoutMs: number;
   readonly #onRpc: AdapterGatewayOptions["onRpc"];
+  readonly #traceRpc: AdapterGatewayOptions["traceRpc"];
 
   constructor(options: AdapterGatewayOptions) {
     const Client = adapterClientConstructor();
@@ -107,6 +89,7 @@ export class GrpcAdapterGateway {
     this.#providerId = options.providerId;
     this.#timeoutMs = options.timeoutMs ?? 5_000;
     this.#onRpc = options.onRpc;
+    this.#traceRpc = options.traceRpc;
   }
 
   describeProvider(): Promise<ProviderManifest> {
@@ -130,7 +113,7 @@ export class GrpcAdapterGateway {
           ...this.#executionContext(options),
         },
       },
-      rpcContext(taskId, externalExecutionId),
+      rpcContext(taskId, externalExecutionId, undefined, undefined, options),
     );
   }
 
@@ -177,7 +160,7 @@ export class GrpcAdapterGateway {
         executionContext: this.#executionContext(options),
         externalExecutionId: options.externalExecutionId ?? "",
       },
-      rpcContext(taskId, options.externalExecutionId),
+      rpcContext(taskId, options.externalExecutionId, undefined, operationName, options),
     );
   }
 
@@ -203,7 +186,7 @@ export class GrpcAdapterGateway {
         },
         reason,
       },
-      rpcContext(taskId, options.externalExecutionId, commandSequence),
+      rpcContext(taskId, options.externalExecutionId, commandSequence, operationName, options),
     );
   }
 
@@ -232,7 +215,13 @@ export class GrpcAdapterGateway {
           answerHash: input.answerHash,
         })),
       },
-      rpcContext(identity.taskId, options.externalExecutionId, identity.commandSequence),
+      rpcContext(
+        identity.taskId,
+        options.externalExecutionId,
+        identity.commandSequence,
+        identity.operationName,
+        options,
+      ),
     );
   }
 
@@ -256,7 +245,13 @@ export class GrpcAdapterGateway {
         },
         reasonCode: "CLIENT_REQUESTED",
       },
-      rpcContext(identity.taskId, options.externalExecutionId, identity.commandSequence),
+      rpcContext(
+        identity.taskId,
+        options.externalExecutionId,
+        identity.commandSequence,
+        identity.operationName,
+        options,
+      ),
     );
   }
 
@@ -280,7 +275,13 @@ export class GrpcAdapterGateway {
         },
         reasonCode: "CLIENT_REQUESTED",
       },
-      rpcContext(identity.taskId, options.externalExecutionId, identity.commandSequence),
+      rpcContext(
+        identity.taskId,
+        options.externalExecutionId,
+        identity.commandSequence,
+        identity.operationName,
+        options,
+      ),
     );
   }
 
@@ -304,7 +305,7 @@ export class GrpcAdapterGateway {
           options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
         invocationAttempt: options.invocationAttempt ?? 1,
       },
-      rpcContext(taskId, options.externalExecutionId),
+      rpcContext(taskId, options.externalExecutionId, undefined, operationName, options),
     );
   }
 
@@ -345,59 +346,72 @@ export class GrpcAdapterGateway {
   ): Promise<T> {
     const deadline = new Date(Date.now() + this.#timeoutMs);
     const startedAt = performance.now();
-    return new Promise<T>((resolve, reject) => {
-      const callback: grpc.requestCallback<T> = (error, value) => {
-        if (error !== null) {
-          this.#onRpc?.(method, "error", performance.now() - startedAt, context);
-          reject(error);
-        } else if (value === undefined) {
-          this.#onRpc?.(method, "error", performance.now() - startedAt, context);
-          reject(new Error(`Adapter ${method} returned no value`));
+    const invoke = (metadata: grpc.Metadata): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        const callback: grpc.requestCallback<T> = (error, value) => {
+          if (error !== null) {
+            this.#onRpc?.(method, "error", performance.now() - startedAt, context);
+            reject(error);
+          } else if (value === undefined) {
+            this.#onRpc?.(method, "error", performance.now() - startedAt, context);
+            reject(new Error(`Adapter ${method} returned no value`));
+          } else {
+            this.#onRpc?.(method, "success", performance.now() - startedAt, context);
+            resolve(value);
+          }
+        };
+        if (method === "describeProvider") {
+          this.#client.describeProvider(
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<ProviderManifest>,
+          );
+        } else if (method === "getExecution") {
+          this.#client.getExecution(
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<ExecutionSnapshot>,
+          );
+        } else if (method === "startOperation") {
+          this.#client.startOperation(
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<StartOperationResponse>,
+          );
+        } else if (method === "checkAvailability") {
+          this.#client.checkAvailability(
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<CheckAvailabilityResponse>,
+          );
+        } else if (method === "reconcileExecution") {
+          this.#client.reconcileExecution(
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<ReconcileExecutionResponse>,
+          );
+        } else if (method === "requestCancel") {
+          this.#client.requestCancel(
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<CommandAck>,
+          );
         } else {
-          this.#onRpc?.(method, "success", performance.now() - startedAt, context);
-          resolve(value);
+          this.#client[method](
+            request,
+            metadata,
+            { deadline },
+            callback as grpc.requestCallback<CommandAck>,
+          );
         }
-      };
-      if (method === "describeProvider") {
-        this.#client.describeProvider(
-          request,
-          { deadline },
-          callback as grpc.requestCallback<ProviderManifest>,
-        );
-      } else if (method === "getExecution") {
-        this.#client.getExecution(
-          request,
-          { deadline },
-          callback as grpc.requestCallback<ExecutionSnapshot>,
-        );
-      } else if (method === "startOperation") {
-        this.#client.startOperation(
-          request,
-          { deadline },
-          callback as grpc.requestCallback<StartOperationResponse>,
-        );
-      } else if (method === "checkAvailability") {
-        this.#client.checkAvailability(
-          request,
-          { deadline },
-          callback as grpc.requestCallback<CheckAvailabilityResponse>,
-        );
-      } else if (method === "reconcileExecution") {
-        this.#client.reconcileExecution(
-          request,
-          { deadline },
-          callback as grpc.requestCallback<ReconcileExecutionResponse>,
-        );
-      } else if (method === "requestCancel") {
-        this.#client.requestCancel(
-          request,
-          { deadline },
-          callback as grpc.requestCallback<CommandAck>,
-        );
-      } else {
-        this.#client[method](request, { deadline }, callback as grpc.requestCallback<CommandAck>);
-      }
-    });
+      });
+    return this.#traceRpc?.(method, context, invoke) ?? invoke(new grpc.Metadata());
   }
 }
 
@@ -405,6 +419,8 @@ function rpcContext(
   taskId: string,
   externalExecutionId?: string | null,
   commandSequence?: number,
+  operationName?: string,
+  options: StartOperationOptions = {},
 ): AdapterRpcContext {
   return {
     taskId,
@@ -412,5 +428,8 @@ function rpcContext(
       ? {}
       : { externalExecutionId }),
     ...(commandSequence === undefined ? {} : { commandSequence }),
+    ...(operationName === undefined ? {} : { operationName }),
+    ...(options.rootTraceparent === undefined ? {} : { traceparent: options.rootTraceparent }),
+    ...(options.rootTracestate === undefined ? {} : { tracestate: options.rootTracestate }),
   };
 }

@@ -19,6 +19,9 @@ export interface AuthorizationContext {
   executionMode: ExecutionMode;
   simulationId: string | null;
   correlationId?: string;
+  traceId?: string;
+  rootTraceparent?: string;
+  rootTracestate?: string;
 }
 
 export interface TaskRecord {
@@ -27,6 +30,10 @@ export interface TaskRecord {
   operationName: string;
   operationSnapshotId: string;
   authorizationContextHash: string;
+  traceId?: string | null;
+  rootTraceparent?: string | null;
+  rootTracestate?: string | null;
+  correlationId?: string | null;
   executionMode: ExecutionMode;
   simulationId: string | null;
   arguments: Record<string, unknown>;
