@@ -47,6 +47,15 @@ describe("H4 production fail-closed configuration", () => {
     });
   });
 
+  it("requires mTLS whenever Provider telemetry ingress is enabled in production", () => {
+    expect(() =>
+      loadRuntimeConfig({
+        ...secureProduction(),
+        PROVIDER_TELEMETRY_INGRESS_ENABLED: "true",
+      }),
+    ).toThrow("production Provider telemetry ingress requires mTLS");
+  });
+
   it("requires a configured webhook and HTTPS in production", () => {
     expect(() => loadRuntimeConfig({ OUTBOX_SINK: "webhook" })).toThrow(
       "webhook Outbox requires OUTBOX_WEBHOOK_URL",

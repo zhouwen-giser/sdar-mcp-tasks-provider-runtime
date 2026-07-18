@@ -16,6 +16,25 @@ Every signal carries the OTel resource attributes `service.name`, `service.versi
 `service.instance.id`, `deployment.environment`, `sdar.provider.id`, and
 `sdar.provider.version`. Each Runtime replica must use a different instance id.
 
+## Provider telemetry ingress
+
+Resource Providers do not need an OTel SDK. Runtime implements the separate batch-unary
+`io.sdar.mcp.tasks.telemetry.v1.ProviderTelemetryIngress` gRPC service. It accepts only
+`resource.state`, `resource.metric`, `resource.health`, and Task-bound `execution.progress` facts.
+This call direction is Provider to Runtime and does not modify `ResourceProviderAdapter`.
+
+For Task-bound events, Runtime verifies Provider, Task, external execution, and operation identity,
+then injects the committed Task's operation, execution mode, simulation id, argument hash,
+authorization-context hash, Adapter revision, and Observation revision. Resource-only events require
+a resource id. Production ingress requires mTLS, and the client certificate common name must match
+the Manifest Provider id.
+
+Accepted Provider events are inserted into `provider_ops_delivery` before the RPC acknowledges
+them. `(providerId, providerEventId)` is idempotent across replicas: identical retries return the
+same record id with `duplicate=true`; changed content is rejected with
+`PROVIDER_EVENT_ID_CONFLICT`. Batch, event-byte, JSON-depth/node, key/id, timestamp-skew, and rate
+limits are enforced before persistence.
+
 ## Stable event contract
 
 `ProviderOpsEnvelope` is the product contract; OTel logs are only its transport. `recordId` is a
@@ -25,8 +44,8 @@ transition/Outbox facts, never from API-handler intent. A rollback emits no life
 
 | Record or span                | Source                                 | Coverage                                                                |
 | ----------------------------- | -------------------------------------- | ----------------------------------------------------------------------- |
-| `provider.task_lifecycle`     | committed Task transition Outbox facts | queued/running/waiting/paused/resuming/stopping/terminal/expired        |
-| `provider.command_dispatch`   | Durable Command Dispatcher facts       | created/claimed/retry/ack/reject/exhaust/supersede                      |
+| `provider.task.lifecycle`     | committed Task transition Outbox facts | queued/running/waiting/paused/resuming/stopping/terminal/expired        |
+| `provider.command.lifecycle`  | Durable Command Dispatcher facts       | created/claimed/retry/ack/reject/exhaust/supersede                      |
 | `adapter.rpc`                 | real gRPC Adapter boundary             | method, provider, safe identities, duration, status; never RPC payloads |
 | `provider.scheduler_decision` | Durable Scheduler results              | scheduled/claimed/started/retry/deadline/start-window miss              |
 | `provider.recovery_event`     | Recovery Manager results               | reconcile start/success/failure and lease conflict                      |
@@ -54,10 +73,11 @@ input/answer values, and Adapter payloads before export. `argumentHash`,
 `authorizationContextHash`, `simulationId`, and `executionMode` are allowed where the event
 contract requires them. Adapter spans never contain request or response bodies.
 
-Batch processors use bounded queues, bounded batches, export timeouts, and drop-on-saturation
-behavior. Collector outage, timeout, queue overflow, serialization failure, and shutdown failure
-are best effort: Runtime continues business processing and readiness is unchanged. On shutdown,
-Runtime force-flushes and then shuts down all telemetry providers with settled-result handling.
+Diagnostic processors use bounded queues, batches, and export timeouts. Audit facts use the durable
+delivery table, lease-safe claims, bounded backoff, and exporter acknowledgement before marking a
+record delivered. Collector outage never changes business processing or readiness; audit records
+remain retryable. On shutdown, Runtime stops both publisher loops, force-flushes telemetry providers,
+and closes the Provider ingress server.
 
 No telemetry development stack is shipped in v1.1. CI uses in-memory, timeout, and queue-pressure
 exporters, keeping the default Compose stack and production image free of Collector/ClickHouse

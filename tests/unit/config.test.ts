@@ -8,6 +8,9 @@ describe("Runtime configuration", () => {
     expect(config.PROVIDER_ID).toBe("mock-provider");
     expect(config.OTEL_ENABLED).toBe(false);
     expect(config.OTEL_EXPORTER_OTLP_ENDPOINT).toBe("http://127.0.0.1:4318");
+    expect(config.PROVIDER_TELEMETRY_INGRESS_ENABLED).toBe(false);
+    expect(config.PROVIDER_TELEMETRY_PORT).toBe(7002);
+    expect(config.PROVIDER_TELEMETRY_MAX_BATCH).toBe(100);
     expect(config.ADAPTER_TLS_MODE).toBe("disabled");
     expect(config.ADAPTER_RPC_TIMEOUT_MS).toBe(5_000);
     expect(config.AUTH_MODE).toBe("development");
@@ -57,6 +60,12 @@ describe("Runtime configuration", () => {
         ADAPTER_TLS_KEY_PATH: "/run/secrets/client-key.pem",
       }).ADAPTER_TLS_MODE,
     ).toBe("required");
+    expect(() =>
+      loadRuntimeConfig({
+        PROVIDER_TELEMETRY_INGRESS_ENABLED: "true",
+        PROVIDER_TELEMETRY_TLS_MODE: "required",
+      }),
+    ).toThrow("Provider telemetry mTLS requires CA, certificate, and key paths");
   });
 
   it("validates outbox published retention bounds", () => {

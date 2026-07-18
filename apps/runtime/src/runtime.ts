@@ -18,6 +18,10 @@ import {
 import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
 import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
 import {
+  ProviderTelemetryGrpcServer,
+  ProviderTelemetryIngress,
+} from "../../../packages/provider-telemetry/src/index.js";
+import {
   OperationSnapshotRepository,
   IdempotencyRepository,
   OutboxRepository,
@@ -57,6 +61,7 @@ export interface RuntimeDependencies {
   ttlCleaner: "starting" | "ready" | "failed";
   outboxPublisher: "starting" | "ready" | "failed";
   outboxCleaner: "starting" | "ready" | "failed";
+  providerTelemetryIngress: "starting" | "ready" | "failed";
 }
 
 export interface RuntimeApplication {
@@ -79,6 +84,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   const metrics = new RuntimeMetrics();
   const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
   let telemetry: ProviderTelemetry | undefined;
+  let providerTelemetryServer: ProviderTelemetryGrpcServer | undefined;
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
   const gateway = new GrpcAdapterGateway({
@@ -103,6 +109,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     ttlCleaner: "starting",
     outboxPublisher: "starting",
     outboxCleaner: "starting",
+    providerTelemetryIngress: config.PROVIDER_TELEMETRY_INGRESS_ENABLED ? "starting" : "ready",
   };
   let manifest: ProviderManifest | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
@@ -221,6 +228,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
     if (providerOpsPublisherTimer !== undefined) clearInterval(providerOpsPublisherTimer);
     gateway.close();
+    await providerTelemetryServer?.close();
     await telemetry?.shutdown();
     await pool.end();
   });
@@ -288,6 +296,46 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
       const taskRepository = new TaskRepository(pool);
+      if (
+        config.PROVIDER_TELEMETRY_INGRESS_ENABLED &&
+        dependencies.providerTelemetryIngress !== "ready"
+      ) {
+        providerTelemetryServer ??= new ProviderTelemetryGrpcServer(
+          new ProviderTelemetryIngress(pool, {
+            providerId: validated.providerId,
+            runtimeVersion: "1.1.0",
+            instanceId: telemetryInstanceId,
+            maxBatch: config.PROVIDER_TELEMETRY_MAX_BATCH,
+            maxEventBytes: config.PROVIDER_TELEMETRY_MAX_EVENT_BYTES,
+            maxDepth: config.PROVIDER_TELEMETRY_MAX_DEPTH,
+            maxNodes: config.PROVIDER_TELEMETRY_MAX_NODES,
+            rateLimit: config.PROVIDER_TELEMETRY_RATE_LIMIT,
+          }),
+          {
+            host: config.PROVIDER_TELEMETRY_HOST,
+            port: config.PROVIDER_TELEMETRY_PORT,
+            tlsMode: config.PROVIDER_TELEMETRY_TLS_MODE,
+            ...(config.PROVIDER_TELEMETRY_TLS_CA_PATH === undefined
+              ? {}
+              : { tlsCaPath: config.PROVIDER_TELEMETRY_TLS_CA_PATH }),
+            ...(config.PROVIDER_TELEMETRY_TLS_CERT_PATH === undefined
+              ? {}
+              : { tlsCertPath: config.PROVIDER_TELEMETRY_TLS_CERT_PATH }),
+            ...(config.PROVIDER_TELEMETRY_TLS_KEY_PATH === undefined
+              ? {}
+              : { tlsKeyPath: config.PROVIDER_TELEMETRY_TLS_KEY_PATH }),
+          },
+        );
+        try {
+          await providerTelemetryServer.start();
+          dependencies.providerTelemetryIngress = "ready";
+        } catch (error) {
+          dependencies.providerTelemetryIngress = "failed";
+          await providerTelemetryServer.close();
+          providerTelemetryServer = undefined;
+          throw error;
+        }
+      }
       const scheduler = new DurableScheduler(
         validated,
         gateway,

@@ -9,7 +9,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const out = resolve(root, "packages/adapter-protocol/generated");
 const staging = resolve(root, `.tmp-proto-${String(process.pid)}`);
 const protoRoot = resolve(root, "proto");
-const protoFile = resolve(protoRoot, "io/sdar/mcp/tasks/adapter/v1/adapter.proto");
+const protoFiles = [
+  resolve(protoRoot, "io/sdar/mcp/tasks/adapter/v1/adapter.proto"),
+  resolve(protoRoot, "io/sdar/mcp/tasks/telemetry/v1/provider_telemetry.proto"),
+];
 const googleRoot = resolve(getProtoPath(), "..");
 const bin = (name) =>
   resolve(root, "node_modules/.bin", process.platform === "win32" ? `${name}.cmd` : name);
@@ -22,7 +25,7 @@ const protocArgs = [
   `--proto_path=${googleRoot}`,
   `--js_out=import_style=commonjs,binary:${staging}`,
   `--grpc_out=grpc_js:${staging}`,
-  protoFile,
+  ...protoFiles,
 ];
 const protoc = spawnSync(bin("grpc_tools_node_protoc"), protocArgs, {
   cwd: root,
@@ -37,7 +40,7 @@ if (generated) {
       `--ts_out=grpc_js:${staging}`,
       `--proto_path=${protoRoot}`,
       `--proto_path=${googleRoot}`,
-      protoFile,
+      ...protoFiles,
     ],
     { cwd: root, stdio: "inherit" },
   );
@@ -71,10 +74,10 @@ if (!generated && process.platform === "win32") {
           String(process.pid) +
           " --grpc_out=grpc_js:/workspace/.tmp-proto-" +
           String(process.pid) +
-          " /workspace/proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto",
+          " /workspace/proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto /workspace/proto/io/sdar/mcp/tasks/telemetry/v1/provider_telemetry.proto",
         "./node_modules/.bin/grpc_tools_node_protoc --plugin=protoc-gen-ts=./node_modules/.bin/protoc-gen-ts --ts_out=grpc_js:/workspace/.tmp-proto-" +
           String(process.pid) +
-          " --proto_path=/workspace/proto --proto_path=/tmp/proto-tools/node_modules/google-proto-files /workspace/proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto",
+          " --proto_path=/workspace/proto --proto_path=/tmp/proto-tools/node_modules/google-proto-files /workspace/proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto /workspace/proto/io/sdar/mcp/tasks/telemetry/v1/provider_telemetry.proto",
       ].join("; "),
     ],
     { cwd: root, stdio: "inherit" },
@@ -89,6 +92,8 @@ if (!generated) {
 for (const generatedType of [
   "io/sdar/mcp/tasks/adapter/v1/adapter_pb.d.ts",
   "io/sdar/mcp/tasks/adapter/v1/adapter_grpc_pb.d.ts",
+  "io/sdar/mcp/tasks/telemetry/v1/provider_telemetry_pb.d.ts",
+  "io/sdar/mcp/tasks/telemetry/v1/provider_telemetry_grpc_pb.d.ts",
 ]) {
   const path = resolve(staging, generatedType);
   writeFileSync(
