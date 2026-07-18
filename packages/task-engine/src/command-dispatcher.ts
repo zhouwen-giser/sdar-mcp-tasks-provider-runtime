@@ -94,6 +94,7 @@ export class DurableCommandDispatcher {
       const operation = (
         await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
       ).operation;
+      await this.repository.recordCommandStarted(command);
       let outcome: "acknowledged" | "retriable" | "rejected" | "exhausted";
       if (command.commandType === "CANCEL") {
         await this.repository.supersedeExpiredClaimedNormalCommandsForSafeStop(command.taskId);
@@ -118,6 +119,13 @@ export class DurableCommandDispatcher {
           command.taskId,
           error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
         );
+        await this.repository.rejectClaimedCommand(
+          command,
+          "ADAPTER_IDENTITY_MISMATCH",
+          error instanceof Error ? error.message : "Adapter identity mismatch.",
+        );
+        result.rejected += 1;
+        return;
       }
       if (
         command.commandType === "CANCEL" &&

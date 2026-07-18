@@ -634,10 +634,11 @@ export class TaskRepository {
   ): Promise<PendingCommandRecord[]> {
     // Rank candidates with a window function first, then lock base-table rows.
     // PostgreSQL rejects FOR UPDATE when the locking SELECT itself uses window functions.
+    const client = await this.pool.connect();
     try {
-      const result = await this.pool.query<PendingCommandRecordRow>(
-        `WITH superseded AS (
-         UPDATE task_command command
+      await client.query("BEGIN");
+      const superseded = await client.query<PendingCommandRecordRow>(
+        `UPDATE task_command command
             SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
                 last_error_code='SUPERSEDED_BY_SAFE_STOP',
                 last_error_message='Safe stop superseded the pending command.',
@@ -648,9 +649,32 @@ export class TaskRepository {
             AND command.command_type IN ('UPDATE','PAUSE','RESUME')
             AND command.state='CLAIMED'
             AND command.claim_until <= GREATEST($1,clock_timestamp())
-         RETURNING command.task_id
-       ),
-       ranked AS (
+         RETURNING command.task_id, command.command_sequence, command.command_type,
+           command.payload, command.state, command.attempt_count, command.claim_owner,
+           command.stop_reason, command.adapter_ack, command.next_attempt_at,
+           command.last_error_code, command.last_error_message, command.claim_until`,
+        [now],
+      );
+      for (const row of superseded.rows) {
+        await insertCommandFact(
+          client,
+          row.task_id,
+          {
+            sequence: Number(row.command_sequence),
+            commandType: row.command_type,
+            state: "EXHAUSTED",
+            attemptCount: row.attempt_count,
+          },
+          "task.command.superseded",
+          {
+            previousState: "CLAIMED",
+            reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+            adapterRpcStatus: "not_dispatched",
+          },
+        );
+      }
+      const result = await client.query<PendingCommandRecordRow>(
+        `WITH ranked AS (
          SELECT task_command.task_id, task_command.command_sequence,
                 ROW_NUMBER() OVER (
                   PARTITION BY task_command.task_id
@@ -660,7 +684,6 @@ export class TaskRepository {
          FROM task_command
          JOIN provider_task
            ON provider_task.task_id = task_command.task_id
-         LEFT JOIN superseded ON superseded.task_id=task_command.task_id
          WHERE task_command.command_type IN ('CANCEL','UPDATE','PAUSE','RESUME')
            AND (
              (task_command.state IN ('PENDING','RETRY_WAIT')
@@ -717,17 +740,28 @@ export class TaskRepository {
       const commands = result.rows.map((row) => ({
         ...mapPendingCommandRecord(row),
       }));
-      await Promise.all(
-        commands.map((command, index) => {
-          const previousState = result.rows[index]?.previous_state;
-          return recordCommandFact(this.pool, command, "task.command.claimed", "CLAIMED", {
+      for (const [index, command] of commands.entries()) {
+        const previousState = result.rows[index]?.previous_state;
+        await insertCommandFact(
+          client,
+          command.taskId,
+          {
+            sequence: command.commandSequence,
+            commandType: command.commandType,
+            state: "CLAIMED",
+            attemptCount: command.attemptCount,
+          },
+          "task.command.claimed",
+          {
             ...(previousState === undefined ? {} : { previousState }),
             adapterRpcStatus: "not_started",
-          });
-        }),
-      );
+          },
+        );
+      }
+      await client.query("COMMIT");
       return commands;
     } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
       const databaseError = error as { code?: string; constraint?: string };
       if (
         databaseError.code === "23505" &&
@@ -736,6 +770,8 @@ export class TaskRepository {
         return [];
       }
       throw error;
+    } finally {
+      client.release();
     }
   }
 
@@ -768,26 +804,80 @@ export class TaskRepository {
     errorCode: string,
     errorMessage: string,
   ): Promise<void> {
-    const result = await this.pool.query(
-      `UPDATE task_command SET state='RETRY_WAIT', next_attempt_at=$4,
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE task_command SET state='RETRY_WAIT', next_attempt_at=$4,
          claim_owner=NULL, claim_until=NULL, last_error_code=$5,
          last_error_message=$6, updated_at=clock_timestamp()
        WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
-      [
+        [
+          command.taskId,
+          command.commandSequence,
+          command.claimOwner,
+          nextAttemptAt,
+          errorCode,
+          errorMessage,
+        ],
+      );
+      if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
         command.taskId,
-        command.commandSequence,
-        command.claimOwner,
-        nextAttemptAt,
-        errorCode,
-        errorMessage,
-      ],
-    );
-    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
-    await recordCommandFact(this.pool, command, "task.command.retry_scheduled", "RETRY_WAIT", {
-      reasonCode: errorCode,
-      retryAfterMs: Math.max(0, nextAttemptAt.getTime() - Date.now()),
-      adapterRpcStatus: "error",
-    });
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "RETRY_WAIT",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.retry_scheduled",
+        {
+          previousState: "CLAIMED",
+          reasonCode: errorCode,
+          retryAfterMs: Math.max(0, nextAttemptAt.getTime() - Date.now()),
+          adapterRpcStatus: "error",
+        },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordCommandStarted(command: PendingCommandRecord): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const claimed = await client.query(
+        `SELECT 1 FROM task_command
+         WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3
+         FOR UPDATE`,
+        [command.taskId, command.commandSequence, command.claimOwner],
+      );
+      if (claimed.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "CLAIMED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.started",
+        { previousState: "CLAIMED", adapterRpcStatus: "started" },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async renewCommandClaim(
@@ -809,17 +899,39 @@ export class TaskRepository {
     errorCode: string,
     errorMessage: string,
   ): Promise<void> {
-    const result = await this.pool.query(
-      `UPDATE task_command SET state='REJECTED', claim_owner=NULL, claim_until=NULL,
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE task_command SET state='REJECTED', claim_owner=NULL, claim_until=NULL,
          last_error_code=$4, last_error_message=$5, updated_at=clock_timestamp()
        WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
-      [command.taskId, command.commandSequence, command.claimOwner, errorCode, errorMessage],
-    );
-    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
-    await recordCommandFact(this.pool, command, "task.command.rejected", "REJECTED", {
-      reasonCode: errorCode,
-      adapterRpcStatus: "rejected",
-    });
+        [command.taskId, command.commandSequence, command.claimOwner, errorCode, errorMessage],
+      );
+      if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "REJECTED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.rejected",
+        {
+          previousState: "CLAIMED",
+          reasonCode: errorCode,
+          adapterRpcStatus: "rejected",
+        },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async noteRecovery(taskId: string): Promise<void> {
@@ -1671,6 +1783,7 @@ export class TaskRepository {
           [row.task_id],
         );
         const activeSequence = active.rows[0]?.command_sequence;
+        const commandCreated = activeSequence === undefined;
         let commandSequence = Number(activeSequence);
         if (activeSequence === undefined) {
           const sequence = await client.query<{ next_command_sequence: string }>(
@@ -1732,6 +1845,20 @@ export class TaskRepository {
           eventKey: `${row.task_id}:command:${String(commandSequence)}:deadline-stop`,
           outboxPayload: { reasonCode: "DEADLINE_REACHED", commandSequence },
         });
+        if (commandCreated) {
+          await insertCommandFact(
+            client,
+            row.task_id,
+            {
+              sequence: commandSequence,
+              commandType: "CANCEL",
+              state: "PENDING",
+              attemptCount: 0,
+            },
+            "task.command.created",
+            { reasonCode: "DEADLINE_REACHED", adapterRpcStatus: "not_started" },
+          );
+        }
         claimed.push({ task: fromRow(applied.row), commandSequence });
       }
       await client.query("COMMIT");
@@ -1863,7 +1990,11 @@ export class TaskRepository {
       }
       if (isTerminalState(previous.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
-      await client.query(
+      const superseded = await client.query<{
+        command_sequence: string;
+        command_type: PendingCommandRecord["commandType"];
+        attempt_count: number;
+      }>(
         `UPDATE task_command
            SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
                last_error_code='SUPERSEDED_BY_SAFE_STOP',
@@ -1871,9 +2002,24 @@ export class TaskRepository {
                updated_at=clock_timestamp()
          WHERE task_id=$1
            AND command_type IN ('UPDATE','PAUSE','RESUME')
-           AND state IN ('PENDING','RETRY_WAIT')`,
+           AND state IN ('PENDING','RETRY_WAIT')
+         RETURNING command_sequence, command_type, attempt_count`,
         [taskId],
       );
+      for (const row of superseded.rows) {
+        await insertCommandFact(
+          client,
+          taskId,
+          {
+            sequence: Number(row.command_sequence),
+            commandType: row.command_type,
+            state: "EXHAUSTED",
+            attemptCount: row.attempt_count,
+          },
+          "task.command.superseded",
+          { reasonCode: "SUPERSEDED_BY_SAFE_STOP", adapterRpcStatus: "not_dispatched" },
+        );
+      }
       const updated = await client.query<{ next_command_sequence: string }>(
         `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
          WHERE task_id=$1 RETURNING next_command_sequence`,
@@ -1929,6 +2075,21 @@ export class TaskRepository {
           commandAdapterRpcStatus: "not_started",
         },
       });
+      await insertCommandFact(
+        client,
+        taskId,
+        {
+          sequence: Number(sequence),
+          commandType: "CANCEL",
+          state: "PENDING",
+          attemptCount: 0,
+        },
+        "task.command.created",
+        {
+          reasonCode: "USER_REQUESTED",
+          adapterRpcStatus: "not_started",
+        },
+      );
       await client.query("COMMIT");
       return {
         sequence: Number(sequence),
@@ -2072,6 +2233,18 @@ export class TaskRepository {
           adapterRpcStatus: "not_started",
         },
       });
+      await insertCommandFact(
+        client,
+        taskId,
+        {
+          sequence: Number(sequence),
+          commandType,
+          state: "PENDING",
+          attemptCount: 0,
+        },
+        "task.command.created",
+        { adapterRpcStatus: "not_started" },
+      );
       await client.query("COMMIT");
       return {
         sequence: Number(sequence),
@@ -2123,23 +2296,55 @@ export class TaskRepository {
     const states = includeClaimed
       ? "('PENDING','RETRY_WAIT','CLAIMED')"
       : "('PENDING','RETRY_WAIT')";
-    const result = await this.pool.query(
-      `UPDATE task_command
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        command_sequence: string;
+        command_type: PendingCommandRecord["commandType"];
+        attempt_count: number;
+      }>(
+        `UPDATE task_command
          SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
              last_error_code='SUPERSEDED_BY_SAFE_STOP',
              last_error_message='Safe stop superseded the pending command.',
              updated_at=clock_timestamp()
        WHERE task_id=$1
          AND command_type IN ('UPDATE','PAUSE','RESUME')
-         AND state IN ${states}`,
-      [taskId],
-    );
-    return result.rowCount ?? 0;
+         AND state IN ${states}
+       RETURNING command_sequence, command_type, attempt_count`,
+        [taskId],
+      );
+      for (const row of result.rows) {
+        await insertCommandFact(
+          client,
+          taskId,
+          {
+            sequence: Number(row.command_sequence),
+            commandType: row.command_type,
+            state: "EXHAUSTED",
+            attemptCount: row.attempt_count,
+          },
+          "task.command.superseded",
+          { reasonCode: "SUPERSEDED_BY_SAFE_STOP", adapterRpcStatus: "not_dispatched" },
+        );
+      }
+      await client.query("COMMIT");
+      return result.rowCount ?? 0;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async supersedeClaimedCommandForSafeStop(command: PendingCommandRecord): Promise<void> {
-    const result = await this.pool.query(
-      `UPDATE task_command
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE task_command
          SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
              next_attempt_at=clock_timestamp(), last_error_code='SUPERSEDED_BY_SAFE_STOP',
              last_error_message='Safe stop superseded the claimed command.',
@@ -2149,20 +2354,44 @@ export class TaskRepository {
          AND command_type IN ('UPDATE','PAUSE','RESUME')
          AND state='CLAIMED'
          AND claim_owner=$3`,
-      [command.taskId, command.commandSequence, command.claimOwner],
-    );
-    if (result.rowCount !== 1) {
-      throw new Error("COMMAND_CLAIM_LOST");
+        [command.taskId, command.commandSequence, command.claimOwner],
+      );
+      if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "EXHAUSTED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.superseded",
+        {
+          previousState: "CLAIMED",
+          reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+          adapterRpcStatus: "not_dispatched",
+        },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
-    await recordCommandFact(this.pool, command, "task.command.superseded", "EXHAUSTED", {
-      reasonCode: "SUPERSEDED_BY_SAFE_STOP",
-      adapterRpcStatus: "not_dispatched",
-    });
   }
 
   async supersedeExpiredClaimedNormalCommandsForSafeStop(taskId: string): Promise<number> {
-    const result = await this.pool.query(
-      `UPDATE task_command
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        command_sequence: string;
+        command_type: PendingCommandRecord["commandType"];
+        attempt_count: number;
+      }>(
+        `UPDATE task_command
          SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
              last_error_code='SUPERSEDED_BY_SAFE_STOP',
              last_error_message='Safe stop superseded the pending command.',
@@ -2170,10 +2399,36 @@ export class TaskRepository {
        WHERE task_id=$1
          AND command_type IN ('UPDATE','PAUSE','RESUME')
          AND state='CLAIMED'
-         AND claim_until <= clock_timestamp()`,
-      [taskId],
-    );
-    return result.rowCount ?? 0;
+         AND claim_until <= clock_timestamp()
+       RETURNING command_sequence, command_type, attempt_count`,
+        [taskId],
+      );
+      for (const row of result.rows) {
+        await insertCommandFact(
+          client,
+          taskId,
+          {
+            sequence: Number(row.command_sequence),
+            commandType: row.command_type,
+            state: "EXHAUSTED",
+            attemptCount: row.attempt_count,
+          },
+          "task.command.superseded",
+          {
+            previousState: "CLAIMED",
+            reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+            adapterRpcStatus: "not_dispatched",
+          },
+        );
+      }
+      await client.query("COMMIT");
+      return result.rowCount ?? 0;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async acknowledgeCommand(
@@ -2182,29 +2437,76 @@ export class TaskRepository {
     accepted: boolean,
     ack: Record<string, unknown>,
   ): Promise<void> {
-    await this.pool.query(
-      `UPDATE task_command SET state=$3, adapter_ack=$4::jsonb,
-       updated_at=clock_timestamp() WHERE task_id=$1 AND command_sequence=$2`,
-      [taskId, sequence, accepted ? "ACKNOWLEDGED" : "REJECTED", JSON.stringify(ack)],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<{
+        command_type: PendingCommandRecord["commandType"];
+        attempt_count: number;
+        previous_state: PendingCommandRecord["state"];
+      }>(
+        `UPDATE task_command SET state=$3, adapter_ack=$4::jsonb,
+       updated_at=clock_timestamp() WHERE task_id=$1 AND command_sequence=$2
+       RETURNING command_type, attempt_count, state AS previous_state`,
+        [taskId, sequence, accepted ? "ACKNOWLEDGED" : "REJECTED", JSON.stringify(ack)],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new Error("COMMAND_NOT_FOUND");
+      await insertCommandFact(
+        client,
+        taskId,
+        {
+          sequence,
+          commandType: row.command_type,
+          state: accepted ? "ACKNOWLEDGED" : "REJECTED",
+          attemptCount: row.attempt_count,
+        },
+        accepted ? "task.command.acknowledged" : "task.command.rejected",
+        { adapterRpcStatus: accepted ? "success" : "rejected" },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async acknowledgeClaimedCommand(
     command: PendingCommandRecord,
     ack: Record<string, unknown>,
   ): Promise<void> {
-    const result = await this.pool.query(
-      `UPDATE task_command SET state='ACKNOWLEDGED', adapter_ack=$4::jsonb,
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query(
+        `UPDATE task_command SET state='ACKNOWLEDGED', adapter_ack=$4::jsonb,
          claim_owner=NULL, claim_until=NULL, last_error_code=NULL,
          last_error_message=NULL, updated_at=clock_timestamp()
        WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
-      [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
-    );
-    if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
-    await recordCommandFact(this.pool, command, "task.command.acknowledged", "ACKNOWLEDGED", {
-      previousState: "CLAIMED",
-      adapterRpcStatus: "success",
-    });
+        [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
+      );
+      if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "ACKNOWLEDGED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.acknowledged",
+        { previousState: "CLAIMED", adapterRpcStatus: "success" },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async acknowledgeUpdateAndCompleteInputAnswers(
@@ -2252,11 +2554,23 @@ export class TaskRepository {
 
       if (isTerminalState(task.internal_state)) {
         await exhaust("TASK_TERMINAL");
+        await insertCommandFact(
+          client,
+          command.taskId,
+          {
+            sequence: command.commandSequence,
+            commandType: command.commandType,
+            state: "EXHAUSTED",
+            attemptCount: command.attemptCount,
+          },
+          "task.command.exhausted",
+          {
+            previousState: "CLAIMED",
+            reasonCode: "TASK_TERMINAL",
+            adapterRpcStatus: "not_dispatched",
+          },
+        );
         await client.query("COMMIT");
-        await recordCommandFact(this.pool, command, "task.command.rejected", "EXHAUSTED", {
-          reasonCode: "TASK_TERMINAL",
-          adapterRpcStatus: "not_dispatched",
-        });
         return "task_terminal";
       }
       if (
@@ -2265,11 +2579,23 @@ export class TaskRepository {
         task.internal_state === "STOPPING"
       ) {
         await exhaust("SUPERSEDED_BY_SAFE_STOP");
+        await insertCommandFact(
+          client,
+          command.taskId,
+          {
+            sequence: command.commandSequence,
+            commandType: command.commandType,
+            state: "EXHAUSTED",
+            attemptCount: command.attemptCount,
+          },
+          "task.command.superseded",
+          {
+            previousState: "CLAIMED",
+            reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+            adapterRpcStatus: "not_dispatched",
+          },
+        );
         await client.query("COMMIT");
-        await recordCommandFact(this.pool, command, "task.command.superseded", "EXHAUSTED", {
-          reasonCode: "SUPERSEDED_BY_SAFE_STOP",
-          adapterRpcStatus: "not_dispatched",
-        });
         return "superseded_by_safe_stop";
       }
 
@@ -2312,11 +2638,19 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner, JSON.stringify(ack)],
       );
       if (acknowledged.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "ACKNOWLEDGED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.acknowledged",
+        { previousState: "CLAIMED", adapterRpcStatus: "success" },
+      );
       await client.query("COMMIT");
-      await recordCommandFact(this.pool, command, "task.command.acknowledged", "ACKNOWLEDGED", {
-        previousState: "CLAIMED",
-        adapterRpcStatus: "success",
-      });
       return "acknowledged";
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -2347,6 +2681,22 @@ export class TaskRepository {
              last_error_code='TASK_TERMINAL', updated_at=clock_timestamp()
            WHERE task_id=$1 AND command_sequence=$2`,
           [command.taskId, command.commandSequence],
+        );
+        await insertCommandFact(
+          client,
+          command.taskId,
+          {
+            sequence: command.commandSequence,
+            commandType: command.commandType,
+            state: "EXHAUSTED",
+            attemptCount: command.attemptCount,
+          },
+          "task.command.exhausted",
+          {
+            previousState: command.state,
+            reasonCode: "TASK_TERMINAL",
+            adapterRpcStatus: "not_dispatched",
+          },
         );
         await client.query("COMMIT");
         return fromRow(row);
@@ -2379,7 +2729,7 @@ export class TaskRepository {
         eventKey: `${command.taskId}:command:${String(command.commandSequence)}:rejected`,
         outboxPayload: { commandSequence: command.commandSequence },
       });
-      await client.query(
+      const rejected = await client.query(
         `UPDATE task_command SET state='REJECTED', adapter_ack=$4::jsonb,
            claim_owner=NULL, claim_until=NULL, last_error_code=$5,
            last_error_message=$6, updated_at=clock_timestamp()
@@ -2392,6 +2742,23 @@ export class TaskRepository {
           typeof ack.reasonCode === "string" ? ack.reasonCode : "CANCEL_REJECTED",
           typeof ack.message === "string" ? ack.message : "Adapter rejected cancellation.",
         ],
+      );
+      if (rejected.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "REJECTED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.rejected",
+        {
+          previousState: "CLAIMED",
+          reasonCode: typeof ack.reasonCode === "string" ? ack.reasonCode : "CANCEL_REJECTED",
+          adapterRpcStatus: "rejected",
+        },
       );
       await client.query("COMMIT");
       return fromRow(applied.row);
@@ -2423,6 +2790,22 @@ export class TaskRepository {
              updated_at=clock_timestamp()
            WHERE task_id=$1 AND command_sequence=$2 AND claim_owner=$3`,
           [command.taskId, command.commandSequence, command.claimOwner, message],
+        );
+        await insertCommandFact(
+          client,
+          command.taskId,
+          {
+            sequence: command.commandSequence,
+            commandType: command.commandType,
+            state: "EXHAUSTED",
+            attemptCount: command.attemptCount,
+          },
+          "task.command.exhausted",
+          {
+            previousState: "CLAIMED",
+            reasonCode: "TASK_TERMINAL",
+            adapterRpcStatus: "not_dispatched",
+          },
         );
         await client.query("COMMIT");
         return fromRow(row);
@@ -2460,12 +2843,29 @@ export class TaskRepository {
           severity: "critical",
         },
       });
-      await client.query(
+      const exhausted = await client.query(
         `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
            last_error_code='SAFE_STOP_UNCONFIRMED', last_error_message=$4,
            updated_at=clock_timestamp()
          WHERE task_id=$1 AND command_sequence=$2 AND claim_owner=$3`,
         [command.taskId, command.commandSequence, command.claimOwner, message],
+      );
+      if (exhausted.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "EXHAUSTED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.exhausted",
+        {
+          previousState: "CLAIMED",
+          reasonCode: "SAFE_STOP_UNCONFIRMED",
+          adapterRpcStatus: "rejected",
+        },
       );
       await client.query("COMMIT");
       return fromRow(applied.row);
@@ -2544,12 +2944,31 @@ export class TaskRepository {
       });
       await upsertInputRequests(client, taskId, inputRequests);
       if (transition.terminal) {
-        await client.query(
+        const exhausted = await client.query<{
+          command_sequence: string;
+          command_type: PendingCommandRecord["commandType"];
+          attempt_count: number;
+        }>(
           `UPDATE task_command SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
              last_error_code='TASK_TERMINAL', updated_at=clock_timestamp()
-           WHERE task_id=$1 AND state IN ('PENDING','CLAIMED','RETRY_WAIT')`,
+           WHERE task_id=$1 AND state IN ('PENDING','CLAIMED','RETRY_WAIT')
+           RETURNING command_sequence, command_type, attempt_count`,
           [taskId],
         );
+        for (const row of exhausted.rows) {
+          await insertCommandFact(
+            client,
+            taskId,
+            {
+              sequence: Number(row.command_sequence),
+              commandType: row.command_type,
+              state: "EXHAUSTED",
+              attemptCount: row.attempt_count,
+            },
+            "task.command.exhausted",
+            { reasonCode: "TASK_TERMINAL", adapterRpcStatus: "not_dispatched" },
+          );
+        }
       }
       await client.query("COMMIT");
       return fromRow(applied.row);
@@ -2838,6 +3257,20 @@ async function persistStartWindowStop(
     eventKey: `${taskId}:command:${String(commandSequence)}:start-window-stop`,
     outboxPayload: { reasonCode: "START_WINDOW_MISSED", commandSequence },
   });
+  if (existing === undefined) {
+    await insertCommandFact(
+      client,
+      taskId,
+      {
+        sequence: commandSequence,
+        commandType: "CANCEL",
+        state: "PENDING",
+        attemptCount: 0,
+      },
+      "task.command.created",
+      { reasonCode: "START_WINDOW_MISSED", adapterRpcStatus: "not_started" },
+    );
+  }
 }
 
 function transitionHasStarted(transition: SnapshotTransition): boolean {
@@ -3013,8 +3446,8 @@ async function captureTaskProviderOpsDelivery(
 ): Promise<void> {
   const commandSequence = finiteNumber(payload.commandSequence);
   const observationRevision = finiteNumber(payload.observationRevision);
-  const revision = commandSequence ?? observationRevision;
-  const isCommand = commandSequence !== undefined;
+  const isCommand = eventType.startsWith("task.command.");
+  const revision = isCommand ? commandSequence : observationRevision;
   const envelope = createProviderOpsEnvelope({
     recordType: isCommand ? "provider.command.lifecycle" : "provider.task.lifecycle",
     eventCategory: isCommand ? "command.lifecycle" : "task.lifecycle",
@@ -3035,7 +3468,7 @@ async function captureTaskProviderOpsDelivery(
     authorizationContextHash: task.authorization_context_hash,
     adapterRevision: task.adapter_revision,
     ...(observationRevision === undefined ? {} : { observationRevision }),
-    ...(commandSequence === undefined ? {} : { commandSequence }),
+    ...(!isCommand || commandSequence === undefined ? {} : { commandSequence }),
     eventType,
     stableAggregateIdentity: task.task_id,
     eventIdentity: eventKey,
@@ -3109,35 +3542,6 @@ function taskResultClass(row: TaskRow): string | null {
   return row.result?.isError === true ? "business_failure" : "success";
 }
 
-async function recordCommandFact(
-  pool: Pool,
-  command: Pick<
-    PendingCommandRecord,
-    "taskId" | "commandSequence" | "commandType" | "attemptCount"
-  >,
-  eventType: string,
-  commandState: PendingCommandRecord["state"],
-  extra: {
-    previousState?: PendingCommandRecord["state"];
-    retryAfterMs?: number;
-    reasonCode?: string;
-    adapterRpcStatus?: string;
-  } = {},
-): Promise<void> {
-  await recordCommandResolutionFact(
-    pool,
-    command.taskId,
-    {
-      sequence: command.commandSequence,
-      commandType: command.commandType,
-      state: commandState,
-      attemptCount: command.attemptCount,
-    },
-    eventType,
-    extra,
-  );
-}
-
 async function recordCommandResolutionFact(
   pool: Pool,
   taskId: string,
@@ -3156,33 +3560,83 @@ async function recordCommandResolutionFact(
   } = {},
 ): Promise<void> {
   try {
-    const eventId = randomUUID();
-    await pool.query(
-      `INSERT INTO outbox_event(event_id,event_key,aggregate_id,event_type,payload)
-       VALUES ($1,$2,$3,$4,$5::jsonb)`,
-      [
-        eventId,
-        `${taskId}:command:${String(command.sequence)}:${eventType}:${eventId}`,
-        taskId,
-        eventType,
-        JSON.stringify({
-          taskId,
-          commandSequence: command.sequence,
-          commandType: command.commandType,
-          previousState: extra.previousState ?? command.state,
-          currentState: command.state,
-          ...(command.attemptCount === undefined ? {} : { attempt: command.attemptCount }),
-          ...(extra.retryAfterMs === undefined ? {} : { retryAfterMs: extra.retryAfterMs }),
-          ...(extra.reasonCode === undefined ? {} : { reasonCode: extra.reasonCode }),
-          ...(extra.adapterRpcStatus === undefined
-            ? {}
-            : { adapterRpcStatus: extra.adapterRpcStatus }),
-        }),
-      ],
-    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (eventType === "task.command.duplicate") {
+        const { eventKey, payload } = commandFact(taskId, command, eventType, extra);
+        await client.query(
+          `INSERT INTO outbox_event(event_id,event_key,aggregate_id,event_type,payload)
+           VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING`,
+          [randomUUID(), eventKey, taskId, eventType, JSON.stringify(payload)],
+        );
+      } else {
+        await insertCommandFact(client, taskId, command, eventType, extra);
+      }
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   } catch {
     // Operational telemetry persistence is best effort and cannot fail command processing.
   }
+}
+
+function commandFact(
+  taskId: string,
+  command: {
+    sequence: number;
+    commandType: PendingCommandRecord["commandType"];
+    state: PendingCommandRecord["state"];
+    attemptCount?: number;
+  },
+  eventType: string,
+  extra: {
+    previousState?: PendingCommandRecord["state"];
+    retryAfterMs?: number;
+    reasonCode?: string;
+    adapterRpcStatus?: string;
+  } = {},
+): { eventKey: string; payload: Record<string, unknown> } {
+  return {
+    eventKey: `${taskId}:command:${String(command.sequence)}:${eventType}:${command.state}:${String(command.attemptCount ?? 0)}`,
+    payload: {
+      taskId,
+      commandSequence: command.sequence,
+      commandType: command.commandType,
+      previousState: extra.previousState ?? command.state,
+      currentState: command.state,
+      ...(command.attemptCount === undefined ? {} : { attempt: command.attemptCount }),
+      ...(extra.retryAfterMs === undefined ? {} : { retryAfterMs: extra.retryAfterMs }),
+      ...(extra.reasonCode === undefined ? {} : { reasonCode: extra.reasonCode }),
+      ...(extra.adapterRpcStatus === undefined ? {} : { adapterRpcStatus: extra.adapterRpcStatus }),
+      occurredAt: new Date().toISOString(),
+    },
+  };
+}
+
+async function insertCommandFact(
+  client: PoolClient,
+  taskId: string,
+  command: {
+    sequence: number;
+    commandType: PendingCommandRecord["commandType"];
+    state: PendingCommandRecord["state"];
+    attemptCount?: number;
+  },
+  eventType: string,
+  extra: {
+    previousState?: PendingCommandRecord["state"];
+    retryAfterMs?: number;
+    reasonCode?: string;
+    adapterRpcStatus?: string;
+  } = {},
+): Promise<void> {
+  const { eventKey, payload } = commandFact(taskId, command, eventType, extra);
+  await insertOutbox(client, taskId, eventType, payload, eventKey);
 }
 
 function stableObservationType(transition: SnapshotTransition): string {

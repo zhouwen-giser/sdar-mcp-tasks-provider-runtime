@@ -39,9 +39,9 @@ final-report repair are explicitly out of scope.
 | H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | complete    | `bc5da25` |
 | H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | complete    | `19c5442` |
 | H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | complete    | `3589e74` |
-| H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | complete    | pending   |
-| H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | in progress | pending   |
-| H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | pending     | pending   |
+| H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | complete    | `c3d8cbc` |
+| H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | complete    | pending   |
+| H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | in progress | pending   |
 | H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | pending     | pending   |
 | H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | pending     | pending   |
 | H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | pending     | pending   |
@@ -62,6 +62,8 @@ final-report repair are explicitly out of scope.
 | 2026-07-18 | H3 gRPC wire, multi-replica idempotency and build    | PASS                                                                             |
 | 2026-07-18 | H4 real spans, propagation, restart persistence      | PASS, 131 focused tests                                                          |
 | 2026-07-18 | H4 migration 018 forward upgrade                     | PASS                                                                             |
+| 2026-07-18 | H5 Task/command lifecycle PostgreSQL matrix          | PASS, 115 tests                                                                  |
+| 2026-07-18 | H5 typecheck, lint and format check                  | PASS                                                                             |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.
