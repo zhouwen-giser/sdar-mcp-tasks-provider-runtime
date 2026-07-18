@@ -7,7 +7,7 @@ provider identity, persists operation snapshots, performs the first recovery
 scan, and only then listens. `/health/live` proves the event loop can respond;
 `/health/ready` additionally reports `database`, `adapter`, `adapterManifest`, `recovery`,
 `scheduler`, `commandDispatcher`, `outboxPublisher`, `outboxCleaner`, and `ttlCleaner`
-independently. Telemetry is deliberately absent from readiness.
+independently. `providerTelemetryIngress`（Provider 遥测入口）仅在启用时属于就绪依赖；OTLP Collector（遥测收集器）和审计投递积压不属于就绪依赖。响应字段和样例见 [Runtime API 参考](../protocol/api-reference.md#http-健康与管理接口)。
 Remove a replica from traffic on any non-ready dependency.
 
 Adapter readiness is a continuous identity-checked probe, not a startup latch. Adapter Manifest
@@ -30,8 +30,7 @@ TTL purge.
 ## Routine operations
 
 - Back up PostgreSQL using the platform's physical or verified logical backup;
-  Task, intent, command, observation, snapshot, idempotency and Outbox tables
-  form one recovery unit.
+  Task、intent（接纳意图）、command（命令）、observation（观测）、snapshot（快照）、idempotency（幂等）、Outbox（发件箱）和 `provider_ops_delivery`（Provider 运维投递）表必须作为同一个恢复单元。
 - Run `pnpm db:migrate` or the image's migration entry point before a rolling
   upgrade. Multiple invocations serialize on an advisory lock.
 - Keep at least two Runtime replicas. Scheduler and recovery work is coordinated
@@ -64,6 +63,8 @@ For an OTLP Collector outage, repair or reroute the Collector without draining R
 Exporter queues and timeouts are bounded and drops do not change readiness or durable state.
 Confirm recovery with `adapter_rpc_total`, `provider_error_total`, Collector receiver metrics,
 and a fresh non-sensitive test event; do not weaken the sanitizer or add raw payload logging.
+
+启用 Provider 遥测入口后，如 `/health/ready`（就绪接口）中的 `providerTelemetryIngress` 失败，应依次检查 `PROVIDER_TELEMETRY_HOST`/`PORT`（监听地址/端口）、三个 TLS 文件、服务端证书用途，以及客户端证书 `CN`（通用名称）是否等于 `PROVIDER_ID` 和 Manifest Provider 标识符。入口初始化失败时不要绕过 mTLS 或临时改用明文；修复 Secret/端口后滚动重启。事件已被接受但 Collector 不可用时，检查 `telemetry_audit_backlog`（审计积压量）和 `telemetry_audit_oldest_age_seconds`（最老积压秒数），无需将 Runtime 摘除流量。
 
 ## Rollback
 

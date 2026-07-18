@@ -228,6 +228,7 @@ export class DurableScheduler {
           ...executionOptions(task),
           invocationAttempt: task.invocationAttempt,
           timing: adapterTiming(task.timing as unknown as TaskExecutionTiming),
+          ...(task.reservationRef === null ? {} : { reservationRef: task.reservationRef }),
         }),
       );
       const completedAt = this.clock.now();

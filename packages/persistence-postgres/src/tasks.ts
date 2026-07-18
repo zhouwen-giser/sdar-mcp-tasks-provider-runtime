@@ -10,6 +10,7 @@ import {
   isTerminalState,
   TaskExpiredError,
   TaskNotFoundOrUnauthorizedError,
+  RUNTIME_VERSION,
 } from "../../domain/src/index.js";
 import { createProviderOpsEnvelope } from "../../observability/src/index.js";
 import { captureProviderOpsDelivery } from "./provider-ops-delivery.js";
@@ -28,6 +29,7 @@ export interface AdmissionIntentInput {
   deadlineAt: Date | null;
   ttlMs: number | null;
   timing: TaskExecutionTiming;
+  reservationRef: string | null;
 }
 
 export interface PublishTaskInput extends AdmissionIntentInput {
@@ -37,12 +39,15 @@ export interface PublishTaskInput extends AdmissionIntentInput {
   adapterResponse: Record<string, unknown>;
   actualStartedAt?: Date | null;
   startWindowMissedAt?: Date;
-  inputRequests?: {
-    key: string;
-    description: string;
-    schema: Record<string, unknown>;
-    required: boolean;
-  }[];
+  inputRequests?: NewInputRequest[];
+}
+
+export interface NewInputRequest {
+  key: string;
+  description: string;
+  schema: Record<string, unknown>;
+  required: boolean;
+  requestJson?: InputRequestRecord["requestJson"];
 }
 
 export type PublishScheduledInput = AdmissionIntentInput;
@@ -138,6 +143,12 @@ export interface InputRequestRecord {
   required: boolean;
   status: "OPEN" | "ANSWERED";
   answerHash: string | null;
+  requestJson: {
+    method: "elicitation/create";
+    params: Record<string, unknown>;
+  };
+  responseHash: string | null;
+  responseJson: Record<string, unknown> | null;
 }
 
 export interface ObservationRecord {
@@ -223,6 +234,7 @@ interface TaskRow {
   correlation_id: string | null;
   execution_mode: TaskRecord["executionMode"];
   simulation_id: string | null;
+  reservation_ref: string | null;
   arguments: Record<string, unknown>;
   argument_hash: string;
   external_execution_id: string | null;
@@ -234,6 +246,7 @@ interface TaskRow {
   error: Record<string, unknown> | null;
   adapter_revision: string;
   observation_revision: string;
+  runtime_revision: string;
   ttl_ms: string | null;
   handle_expires_at: Date | null;
   terminal_at: Date | null;
@@ -243,6 +256,7 @@ interface TaskRow {
   poll_interval_ms: number;
   created_at: Date;
   updated_at: Date;
+  runtime_updated_at: Date;
   version: string;
   accepted_at: Date;
   not_before: Date | null;
@@ -296,7 +310,7 @@ export async function captureTaskOperationalEvent(
     eventCategory: input.recordType.replace("provider.", ""),
     deliveryClass: "operational",
     providerId: task.provider_id,
-    runtimeVersion: "1.1.0",
+    runtimeVersion: RUNTIME_VERSION,
     instanceId: "",
     taskId,
     resourceId: taskId,
@@ -344,9 +358,10 @@ export class TaskRepository {
         (task_id, provider_id, operation_name, operation_snapshot_id,
          authorization_context_hash, execution_mode, simulation_id, arguments,
          argument_hash, state, accepted_at, not_before, latest_start_at,
-         deadline_at, ttl_ms, timing, trace_id, root_traceparent, root_tracestate, correlation_id)
+         deadline_at, ttl_ms, timing, trace_id, root_traceparent, root_tracestate, correlation_id,
+         reservation_ref)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,'PENDING',$10,$11,$12,$13,$14,$15::jsonb,
-               $16,$17,$18,$19)
+               $16,$17,$18,$19,$20)
        ON CONFLICT (task_id) DO NOTHING`,
       [
         input.taskId,
@@ -368,6 +383,7 @@ export class TaskRepository {
         input.authorization.rootTraceparent ?? null,
         input.authorization.rootTracestate ?? null,
         input.authorization.correlationId ?? null,
+        input.reservationRef,
       ],
     );
     return result.rowCount === 1;
@@ -395,6 +411,7 @@ export class TaskRepository {
       root_traceparent: string | null;
       root_tracestate: string | null;
       correlation_id: string | null;
+      reservation_ref: string | null;
     }>("SELECT * FROM admission_intent WHERE task_id=$1", [taskId]);
     const row = result.rows[0];
     if (row === undefined) return null;
@@ -420,6 +437,7 @@ export class TaskRepository {
       deadlineAt: row.deadline_at,
       ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
       timing: row.timing,
+      reservationRef: row.reservation_ref,
       state: row.state,
     };
   }
@@ -468,7 +486,8 @@ export class TaskRepository {
            substate, status_message, result, error, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, actual_started_at,
            invocation_attempt, observation_revision, terminal_at, handle_expires_at,
-           last_confirmed_at, trace_id, root_traceparent, root_tracestate, correlation_id)
+           last_confirmed_at, trace_id, root_traceparent, root_tracestate, correlation_id,
+           reservation_ref)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15::jsonb,
                  $16::jsonb,$17,$18,$19,$20::jsonb,$21,$22,$23,
                  $24,$25,1,
@@ -477,7 +496,7 @@ export class TaskRepository {
                    WHEN $19::bigint IS NULL AND $11 NOT LIKE 'TERMINAL_%' THEN NULL
                    ELSE clock_timestamp() + (COALESCE($19::bigint,86400000) * interval '1 millisecond')
                  END,
-                 clock_timestamp(),$26,$27,$28,$29)`,
+                 clock_timestamp(),$26,$27,$28,$29,$30)`,
         [
           input.taskId,
           input.providerId,
@@ -508,6 +527,7 @@ export class TaskRepository {
           input.authorization.rootTraceparent ?? null,
           input.authorization.rootTracestate ?? null,
           input.authorization.correlationId ?? null,
+          input.reservationRef,
         ],
       );
       await insertObservation(client, input.taskId, 1, input.transition, {
@@ -553,10 +573,10 @@ export class TaskRepository {
            substate, status_message, adapter_revision, accepted_at, ttl_ms,
            timing, not_before, latest_start_at, deadline_at, invocation_attempt,
            next_start_attempt_at, observation_revision, trace_id, root_traceparent,
-           root_tracestate, correlation_id)
+           root_tracestate, correlation_id, reservation_ref)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,NULL,'SCHEDULED','working',
                  'scheduled','Waiting for scheduled start.',0,$10,$11,$12::jsonb,$13,$14,$15,0,$13,1,
-                 $16,$17,$18,$19)`,
+                 $16,$17,$18,$19,$20)`,
         [
           input.taskId,
           input.providerId,
@@ -577,6 +597,7 @@ export class TaskRepository {
           input.authorization.rootTraceparent ?? null,
           input.authorization.rootTracestate ?? null,
           input.authorization.correlationId ?? null,
+          input.reservationRef,
         ],
       );
       await initializeTaskRetention(
@@ -1361,12 +1382,7 @@ export class TaskRepository {
     adapterRevision: number,
     transition: SnapshotTransition,
     adapterResponse: Record<string, unknown>,
-    inputRequests: {
-      key: string;
-      description: string;
-      schema: Record<string, unknown>;
-      required: boolean;
-    }[] = [],
+    inputRequests: NewInputRequest[] = [],
     startWindowMissedAt?: Date,
     actualStartedAt?: Date | null,
   ): Promise<TaskRecord> {
@@ -1771,7 +1787,8 @@ export class TaskRepository {
     const result = await this.pool.query(
       `UPDATE provider_task
        SET schedule_claim_owner=NULL, schedule_claim_until=$3, status_message=$4,
-           updated_at=clock_timestamp()
+           updated_at=clock_timestamp(), runtime_updated_at=clock_timestamp(),
+           runtime_revision=runtime_revision+1
        WHERE task_id=$1 AND internal_state='WAITING_START_CONFIRMATION'
          AND schedule_claim_owner=$2`,
       [taskId, claimOwner, retryAt, message],
@@ -1978,8 +1995,12 @@ export class TaskRepository {
       required: boolean;
       status: "OPEN" | "ANSWERED";
       answer_hash: string | null;
+      request_json: InputRequestRecord["requestJson"];
+      response_hash: string | null;
+      response_json: Record<string, unknown> | null;
     }>(
-      `SELECT request_key, description, schema, required, status, answer_hash
+      `SELECT request_key, description, schema, required, status, answer_hash,
+              request_json, response_hash, response_json
        FROM task_input_request WHERE task_id=$1 ORDER BY created_at, request_key`,
       [taskId],
     );
@@ -1990,6 +2011,9 @@ export class TaskRepository {
       required: row.required,
       status: row.status,
       answerHash: row.answer_hash,
+      requestJson: row.request_json,
+      responseHash: row.response_hash,
+      responseJson: row.response_json,
     }));
   }
 
@@ -2203,6 +2227,35 @@ export class TaskRepository {
         claimOwner: null,
         claimUntil: null,
       };
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordCooperativeCancellationIntent(taskId: string): Promise<TaskRecord> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const applied = await transitionTask(client, {
+        taskId,
+        update: { cancelRequested: true, stopReason: "USER_REQUESTED" },
+        observation: {
+          type: "task.cancel_requested",
+          occurredAt: new Date(),
+          reasonCode: "ADAPTER_CANCEL_UNSUPPORTED",
+          message: "Cancellation intent recorded; Adapter does not support immediate stop.",
+          substate: null,
+          source: "runtime",
+        },
+        outboxType: "task.cancel_intent_recorded",
+        eventKey: `${taskId}:cancel-intent:user-requested`,
+        outboxPayload: { adapterDispatch: false },
+      });
+      await client.query("COMMIT");
+      return fromRow(applied.row);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -2611,7 +2664,12 @@ export class TaskRepository {
   async acknowledgeUpdateAndCompleteInputAnswers(
     command: PendingCommandRecord,
     ack: Record<string, unknown>,
-    answers: { key: string; answerHash: string; value: unknown }[],
+    answers: {
+      key: string;
+      answerHash: string;
+      value: unknown;
+      response: Record<string, unknown>;
+    }[],
   ): Promise<"acknowledged" | "task_terminal" | "superseded_by_safe_stop"> {
     const client = await this.pool.connect();
     try {
@@ -2702,9 +2760,16 @@ export class TaskRepository {
         const result = await client.query(
           `UPDATE task_input_request
              SET status='ANSWERED', answer_hash=$3, answer=$4::jsonb,
+                 response_hash=$3, response_json=$5::jsonb,
                  answered_at=clock_timestamp()
            WHERE task_id=$1 AND request_key=$2 AND status='OPEN'`,
-          [command.taskId, answer.key, answer.answerHash, JSON.stringify(answer.value)],
+          [
+            command.taskId,
+            answer.key,
+            answer.answerHash,
+            JSON.stringify(answer.value),
+            JSON.stringify(answer.response),
+          ],
         );
         if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
       }
@@ -2980,12 +3045,7 @@ export class TaskRepository {
     taskId: string,
     adapterRevision: number,
     transition: SnapshotTransition,
-    inputRequests: {
-      key: string;
-      description: string;
-      schema: Record<string, unknown>;
-      required: boolean;
-    }[] = [],
+    inputRequests: NewInputRequest[] = [],
   ): Promise<TaskRecord> {
     const client = await this.pool.connect();
     try {
@@ -3130,8 +3190,10 @@ async function transitionTask(
   const values: unknown[] = [request.taskId, request.observation.occurredAt];
   const assignments = [
     "observation_revision=observation_revision+1",
+    "runtime_revision=runtime_revision+1",
     "version=version+1",
     "updated_at=$2",
+    "runtime_updated_at=$2",
   ];
   const add = (column: string, value: unknown, json = false): void => {
     values.push(json && value !== null ? JSON.stringify(value) : value);
@@ -3232,6 +3294,7 @@ async function transitionTask(
     operationName: row.operation_name,
     executionMode: row.execution_mode,
     simulationId: row.simulation_id,
+    reservationRef: row.reservation_ref,
     argumentHash: row.argument_hash,
     authorizationContextHash: row.authorization_context_hash,
     traceId: row.trace_id,
@@ -3507,24 +3570,35 @@ async function insertObservation(
 async function upsertInputRequests(
   client: PoolClient,
   taskId: string,
-  inputRequests: {
-    key: string;
-    description: string;
-    schema: Record<string, unknown>;
-    required: boolean;
-  }[],
+  inputRequests: NewInputRequest[],
 ): Promise<void> {
   for (const input of inputRequests) {
+    const requestJson = input.requestJson ?? {
+      method: "elicitation/create" as const,
+      params: {
+        mode: "form",
+        message: input.description,
+        requestedSchema: input.schema,
+      },
+    };
     const result = await client.query(
       `INSERT INTO task_input_request
-        (task_id, request_key, description, schema, required, status)
-       VALUES ($1,$2,$3,$4::jsonb,$5,'OPEN')
+        (task_id, request_key, description, schema, required, status, request_json)
+       VALUES ($1,$2,$3,$4::jsonb,$5,'OPEN',$6::jsonb)
        ON CONFLICT (task_id, request_key) DO UPDATE SET
          description=EXCLUDED.description
        WHERE task_input_request.schema=EXCLUDED.schema
          AND task_input_request.required=EXCLUDED.required
+         AND task_input_request.request_json=EXCLUDED.request_json
        RETURNING request_key`,
-      [taskId, input.key, input.description, JSON.stringify(input.schema), input.required],
+      [
+        taskId,
+        input.key,
+        input.description,
+        JSON.stringify(input.schema),
+        input.required,
+        JSON.stringify(requestJson),
+      ],
     );
     if (result.rowCount !== 1) throw new Error("STABLE_INPUT_REQUEST_CONFLICT");
   }
@@ -3600,7 +3674,7 @@ async function captureTaskProviderOpsDelivery(
     eventCategory: isCommand ? "command.lifecycle" : "task.lifecycle",
     deliveryClass: "audit",
     providerId: task.provider_id,
-    runtimeVersion: "1.1.0",
+    runtimeVersion: RUNTIME_VERSION,
     instanceId: "",
     taskId: task.task_id,
     resourceId: task.task_id,
@@ -3836,6 +3910,7 @@ function fromRow(row: TaskRow): TaskRecord {
     correlationId: row.correlation_id,
     executionMode: row.execution_mode,
     simulationId: row.simulation_id,
+    reservationRef: row.reservation_ref,
     arguments: row.arguments,
     argumentHash: row.argument_hash,
     externalExecutionId: row.external_execution_id,
@@ -3847,6 +3922,7 @@ function fromRow(row: TaskRow): TaskRecord {
     error: row.error,
     adapterRevision: Number(row.adapter_revision),
     observationRevision: Number(row.observation_revision),
+    runtimeRevision: row.runtime_revision,
     ttlMs: row.ttl_ms === null ? null : Number(row.ttl_ms),
     handleExpiresAt: row.handle_expires_at,
     terminalAt: row.terminal_at,
@@ -3856,6 +3932,7 @@ function fromRow(row: TaskRow): TaskRecord {
     pollIntervalMs: row.poll_interval_ms,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    runtimeUpdatedAt: row.runtime_updated_at,
     version: Number(row.version),
     acceptedAt: row.accepted_at,
     notBefore: row.not_before,

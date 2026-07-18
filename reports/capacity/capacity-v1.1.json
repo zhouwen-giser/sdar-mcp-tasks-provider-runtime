@@ -1,6 +1,6 @@
 {
   "version": "1.1.0",
-  "generatedAt": "2026-07-18T10:57:54.414Z",
+  "generatedAt": "2026-07-18T05:04:02.031Z",
   "environment": {
     "node": "v22.14.0",
     "platform": "win32/x64",
@@ -12,36 +12,36 @@
   "workloads": {
     "synchronousTool": {
       "iterations": 100,
-      "durationMs": 1406.4240000000027,
-      "throughputPerSecond": 71.10231338486815,
+      "durationMs": 1639.5298999999977,
+      "throughputPerSecond": 60.99309320311885,
       "latencyMs": {
-        "p50": 13.729100000000471,
-        "p95": 18.34530000000086,
-        "p99": 20.52059999999983,
-        "max": 22.4984000000004
+        "p50": 16.363799999999173,
+        "p95": 19.965400000000955,
+        "p99": 27.0653999999995,
+        "max": 28.087099999997008
       }
     },
     "concurrentTaskAdmission": {
       "tasks": 1000,
       "runtimeReplicas": 2,
-      "durationMs": 36801.604,
-      "tasksPerSecond": 27.172728666935278
+      "durationMs": 41585.668600000005,
+      "tasksPerSecond": 24.046745757984517
     },
     "slowAdapterDatabaseAvailability": {
       "adapterResponseDelayMs": 15000,
-      "databaseQueryDurationMs": 1.3867999999999938,
+      "databaseQueryDurationMs": 1.5259000000000924,
       "databaseQueryCompletedBeforeAdapterResponse": true,
-      "taskId": "a425c8c0-3052-4d45-ab59-442523c85fba"
+      "taskId": "d9d1a667-d7ba-4a92-bb69-64e1d7060274"
     },
     "durableCommandDispatcher": {
       "commands": 500,
       "runtimeReplicas": 2,
       "duplicateAdapterSideEffects": 0,
-      "durationMs": 37327.34749999999,
-      "commandsPerSecond": 13.39500482856437,
+      "durationMs": 40697.28659999999,
+      "commandsPerSecond": 12.285831360560536,
       "result": {
-        "claimed": 484,
-        "acknowledged": 484,
+        "claimed": 492,
+        "acknowledged": 492,
         "retried": 0,
         "rejected": 0,
         "exhausted": 0,
@@ -51,7 +51,7 @@
     },
     "scheduledScan": {
       "futureTasks": 32,
-      "durationMs": 14.175799999997253,
+      "durationMs": 22.3526000000129,
       "result": {
         "started": 0,
         "missed": 0,
@@ -63,7 +63,7 @@
     },
     "watchdogScan": {
       "overdueTasks": 16,
-      "durationMs": 680.8543000000063,
+      "durationMs": 655.6116000000038,
       "result": {
         "watchdogStops": 16,
         "reconciled": 0,
@@ -74,20 +74,20 @@
       "100": {
         "requested": 100,
         "returned": 100,
-        "durationMs": 5.829599999997299,
-        "candidatesPerSecond": 17153.83559764758
+        "durationMs": 6.9729000000079395,
+        "candidatesPerSecond": 14341.235353997065
       },
       "500": {
         "requested": 500,
         "returned": 500,
-        "durationMs": 17.8408999999956,
-        "candidatesPerSecond": 28025.49198751875
+        "durationMs": 19.442399999999907,
+        "candidatesPerSecond": 25716.989672057072
       },
       "1000": {
         "requested": 1000,
         "returned": 1000,
-        "durationMs": 35.029099999999744,
-        "candidatesPerSecond": 28547.693203650888
+        "durationMs": 30.11720000000787,
+        "candidatesPerSecond": 33203.61786619403
       }
     },
     "observationOutboxGrowth": {
@@ -98,10 +98,10 @@
         },
         "after": {
           "rows": 1581,
-          "bytes": 581632
+          "bytes": 565248
         },
         "rows": 1581,
-        "bytes": 548864
+        "bytes": 532480
       },
       "outbox": {
         "before": {
@@ -110,19 +110,19 @@
         },
         "after": {
           "rows": 3597,
-          "bytes": 6561792
+          "bytes": 7454720
         },
         "rows": 3597,
-        "bytes": 6529024
+        "bytes": 7421952
       }
     },
     "runtimeImage": {
       "schemaVersion": 1,
-      "measuredAt": "2026-07-18T10:53:51.794Z",
+      "measuredAt": "2026-07-18T04:59:23.848Z",
       "measurementEnvironment": "win32/x64 Docker Engine",
       "image": "sdar-runtime:v1.1-audit-primary",
       "base": "node:22-bookworm-slim",
-      "sizeBytes": 99876549,
+      "sizeBytes": 99810471,
       "maximumBytes": 350000000,
       "user": "node",
       "layers": 11,

@@ -5,10 +5,14 @@ import {
 } from "../../packages/domain/src/index.js";
 
 const checks = [
-  { requestId: "one", operationName: "op", arguments: {} },
-  { requestId: "two", operationName: "op", arguments: {} },
+  { requestId: "one", operationName: "op", arguments: { state: "complete" as const, value: {} } },
+  { requestId: "two", operationName: "op", arguments: { state: "complete" as const, value: {} } },
 ];
-const firstCheck = { requestId: "one", operationName: "op", arguments: {} };
+const firstCheck = {
+  requestId: "one",
+  operationName: "op",
+  arguments: { state: "complete" as const, value: {} },
+};
 
 describe("availability contract", () => {
   it("validates available/restricted results and ordered windows", () => {
@@ -33,7 +37,7 @@ describe("availability contract", () => {
             { startTime: "2026-07-16T00:01:00Z", endTime: "2026-07-16T00:02:00Z" },
           ],
         },
-      ]).checks,
+      ]).results,
     ).toHaveLength(2);
   });
 
@@ -42,12 +46,20 @@ describe("availability contract", () => {
       validateAvailabilityResponse(
         new Date(),
         [firstCheck],
-        [{ requestId: "one", operationName: "op", availability: "available" }],
+        [
+          {
+            requestId: "one",
+            operationName: "op",
+            availability: "restricted",
+            riskLevel: "high",
+            validUntil: new Date(Date.now() + 60_000).toISOString(),
+          },
+        ],
       ),
-    ).toThrow("AVAILABLE_REQUIRES_VALID_UNTIL");
+    ).toThrow("RESTRICTED_AVAILABILITY_FIELDS_MISSING");
     expect(() =>
       validateAvailabilityResponse(
-        new Date("2026-01-01Z"),
+        new Date("2026-01-01T00:00:00Z"),
         [firstCheck],
         [
           {
@@ -56,20 +68,48 @@ describe("availability contract", () => {
             availability: "restricted",
             reasonCode: "BUSY",
             riskLevel: "high",
-            validUntil: "2026-01-02Z",
+            validUntil: "2026-01-02T00:00:00Z",
             possibleEffects: [],
-            nextAvailableWindows: [{ startTime: "2026-01-03Z", endTime: "2026-01-02Z" }],
+            nextAvailableWindows: [
+              {
+                startTime: "2026-01-03T00:00:00Z",
+                endTime: "2026-01-02T00:00:00Z",
+              },
+            ],
           },
         ],
       ),
     ).toThrow("INVALID_AVAILABILITY_WINDOW");
   });
 
+  it("enforces guaranteed reservation references", () => {
+    const base = {
+      requestId: "one",
+      operationName: "op",
+      availability: "available" as const,
+      riskLevel: "low" as const,
+    };
+    expect(() =>
+      validateAvailabilityResponse(
+        new Date(),
+        [firstCheck],
+        [{ ...base, reservationMode: "guaranteed" }],
+      ),
+    ).toThrow("AVAILABILITY_RESERVATION_INVALID");
+    expect(() =>
+      validateAvailabilityResponse(
+        new Date(),
+        [firstCheck],
+        [{ ...base, reservationMode: "best_effort", reservationRef: "not-guaranteed" }],
+      ),
+    ).toThrow("AVAILABILITY_RESERVATION_INVALID");
+  });
+
   it("uses explicit unknown fallback without claiming availability", () => {
     const fallback = unknownAvailability(checks);
-    expect(fallback.checks.map((check) => check.requestId)).toEqual(["one", "two"]);
-    expect(fallback.checks.map((check) => check.availability)).toEqual(["unknown", "unknown"]);
-    expect(fallback.checks.map((check) => check.reasonCode)).toEqual([
+    expect(fallback.results.map((check) => check.requestId)).toEqual(["one", "two"]);
+    expect(fallback.results.map((check) => check.availability)).toEqual(["unknown", "unknown"]);
+    expect(fallback.results.map((check) => check.reasonCode)).toEqual([
       "ADAPTER_TRANSIENT_UNAVAILABLE",
       "ADAPTER_TRANSIENT_UNAVAILABLE",
     ]);

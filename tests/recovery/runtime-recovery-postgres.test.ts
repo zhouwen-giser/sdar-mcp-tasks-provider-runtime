@@ -368,6 +368,9 @@ describe("Runtime startup and fault recovery", () => {
       expect(metrics.statusCode).toBe(200);
       expect(metrics.body).toContain("sdar_recovery_total");
       expect(metrics.body).toContain("sdar_outbox_pending");
+      expect(
+        (await runtime.app.inject({ method: "POST", url: "/mcp/legacy", payload: {} })).statusCode,
+      ).toBe(404);
 
       const unauthenticated = await runtime.app.inject({
         method: "POST",

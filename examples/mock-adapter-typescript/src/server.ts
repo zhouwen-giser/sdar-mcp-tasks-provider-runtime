@@ -10,7 +10,7 @@ import { JsonFileStore } from "./store.js";
 export interface MockAdapterOptions {
   providerId?: string;
   providerVersion?: string;
-  onStartSideEffect?: (taskId: string) => void;
+  onStartSideEffect?: (taskId: string, reservationRef?: string) => void;
   onControlSideEffect?: (taskId: string, command: string) => void;
   statePath?: string;
   startResponseDelayMs?: number;
@@ -20,6 +20,7 @@ interface MockExecution {
   externalExecutionId: string;
   operationName: string;
   argumentHash: string;
+  reservationRef?: string;
   executionContext: Record<string, unknown>;
   snapshot: Record<string, unknown>;
   terminalSnapshot: Record<string, unknown>;
@@ -425,6 +426,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         {
           identity?: { taskId?: string; commandSequence?: string | number };
           inputs?: { inputRequestKey?: string }[];
+          inputResponses?: { key?: string; result?: unknown }[];
         },
         unknown
       >,
@@ -439,10 +441,19 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         return;
       }
       const expectedKey = execution?.inputRound === 2 ? "comment" : "approval";
+      const legacyInputs = call.request.inputs ?? [];
+      const frozenResponses = call.request.inputResponses ?? [];
       const accepted =
         execution?.waitingForInput === true &&
-        (call.request.inputs ?? []).length > 0 &&
-        (call.request.inputs ?? []).every((input) => input.inputRequestKey === expectedKey);
+        ((legacyInputs.length > 0 &&
+          frozenResponses.length === 0 &&
+          legacyInputs.every((input) => input.inputRequestKey === expectedKey)) ||
+          (frozenResponses.length > 0 &&
+            legacyInputs.length === 0 &&
+            frozenResponses.every((response) => {
+              const result = protoStructToJson(response.result);
+              return response.key === expectedKey && result.action === "accept";
+            })));
       if (accepted) {
         options.onControlSideEffect?.(taskId, "update");
         if (execution.scenario === "multi_round_input" && execution.inputRound !== 2) {
@@ -471,6 +482,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
             reasonCode: "INPUT_ACCEPTED",
             message: "Input accepted; execution resumed.",
             inputRequests: [],
+            mcpInputRequests: [],
           };
           execution.terminalSnapshot = {
             ...execution.terminalSnapshot,
@@ -502,6 +514,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           argumentHash?: string;
           invocationAttempt?: string | number;
           executionContext?: Record<string, unknown>;
+          reservationRef?: string;
         },
         unknown
       >,
@@ -510,7 +523,10 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       const taskId = call.request.taskId ?? "missing";
       const existing = executions.get(taskId);
       if (existing !== undefined) {
-        if (existing.argumentHash !== (call.request.argumentHash ?? "")) {
+        if (
+          existing.argumentHash !== (call.request.argumentHash ?? "") ||
+          existing.reservationRef !== call.request.reservationRef
+        ) {
           callback(
             Object.assign(new Error("taskId argument conflict"), {
               code: grpc.status.ALREADY_EXISTS,
@@ -581,7 +597,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         return;
       }
       const now = new Date();
-      options.onStartSideEffect?.(taskId);
+      options.onStartSideEffect?.(taskId, call.request.reservationRef);
       if (
         call.request.operationName === "flex_task" &&
         (result.scenario === "terminal" || result.scenario === "terminal_invalid_output")
@@ -608,6 +624,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           externalExecutionId,
           operationName: call.request.operationName ?? "",
           argumentHash: call.request.argumentHash ?? "",
+          ...(call.request.reservationRef === undefined
+            ? {}
+            : { reservationRef: call.request.reservationRef }),
           executionContext: call.request.executionContext ?? {},
           snapshot: terminalSnapshot,
           terminalSnapshot,
@@ -642,20 +661,41 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           initialSnapshot.reasonCode = "QUEUED";
           initialSnapshot.message = "Reference task is queued before execution begins.";
         }
-        if (result.scenario === "input_required" || result.scenario === "multi_round_input") {
+        if (
+          result.scenario === "input_required" ||
+          result.scenario === "multi_round_input" ||
+          result.scenario === "input_required_frozen"
+        ) {
           initialSnapshot.state = "WAITING_INPUT";
           initialSnapshot.reasonCode = "APPROVAL_REQUIRED";
           initialSnapshot.message = "Approval input is required.";
-          Object.assign(initialSnapshot, {
-            inputRequests: [
-              {
-                key: "approval",
-                description: "Approve the reference operation.",
-                inputSchema: jsonToProtoStruct({ type: "boolean" }),
-                required: true,
-              },
-            ],
-          });
+          Object.assign(
+            initialSnapshot,
+            result.scenario === "input_required_frozen"
+              ? {
+                  mcpInputRequests: [
+                    {
+                      key: "approval",
+                      method: "elicitation/create",
+                      params: jsonToProtoStruct({
+                        mode: "form",
+                        message: "Approve the reference operation.",
+                        requestedSchema: { type: "boolean" },
+                      }),
+                    },
+                  ],
+                }
+              : {
+                  inputRequests: [
+                    {
+                      key: "approval",
+                      description: "Approve the reference operation.",
+                      inputSchema: jsonToProtoStruct({ type: "boolean" }),
+                      required: true,
+                    },
+                  ],
+                },
+          );
         }
         const terminalSnapshot = {
           ...initialSnapshot,
@@ -665,6 +705,20 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           message: "Reference task completed.",
           result: jsonToProtoStruct({ resourceId: result.resourceId, completed: true }),
         };
+        if (result.scenario === "evidence_success") {
+          Object.assign(terminalSnapshot, {
+            evidence: [
+              {
+                evidenceId: `evidence-${taskId}`,
+                evidenceType: "resource.completion",
+                observedAt: now.toISOString(),
+                subjectRef: `resource:${String(result.resourceId)}`,
+                payloadRef: { kind: "structured_content", jsonPointer: "/resourceId" },
+                producer: [providerId],
+              },
+            ],
+          });
+        }
         if (result.scenario === "output_invalid") {
           terminalSnapshot.result = jsonToProtoStruct({ resourceId: 42, completed: "yes" });
         } else if (result.scenario === "partial_valid") {
@@ -699,12 +753,17 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           externalExecutionId,
           operationName: call.request.operationName ?? "",
           argumentHash: call.request.argumentHash ?? "",
+          ...(call.request.reservationRef === undefined
+            ? {}
+            : { reservationRef: call.request.reservationRef }),
           executionContext: call.request.executionContext ?? {},
           snapshot: initialSnapshot,
           terminalSnapshot,
           commandAcks: {},
           waitingForInput:
-            result.scenario === "input_required" || result.scenario === "multi_round_input",
+            result.scenario === "input_required" ||
+            result.scenario === "multi_round_input" ||
+            result.scenario === "input_required_frozen",
           ...(result.scenario === "multi_round_input" ? { inputRound: 1 } : {}),
           ...(typeof result.scenario === "string" ? { scenario: result.scenario } : {}),
           ...(result.scenario === "queued_start" ? { holdSnapshot: true } : {}),
@@ -757,6 +816,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         externalExecutionId,
         operationName: call.request.operationName ?? "",
         argumentHash: call.request.argumentHash ?? "",
+        ...(call.request.reservationRef === undefined
+          ? {}
+          : { reservationRef: call.request.reservationRef }),
         executionContext: call.request.executionContext ?? {},
         snapshot: terminalSnapshot,
         terminalSnapshot,

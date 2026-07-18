@@ -33,3 +33,9 @@ The rc.2 release gate validates both JSON reports against the executable schema,
 least 17 cases per language and rejects a report that promotes Runtime Profile or resource safety
 beyond these scopes. `pnpm verify:rc3` also runs the independent Runtime integration, recovery,
 security, wire and capacity matrix.
+
+## v1.1 遥测预检说明
+
+`pnpm test:conformance`（Adapter 一致性测试命令）会生成 Python Provider 遥测 gRPC 绑定，并运行四类事件构造自检；`pnpm test:contract`（契约测试命令）会校验 TypeScript 的 `providerTelemetryExampleEvents`（Provider 遥测示例事件构造器）。这些预检证明示例客户端与 Proto 可生成、字段形状一致，但不增加上述 17 个 Adapter 报告用例，也不代表真实资源安全认证。
+
+Provider 遥测接口的可执行输入/输出样例和错误码见 [Provider 遥测入口](../protocol/provider-telemetry-ingress.md)。

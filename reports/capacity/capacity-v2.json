@@ -1,0 +1,141 @@
+{
+  "version": "2.0.0-rc.1",
+  "generatedAt": "2026-07-18T14:36:54.804Z",
+  "environment": {
+    "node": "v22.14.0",
+    "platform": "win32/x64",
+    "cpuLogicalCount": 16,
+    "memoryBytes": 34085838848,
+    "database": "TEST_DATABASE_URL target (credentials redacted)",
+    "topology": "two Runtime replicas, shared PostgreSQL, single TypeScript Adapter"
+  },
+  "workloads": {
+    "synchronousTool": {
+      "iterations": 100,
+      "durationMs": 1485.028000000002,
+      "throughputPerSecond": 67.33879765230006,
+      "latencyMs": {
+        "p50": 14.034999999999854,
+        "p95": 19.52600000000166,
+        "p99": 26.869900000001508,
+        "max": 36.30370000000039
+      }
+    },
+    "concurrentTaskAdmission": {
+      "tasks": 1000,
+      "runtimeReplicas": 2,
+      "durationMs": 40971.417199999996,
+      "tasksPerSecond": 24.407259214846004
+    },
+    "slowAdapterDatabaseAvailability": {
+      "adapterResponseDelayMs": 15000,
+      "databaseQueryDurationMs": 1.2449000000001433,
+      "databaseQueryCompletedBeforeAdapterResponse": true,
+      "taskId": "677bca3d-f57d-4a7b-a12a-a94f9d0f46b9"
+    },
+    "durableCommandDispatcher": {
+      "commands": 500,
+      "runtimeReplicas": 2,
+      "duplicateAdapterSideEffects": 0,
+      "durationMs": 44582.1581,
+      "commandsPerSecond": 11.2152489091819,
+      "result": {
+        "claimed": 492,
+        "acknowledged": 492,
+        "retried": 0,
+        "rejected": 0,
+        "exhausted": 0,
+        "terminal": 0,
+        "durableAcknowledged": 500
+      }
+    },
+    "scheduledScan": {
+      "futureTasks": 32,
+      "durationMs": 18.445099999997183,
+      "result": {
+        "started": 0,
+        "missed": 0,
+        "deferred": 0,
+        "deadlineStops": 0,
+        "watchdogStops": 0,
+        "reconciled": 0
+      }
+    },
+    "watchdogScan": {
+      "overdueTasks": 16,
+      "durationMs": 710.6141999999963,
+      "result": {
+        "watchdogStops": 16,
+        "reconciled": 0,
+        "durableStopRequests": 16
+      }
+    },
+    "recoveryCandidateScans": {
+      "100": {
+        "requested": 100,
+        "returned": 100,
+        "durationMs": 6.455199999996694,
+        "candidatesPerSecond": 15491.386788953281
+      },
+      "500": {
+        "requested": 500,
+        "returned": 500,
+        "durationMs": 17.388200000001234,
+        "candidatesPerSecond": 28755.132791201188
+      },
+      "1000": {
+        "requested": 1000,
+        "returned": 1000,
+        "durationMs": 34.04310000000987,
+        "candidatesPerSecond": 29374.528171632726
+      }
+    },
+    "observationOutboxGrowth": {
+      "observations": {
+        "before": {
+          "rows": 0,
+          "bytes": 32768
+        },
+        "after": {
+          "rows": 1581,
+          "bytes": 565248
+        },
+        "rows": 1581,
+        "bytes": 532480
+      },
+      "outbox": {
+        "before": {
+          "rows": 0,
+          "bytes": 32768
+        },
+        "after": {
+          "rows": 3597,
+          "bytes": 6496256
+        },
+        "rows": 3597,
+        "bytes": 6463488
+      }
+    },
+    "runtimeImage": {
+      "schemaVersion": 1,
+      "measurementEnvironment": "win32/x64 Docker Engine",
+      "image": "sdar-runtime:v2-audit-primary",
+      "base": "node:22-bookworm-slim",
+      "sizeBytes": 99843585,
+      "maximumBytes": 350000000,
+      "user": "node",
+      "layers": 11,
+      "frozenLockfile": true,
+      "productionDependenciesOnly": true,
+      "containsTestsDocsOrReferences": false,
+      "containsTypescriptOrVitest": false,
+      "containsProtoAndMigrations": true,
+      "reproducibleFilesystemAndConfig": true
+    }
+  },
+  "interpretation": {
+    "productionSlo": false,
+    "recoveryScope": "Measures the real PostgreSQL candidate-selection/materialization path; Adapter reconciliation latency is resource-specific.",
+    "thresholds": "Only correctness/regression bounds are enforced: pool progress under 500ms, exact claims/counts, positive durable growth, and image policy."
+  }
+}

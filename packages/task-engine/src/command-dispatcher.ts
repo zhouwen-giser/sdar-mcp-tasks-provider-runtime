@@ -269,7 +269,8 @@ export class DurableCommandDispatcher {
     },
     operationName: string,
   ): Promise<"acknowledged" | "retriable" | "rejected" | "exhausted"> {
-    const answers = parseUpdateAnswers(command.payload);
+    const update = parseUpdatePayload(command.payload);
+    const answers = update.answers;
     const identity = {
       taskId: task.taskId,
       operationName,
@@ -277,12 +278,19 @@ export class DurableCommandDispatcher {
       commandSequence: command.commandSequence,
     };
     try {
-      const ack = await this.withClaimHeartbeat(command, () =>
-        this.gateway.updateExecution(identity, answers, {
+      const ack = await this.withClaimHeartbeat(command, () => {
+        const options = {
           ...executionOptions(task),
           externalExecutionId: task.externalExecutionId,
-        }),
-      );
+        };
+        return update.kind === "frozen"
+          ? this.gateway.updateMcpTaskExecution(
+              identity,
+              answers.map((answer) => ({ key: answer.key, result: answer.response })),
+              options,
+            )
+          : this.gateway.updateExecution(identity, answers, options);
+      });
       validateCommandAckIdentity(ack, {
         taskId: task.taskId,
         externalExecutionId: task.externalExecutionId,
@@ -457,7 +465,48 @@ function isIdentityError(error: unknown): boolean {
   return error instanceof Error && error.message.includes("IDENTITY_MISMATCH");
 }
 
-function parseUpdateAnswers(payload: Record<string, unknown>) {
+function parseUpdatePayload(payload: Record<string, unknown>): {
+  kind: "legacy" | "frozen";
+  answers: {
+    key: string;
+    value: unknown;
+    answerHash: string;
+    response: { action: "accept" | "decline" | "cancel"; content?: unknown };
+  }[];
+} {
+  const inputResponses = payload.inputResponses;
+  if (
+    inputResponses !== undefined &&
+    inputResponses !== null &&
+    typeof inputResponses === "object" &&
+    !Array.isArray(inputResponses)
+  ) {
+    const answers = Object.entries(inputResponses as Record<string, unknown>).map(
+      ([key, value]) => {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error("INVALID_UPDATE_COMMAND_PAYLOAD");
+        }
+        const response = value as {
+          action?: unknown;
+          content?: unknown;
+        };
+        if (!new Set(["accept", "decline", "cancel"]).has(String(response.action))) {
+          throw new Error("INVALID_UPDATE_COMMAND_PAYLOAD");
+        }
+        const normalized = {
+          action: response.action as "accept" | "decline" | "cancel",
+          ...("content" in response ? { content: response.content } : {}),
+        };
+        return {
+          key,
+          value: response.content ?? null,
+          answerHash: commandHash(normalized),
+          response: normalized,
+        };
+      },
+    );
+    return { kind: "frozen", answers };
+  }
   const answers = payload.answers;
   if (
     answers === undefined ||
@@ -468,11 +517,15 @@ function parseUpdateAnswers(payload: Record<string, unknown>) {
     throw new Error("INVALID_UPDATE_COMMAND_PAYLOAD");
   }
   const answerRecord = answers as Record<string, unknown>;
-  return Object.entries(answerRecord).map(([key, value]) => ({
-    key,
-    value,
-    answerHash: commandHash(value),
-  }));
+  return {
+    kind: "legacy",
+    answers: Object.entries(answerRecord).map(([key, value]) => ({
+      key,
+      value,
+      answerHash: commandHash(value),
+      response: { action: "accept", content: value },
+    })),
+  };
 }
 
 function canonicalize(value: unknown): string {

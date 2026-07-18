@@ -45,7 +45,7 @@ jobs:
           version: 1.57.2
           github_token: ${{ github.token }}
       - run: pnpm install --frozen-lockfile
-      - run: pnpm verify:v1.1
+      - run: pnpm verify:v2
       - run: buf lint proto
       - name: Check Protobuf compatibility against rc.1
         run: buf breaking proto --against '.git#tag=v1.0.0-rc.1,subdir=proto'
@@ -61,6 +61,8 @@ jobs:
           name: release-evidence
           path: |
             reports/capacity/*.json
+            reports/protocol-v1-conformance/*
+            reports/protocol-v1-migration/*.json
             reports/sbom/*.json
           if-no-files-found: warn
 
