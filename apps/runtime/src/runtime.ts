@@ -21,15 +21,16 @@ import {
   OperationSnapshotRepository,
   IdempotencyRepository,
   OutboxRepository,
+  ProviderOpsDeliveryRepository,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
 import {
   DurableCommandDispatcher,
+  DurableProviderOpsPublisher,
   DurableScheduler,
   InternalNoopOutboxSink,
   OutboxPublisher,
-  ProviderOpsOutboxSink,
   RecoveryManager,
   TaskEngine,
   OutboxCleaner,
@@ -113,6 +114,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let adapterHealthTimer: NodeJS.Timeout | undefined;
   let adapterManifestTimer: NodeJS.Timeout | undefined;
   let outboxPublisherTimer: NodeJS.Timeout | undefined;
+  let providerOpsPublisherTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
@@ -121,6 +123,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let adapterHealthTicking = false;
   let adapterManifestTicking = false;
   let outboxPublisherTicking = false;
+  let providerOpsPublisherTicking = false;
   let adapterHealthFailures = 0;
   const rateLimiter = new BoundedRateLimiter(
     config.RATE_LIMIT_MAX,
@@ -216,6 +219,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
     if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
     if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
+    if (providerOpsPublisherTimer !== undefined) clearInterval(providerOpsPublisherTimer);
     gateway.close();
     await telemetry?.shutdown();
     await pool.end();
@@ -336,12 +340,26 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           : new InternalNoopOutboxSink();
       const outboxPublisher = new OutboxPublisher(
         new OutboxRepository(pool),
-        new ProviderOpsOutboxSink(downstreamOutboxSink, telemetry, {
-          providerId: validated.providerId,
-          runtimeVersion: "1.1.0",
-          instanceId: telemetryInstanceId,
-        }),
+        downstreamOutboxSink,
         config.OUTBOX_BATCH_SIZE,
+      );
+      const providerOpsPublisher = new DurableProviderOpsPublisher(
+        new ProviderOpsDeliveryRepository(pool),
+        {
+          export: async (records) =>
+            telemetry?.exportAudit(
+              records.map((record) => ({
+                ...record.recordBody,
+                instanceId: telemetryInstanceId,
+                emittedAt: new Date().toISOString(),
+              })),
+            ) ?? Promise.reject(new Error("TELEMETRY_AUDIT_EXPORT_UNAVAILABLE")),
+        },
+        telemetryInstanceId,
+        {
+          onEvent: (event, amount) =>
+            telemetry?.metric("provider_telemetry_delivery_total", amount, { event }),
+        },
       );
       const recovery = new RecoveryManager(
         taskEngine,
@@ -378,6 +396,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       dependencies.ttlCleaner = "ready";
       await outboxPublisher.tick();
       dependencies.outboxPublisher = "ready";
+      await providerOpsPublisher.tick().catch((error: unknown) => {
+        logger.warn({ err: error }, "Provider telemetry delivery deferred");
+      });
       await updateOperationalGauges(pool, telemetry);
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
@@ -465,6 +486,19 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.OUTBOX_POLL_MS);
       outboxPublisherTimer.unref();
+      providerOpsPublisherTimer = setInterval(() => {
+        if (providerOpsPublisherTicking) return;
+        providerOpsPublisherTicking = true;
+        void providerOpsPublisher
+          .tick()
+          .catch((error: unknown) => {
+            logger.warn({ err: error }, "Provider telemetry delivery deferred");
+          })
+          .finally(() => {
+            providerOpsPublisherTicking = false;
+          });
+      }, config.OUTBOX_POLL_MS);
+      providerOpsPublisherTimer.unref();
       recoveryTimer = setInterval(() => {
         if (recoveryTicking) return;
         recoveryTicking = true;

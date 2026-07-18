@@ -11,6 +11,8 @@ import {
   TaskExpiredError,
   TaskNotFoundOrUnauthorizedError,
 } from "../../domain/src/index.js";
+import { createProviderOpsEnvelope } from "../../observability/src/index.js";
+import { captureProviderOpsDelivery } from "./provider-ops-delivery.js";
 
 export interface AdmissionIntentInput {
   taskId: string;
@@ -862,27 +864,23 @@ export class TaskRepository {
       const row = task.rows[0];
       if (row === undefined) throw new Error("TASK_NOT_FOUND");
       const eventKey = `${taskId}:identity-conflict:${createHash("sha256").update(detail).digest("hex")}`;
-      await client.query(
-        `INSERT INTO outbox_event(event_id, event_key, aggregate_id, event_type, payload)
-         VALUES ($1,$2,$3,'task.identity_conflict',$4::jsonb)
-         ON CONFLICT (event_key) DO NOTHING`,
-        [
-          randomUUID(),
-          eventKey,
+      await insertOutbox(
+        client,
+        taskId,
+        "task.identity_conflict",
+        {
           taskId,
-          JSON.stringify({
-            taskId,
-            audit: true,
-            reasonCode: "ADAPTER_IDENTITY_MISMATCH",
-            detail,
-            internalState: row.internal_state,
-            status: row.mcp_status,
-            substate: row.substate,
-            statusMessage: row.status_message,
-            observationRevision: Number(row.observation_revision),
-            adapterRevision: Number(row.adapter_revision),
-          }),
-        ],
+          audit: true,
+          reasonCode: "ADAPTER_IDENTITY_MISMATCH",
+          detail,
+          internalState: row.internal_state,
+          status: row.mcp_status,
+          substate: row.substate,
+          statusMessage: row.status_message,
+          observationRevision: Number(row.observation_revision),
+          adapterRevision: Number(row.adapter_revision),
+        },
+        eventKey,
       );
       await client.query("COMMIT");
     } catch (error) {
@@ -2670,6 +2668,32 @@ async function transitionTask(
       JSON.stringify(request.observation.payload ?? {}),
     ],
   );
+  const occurredAt = request.observation.occurredAt;
+  const outboxPayload = {
+    ...(request.outboxPayload ?? {}),
+    taskId: request.taskId,
+    previousState: existing.internal_state,
+    currentState: row.internal_state,
+    previousSubstate: existing.substate,
+    currentSubstate: row.substate,
+    reasonCode: request.observation.reasonCode ?? null,
+    terminal: isTerminalState(row.internal_state),
+    resultClass: taskResultClass(row),
+    internalState: row.internal_state,
+    status: row.mcp_status,
+    substate: row.substate,
+    statusMessage: row.status_message,
+    externalExecutionId: row.external_execution_id,
+    operationName: row.operation_name,
+    executionMode: row.execution_mode,
+    simulationId: row.simulation_id,
+    argumentHash: row.argument_hash,
+    authorizationContextHash: row.authorization_context_hash,
+    observationRevision: revision,
+    adapterRevision: Number(row.adapter_revision),
+    occurredAt: occurredAt.toISOString(),
+    taskTransitionDurationMs: performance.now() - transitionStartedAt,
+  };
   await client.query(
     `INSERT INTO outbox_event(event_id, event_key, aggregate_id, event_type, payload)
      VALUES ($1,$2,$3,$4,$5::jsonb)`,
@@ -2678,31 +2702,16 @@ async function transitionTask(
       request.eventKey,
       request.taskId,
       request.outboxType,
-      JSON.stringify({
-        ...(request.outboxPayload ?? {}),
-        taskId: request.taskId,
-        previousState: existing.internal_state,
-        currentState: row.internal_state,
-        previousSubstate: existing.substate,
-        currentSubstate: row.substate,
-        reasonCode: request.observation.reasonCode ?? null,
-        terminal: isTerminalState(row.internal_state),
-        resultClass: taskResultClass(row),
-        internalState: row.internal_state,
-        status: row.mcp_status,
-        substate: row.substate,
-        statusMessage: row.status_message,
-        externalExecutionId: row.external_execution_id,
-        operationName: row.operation_name,
-        executionMode: row.execution_mode,
-        simulationId: row.simulation_id,
-        argumentHash: row.argument_hash,
-        authorizationContextHash: row.authorization_context_hash,
-        observationRevision: revision,
-        adapterRevision: Number(row.adapter_revision),
-        taskTransitionDurationMs: performance.now() - transitionStartedAt,
-      }),
+      JSON.stringify(outboxPayload),
     ],
+  );
+  await captureTaskProviderOpsDelivery(
+    client,
+    row,
+    request.outboxType,
+    outboxPayload,
+    request.eventKey,
+    occurredAt,
   );
   return { row, applied: true };
 }
@@ -2949,13 +2958,112 @@ async function insertOutbox(
           authorizationContextHash: task.authorization_context_hash,
           observationRevision: Number(task.observation_revision),
           adapterRevision: Number(task.adapter_revision),
+          occurredAt: new Date().toISOString(),
           ...payload,
         };
-  await client.query(
+  const inserted = await client.query(
     `INSERT INTO outbox_event(event_id, event_key, aggregate_id, event_type, payload)
-     VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING`,
+     VALUES ($1,$2,$3,$4,$5::jsonb) ON CONFLICT (event_key) DO NOTHING RETURNING event_id`,
     [randomUUID(), eventKey, taskId, type, JSON.stringify(completePayload)],
   );
+  if (inserted.rowCount === 1 && task !== undefined) {
+    const occurredAt = timestampFromPayload(completePayload);
+    await captureTaskProviderOpsDelivery(client, task, type, completePayload, eventKey, occurredAt);
+  }
+}
+
+async function captureTaskProviderOpsDelivery(
+  client: PoolClient,
+  task: TaskRow,
+  eventType: string,
+  payload: Record<string, unknown>,
+  eventKey: string,
+  occurredAt: Date,
+): Promise<void> {
+  const commandSequence = finiteNumber(payload.commandSequence);
+  const observationRevision = finiteNumber(payload.observationRevision);
+  const revision = commandSequence ?? observationRevision;
+  const isCommand = commandSequence !== undefined;
+  const envelope = createProviderOpsEnvelope({
+    recordType: isCommand ? "provider.command.lifecycle" : "provider.task.lifecycle",
+    eventCategory: isCommand ? "command.lifecycle" : "task.lifecycle",
+    deliveryClass: "audit",
+    providerId: task.provider_id,
+    runtimeVersion: "1.1.0",
+    instanceId: "",
+    taskId: task.task_id,
+    resourceId: task.task_id,
+    resourceType: "task",
+    ...(task.external_execution_id === null
+      ? {}
+      : { externalExecutionId: task.external_execution_id }),
+    operationName: task.operation_name,
+    executionMode: task.execution_mode,
+    ...(task.simulation_id === null ? {} : { simulationId: task.simulation_id }),
+    argumentHash: task.argument_hash,
+    authorizationContextHash: task.authorization_context_hash,
+    adapterRevision: task.adapter_revision,
+    ...(observationRevision === undefined ? {} : { observationRevision }),
+    ...(commandSequence === undefined ? {} : { commandSequence }),
+    eventType,
+    stableAggregateIdentity: task.task_id,
+    eventIdentity: eventKey,
+    ...(revision === undefined ? {} : { revision }),
+    occurredAt,
+    attributes: { source: "committed_postgres", eventType },
+    payload: providerOpsPayload(payload),
+  });
+  await captureProviderOpsDelivery(client, {
+    envelope,
+    eventKey,
+    aggregateType: isCommand ? "command" : "task",
+    aggregateId: task.task_id,
+  });
+}
+
+function providerOpsPayload(
+  payload: Record<string, unknown>,
+): Record<string, string | number | boolean | null> {
+  const allowed = [
+    "taskId",
+    "commandSequence",
+    "commandType",
+    "previousState",
+    "currentState",
+    "previousSubstate",
+    "currentSubstate",
+    "reasonCode",
+    "terminal",
+    "resultClass",
+    "status",
+    "observationRevision",
+    "adapterRevision",
+    "attempt",
+    "retryAfterMs",
+    "adapterRpcStatus",
+  ];
+  const result: Record<string, string | number | boolean | null> = {};
+  for (const key of allowed) {
+    const value = payload[key];
+    if (value === null || typeof value === "string" || typeof value === "boolean")
+      result[key] = value;
+    else if (typeof value === "number" && Number.isFinite(value)) result[key] = value;
+  }
+  return result;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function timestampFromPayload(payload: Record<string, unknown>): Date {
+  const value = payload.occurredAt;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === "string") {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
 }
 
 function taskResultClass(row: TaskRow): string | null {

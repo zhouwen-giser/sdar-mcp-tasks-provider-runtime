@@ -1,7 +1,10 @@
 import { InMemoryLogRecordExporter } from "@opentelemetry/sdk-logs";
 import { InMemorySpanExporter } from "@opentelemetry/sdk-trace-node";
 import { describe, expect, it } from "vitest";
-import { ProviderTelemetry } from "../../packages/observability/src/index.js";
+import {
+  createProviderOpsEnvelope,
+  ProviderTelemetry,
+} from "../../packages/observability/src/index.js";
 
 const resource = {
   serviceVersion: "1.1.0",
@@ -43,6 +46,33 @@ describe("ProviderTelemetry initialization", () => {
     ).resolves.toBe("ok");
     telemetry.event("provider.disabled", { secret: "not exported" });
     telemetry.metric("provider_disabled_total");
+    await telemetry.shutdown();
+  });
+
+  it("confirms audit export before resolving", async () => {
+    const audit = new RetainingLogExporter();
+    const telemetry = new ProviderTelemetry({ resource, enabled: true, auditExporter: audit });
+    telemetry.start();
+    const envelope = createProviderOpsEnvelope({
+      recordType: "provider.task.lifecycle",
+      eventCategory: "task.lifecycle",
+      deliveryClass: "audit",
+      providerId: "telemetry-provider",
+      runtimeVersion: "1.1.0",
+      instanceId: "runtime-test-1",
+      taskId: "task-1",
+      stableAggregateIdentity: "task-1",
+      eventIdentity: "task-1:started",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      attributes: { source: "test" },
+      payload: { currentState: "RUNNING" },
+    });
+
+    await telemetry.exportAudit([envelope]);
+
+    expect(audit.getFinishedLogRecords().map((record) => record.eventName)).toEqual([
+      "provider.task.lifecycle",
+    ]);
     await telemetry.shutdown();
   });
 });

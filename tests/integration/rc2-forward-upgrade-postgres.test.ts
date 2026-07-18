@@ -86,6 +86,7 @@ describe("rc.2 database forward upgrade", () => {
           "014_observation_pagination.sql",
           "015_recovery_backoff.sql",
           "016_command_claim_lease_consistency.sql",
+          "017_provider_ops_audit_delivery.sql",
         ],
       ],
     );
@@ -95,6 +96,7 @@ describe("rc.2 database forward upgrade", () => {
       "014_start_confirmation_watchdog.sql",
       "015_recovery_backoff.sql",
       "016_command_claim_lease_consistency.sql",
+      "017_provider_ops_audit_delivery.sql",
     ]);
     expect(
       await pool.query(

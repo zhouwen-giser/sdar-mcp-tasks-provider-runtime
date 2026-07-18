@@ -36,9 +36,9 @@ final-report repair are explicitly out of scope.
 | Phase | Deliverable                                               | Primary regression evidence         | Status      | Commit    |
 | ----- | --------------------------------------------------------- | ----------------------------------- | ----------- | --------- |
 | H0    | clean main baseline, red completion guards, this ExecPlan | baseline plus red suite             | complete    | `a01ae20` |
-| H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | complete    | pending   |
-| H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | in progress | pending   |
-| H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | pending     | pending   |
+| H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | complete    | `bc5da25` |
+| H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | complete    | pending   |
+| H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | in progress | pending   |
 | H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | pending     | pending   |
 | H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | pending     | pending   |
 | H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | pending     | pending   |
@@ -56,6 +56,8 @@ final-report repair are explicitly out of scope.
 | 2026-07-18 | baseline test counts                                 | 49 unit, 4 contract, 164 integration, 9 recovery, 18 security, 4 E2E, 6 rc.2 red |
 | 2026-07-18 | completion regression guard before implementation    | RED as expected, 7/7 failed                                                      |
 | 2026-07-18 | H1 typecheck, lint and envelope/outbox focused tests | PASS, 18 tests                                                                   |
+| 2026-07-18 | H2 PostgreSQL task lifecycle and delivery races      | PASS, 118 tests (110 lifecycle, 4 delivery, 4 upgrade/telemetry)                 |
+| 2026-07-18 | H2 typecheck, lint and format check                  | PASS                                                                             |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.

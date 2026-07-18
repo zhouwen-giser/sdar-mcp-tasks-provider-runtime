@@ -3,7 +3,11 @@ import type { Attributes } from "@opentelemetry/api";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs";
+import {
+  BatchLogRecordProcessor,
+  LoggerProvider,
+  SimpleLogRecordProcessor,
+} from "@opentelemetry/sdk-logs";
 import type { LogRecordExporter } from "@opentelemetry/sdk-logs";
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import type { MetricReader } from "@opentelemetry/sdk-metrics";
@@ -32,6 +36,7 @@ export interface ProviderTelemetryOptions {
   batch?: ProviderTelemetryBatchOptions;
   spanExporter?: SpanExporter;
   eventExporter?: LogRecordExporter;
+  auditExporter?: LogRecordExporter;
   metricReader?: MetricReader;
 }
 
@@ -66,6 +71,7 @@ export class ProviderTelemetry {
   readonly #options: ProviderTelemetryOptions;
   #tracerProvider?: NodeTracerProvider;
   #loggerProvider?: LoggerProvider;
+  #auditLoggerProvider?: LoggerProvider;
   #meterProvider?: MeterProvider;
   #started = false;
   #shutdown = false;
@@ -84,6 +90,9 @@ export class ProviderTelemetry {
       new OTLPTraceExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "traces") });
     const eventExporter =
       this.#options.eventExporter ??
+      new OTLPLogExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "logs") });
+    const auditExporter =
+      this.#options.auditExporter ??
       new OTLPLogExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "logs") });
     const metricReader =
       this.#options.metricReader ??
@@ -108,6 +117,11 @@ export class ProviderTelemetry {
         }),
       ],
     });
+    this.#auditLoggerProvider = new LoggerProvider({
+      resource,
+      forceFlushTimeoutMillis: this.#options.batch?.exportTimeoutMillis ?? 10_000,
+      processors: [new SimpleLogRecordProcessor({ exporter: auditExporter })],
+    });
     this.#meterProvider = new MeterProvider({ resource, readers: [metricReader] });
     this.#started = true;
   }
@@ -115,9 +129,12 @@ export class ProviderTelemetry {
   async shutdown(): Promise<void> {
     if (this.#shutdown) return;
     this.#shutdown = true;
-    const providers = [this.#tracerProvider, this.#loggerProvider, this.#meterProvider].filter(
-      (provider) => provider !== undefined,
-    );
+    const providers = [
+      this.#tracerProvider,
+      this.#loggerProvider,
+      this.#auditLoggerProvider,
+      this.#meterProvider,
+    ].filter((provider) => provider !== undefined);
     await Promise.allSettled(providers.map((provider) => provider.forceFlush()));
     await Promise.allSettled(providers.map((provider) => provider.shutdown()));
   }
@@ -230,6 +247,31 @@ export class ProviderTelemetry {
         status: stringAttribute(payload.adapterRpcStatus),
       });
     }
+  }
+
+  async exportAudit(envelopes: ProviderOpsEnvelope[]): Promise<void> {
+    if (!this.#started || this.#auditLoggerProvider === undefined) {
+      throw new Error("TELEMETRY_AUDIT_EXPORT_UNAVAILABLE");
+    }
+    const logger = this.#auditLoggerProvider.getLogger(
+      `${INSTRUMENTATION_NAME}/audit`,
+      INSTRUMENTATION_VERSION,
+    );
+    for (const envelope of envelopes) {
+      logger.emit({
+        eventName: envelope.recordType,
+        body: this.#sanitizer.sanitize(envelope) as never,
+        attributes: {
+          "sdar.schema.name": envelope.schemaName,
+          "sdar.schema.version": envelope.schemaVersion,
+          "sdar.record.id": envelope.recordId,
+          "sdar.record.hash": envelope.recordHash,
+          "sdar.delivery.class": envelope.deliveryClass,
+        },
+        timestamp: new Date(envelope.occurredAt),
+      });
+    }
+    await this.#auditLoggerProvider.forceFlush();
   }
 
   metric(
