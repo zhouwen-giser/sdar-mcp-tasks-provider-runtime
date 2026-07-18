@@ -58,6 +58,11 @@ Both mock Adapters include Provider telemetry clients and examples for resource 
 Task-bound execution progress, and replaying the same Provider event id after an uncertain call.
 This Provider-to-Runtime service requires no Provider-side OpenTelemetry SDK.
 
+The standalone [Home Assistant Light Provider](docs/providers/home-assistant-light-provider.md)
+adds allowlisted `light.*` state, power, and brightness operations through Home Assistant REST
+and WebSocket APIs. It is designed for configured Home Assistant entities and does not claim
+support for every Xiaomi device or provide direct MIoT/miIO access.
+
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).
 Root commands in `package.json` expose every release gate; `pnpm verify:v1.1` includes
