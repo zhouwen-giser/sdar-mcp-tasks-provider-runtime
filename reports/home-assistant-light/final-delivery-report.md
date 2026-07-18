@@ -48,6 +48,8 @@ was used or claimed as verification.
 
 ## Publication boundary
 
-Local implementation and all repository gates are complete. Branch push, Draft PR creation, and
-protected GitHub `runtime-ci`/Compose results are publication evidence and are recorded only after
-the corresponding remote objects exist.
+The branch was pushed and Draft PR
+[#12](https://github.com/zhouwen-giser/sdar-mcp-tasks-provider-runtime/pull/12) was opened against
+`main`. On the published implementation head, protected `runtime-compose` passed in 56 seconds
+and `runtime-ci` passed in 4 minutes 11 seconds. The final documentation-only evidence commit is
+subject to the same protected checks before delivery is declared complete.

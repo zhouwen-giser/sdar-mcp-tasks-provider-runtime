@@ -21,15 +21,15 @@ must not enter logs, snapshots, errors, results, or telemetry.
 
 ## Delivery phases
 
-| Phase   | Deliverable                                               | Required evidence                       | Status      |
-| ------- | --------------------------------------------------------- | --------------------------------------- | ----------- |
-| H0      | application/config/resource scaffold and manifest         | config, registry, manifest tests        | complete    |
-| H1      | REST/WebSocket client and state normalization             | client, conversion, reconnect tests     | complete    |
-| H2      | durable execution, confirmation, recovery and Adapter RPC | idempotency/reconcile/restart tests     | complete    |
-| H3      | durable resource and execution telemetry                  | stable ID/queue/failure-isolation tests | complete    |
-| H4      | security hardening and deployment assets                  | security tests and image/compose checks | complete    |
-| H5      | integration, Runtime E2E and documentation                | HA-provider tests and Runtime workflow  | complete    |
-| Release | full verification, phased commits, push and Draft PR      | clean SHA and protected CI              | in progress |
+| Phase   | Deliverable                                               | Required evidence                       | Status   |
+| ------- | --------------------------------------------------------- | --------------------------------------- | -------- |
+| H0      | application/config/resource scaffold and manifest         | config, registry, manifest tests        | complete |
+| H1      | REST/WebSocket client and state normalization             | client, conversion, reconnect tests     | complete |
+| H2      | durable execution, confirmation, recovery and Adapter RPC | idempotency/reconcile/restart tests     | complete |
+| H3      | durable resource and execution telemetry                  | stable ID/queue/failure-isolation tests | complete |
+| H4      | security hardening and deployment assets                  | security tests and image/compose checks | complete |
+| H5      | integration, Runtime E2E and documentation                | HA-provider tests and Runtime workflow  | complete |
+| Release | full verification, phased commits, push and Draft PR      | clean SHA and protected CI              | complete |
 
 ## Verification ledger
 
@@ -40,6 +40,8 @@ must not enter logs, snapshots, errors, results, or telemetry.
 | 2026-07-18 | `pnpm test:ha-light:e2e` with PostgreSQL    | PASS   |
 | 2026-07-18 | `pnpm audit:dependencies`                   | PASS   |
 | 2026-07-18 | `pnpm verify:v1.1` (380.5 seconds)          | PASS   |
+| 2026-07-18 | Draft PR #12 `runtime-compose` (56 seconds) | PASS   |
+| 2026-07-18 | Draft PR #12 `runtime-ci` (4m 11s)          | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.
