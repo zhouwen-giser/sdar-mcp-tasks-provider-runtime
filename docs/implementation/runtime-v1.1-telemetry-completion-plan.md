@@ -1,6 +1,6 @@
 # Runtime v1.1 Telemetry Completion ExecPlan
 
-Status: in progress
+Status: complete
 
 Base: `origin/main@43c0ced9caf560dab0d5a1427b10f385045d0847`
 
@@ -33,19 +33,19 @@ final-report repair are explicitly out of scope.
 
 ## Ordered phases
 
-| Phase | Deliverable                                               | Primary regression evidence         | Status      | Commit    |
-| ----- | --------------------------------------------------------- | ----------------------------------- | ----------- | --------- |
-| H0    | clean main baseline, red completion guards, this ExecPlan | baseline plus red suite             | complete    | `a01ae20` |
-| H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | complete    | `bc5da25` |
-| H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | complete    | `19c5442` |
-| H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | complete    | `3589e74` |
-| H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | complete    | `c3d8cbc` |
-| H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | complete    | `acd4850` |
-| H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | complete    | `5b911f0` |
-| H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | complete    | `e795267` |
-| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | complete    | `40e18d9` |
-| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | complete    | `51244b6` |
-| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | in progress | `143c711` |
+| Phase | Deliverable                                               | Primary regression evidence         | Status   | Commit               |
+| ----- | --------------------------------------------------------- | ----------------------------------- | -------- | -------------------- |
+| H0    | clean main baseline, red completion guards, this ExecPlan | baseline plus red suite             | complete | `a01ae20`            |
+| H1    | canonical envelope, event names, stable identity/time     | envelope/legacy/replay tests        | complete | `bc5da25`            |
+| H2    | durable audit capture and lease-safe publisher            | PostgreSQL retry/race tests         | complete | `19c5442`            |
+| H3    | Runtime ProviderTelemetryIngress and validation           | provider ingress/conformance tests  | complete | `3589e74`            |
+| H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | complete | `c3d8cbc`            |
+| H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | complete | `acd4850`            |
+| H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | complete | `5b911f0`            |
+| H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | complete | `e795267`            |
+| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | complete | `40e18d9`            |
+| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | complete | `51244b6`            |
+| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | complete | `143c711`, `38e9acd` |
 
 ## Verification ledger
 
@@ -78,6 +78,7 @@ final-report repair are explicitly out of scope.
 | 2026-07-18 | release evidence regeneration                        | PASS, SBOM (220 components), image, capacity and conformance reports refreshed   |
 | 2026-07-18 | `pnpm verify:v1.1` final full gate                   | PASS, 278 seconds; 71 unit, 6 contract, 188 integration, 9 recovery, 28 security |
 | 2026-07-18 | release scans                                        | PASS, no `.skip`/`.only`; legacy names only in negative guards                   |
+| 2026-07-18 | publication                                          | PASS, branch pushed and Draft PR #10 created                                     |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.
