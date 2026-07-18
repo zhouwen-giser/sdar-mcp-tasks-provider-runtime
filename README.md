@@ -42,6 +42,9 @@ Configuration and security are documented in
 incident procedures are in the [`runbook`](docs/operations/runbook.md). OTLP signal contracts,
 privacy rules and failure behavior are in
 [`provider-ops-telemetry.md`](docs/operations/provider-ops-telemetry.md).
+The signal architecture and Provider-facing gRPC contract are documented in
+[`observability.md`](docs/architecture/observability.md) and
+[`provider-telemetry-ingress.md`](docs/protocol/provider-telemetry-ingress.md).
 
 Adapter authors should begin with the
 [`quick start`](docs/adapter/quick-start.md) and dual-language expanded Adapter
@@ -51,6 +54,9 @@ semantics are summarized in [`api-reference.md`](docs/protocol/api-reference.md)
 and [`state-reason-mapping.md`](docs/implementation/state-reason-mapping.md).
 The machine reports mark Runtime Profile coverage `partial` and real-resource
 safety `not_claimed`; a Mock Adapter result is not production qualification.
+Both mock Adapters include Provider telemetry clients and examples for resource state/metric/health,
+Task-bound execution progress, and replaying the same Provider event id after an uncertain call.
+This Provider-to-Runtime service requires no Provider-side OpenTelemetry SDK.
 
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).

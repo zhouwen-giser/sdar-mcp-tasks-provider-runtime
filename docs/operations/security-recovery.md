@@ -41,3 +41,14 @@ Optional OTLP Provider Ops Telemetry uses committed facts, bounded queues and a 
 sanitizer. Raw arguments, input/answer values, Adapter payloads and authorization secrets are
 never exported; telemetry failure cannot change readiness or business state. The complete signal
 catalog is in [Provider Ops Telemetry](provider-ops-telemetry.md).
+
+When production enables OTLP, the endpoint must use HTTPS. Collector authorization headers and
+optional mTLS CA/certificate/key material are loaded from Secret-backed files, never ConfigMaps.
+Invalid or unreadable exporter files disable telemetry with a sanitized warning; business startup,
+readiness, product Outbox delivery, and durable Provider Ops capture continue. Collector failures
+leave audit records retryable and may drop only bounded best-effort diagnostics.
+
+The separate Provider telemetry ingress requires mTLS in production. Runtime authenticates the
+Provider certificate identity, validates Task/resource binding, applies event-specific payload
+allowlists, and persists an accepted fact before acknowledging it. See the
+[Provider Telemetry Ingress protocol](../protocol/provider-telemetry-ingress.md).
