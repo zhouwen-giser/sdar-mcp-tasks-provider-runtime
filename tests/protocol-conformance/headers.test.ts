@@ -14,7 +14,7 @@ describe("frozen Streamable HTTP routing headers", () => {
     ).not.toThrow();
   });
 
-  it("maps every missing or mismatched routing header to HeaderMismatch", () => {
+  it("C-041 C-042 C-043 rejects missing routing headers", () => {
     const request = parsed("tasks/get", { taskId: "task-1" });
     for (const name of [
       "accept",
@@ -27,9 +27,11 @@ describe("frozen Streamable HTTP routing headers", () => {
       candidate[name] = undefined;
       expectHeaderMismatch(() => validateFrozenHeaders(candidate, request));
     }
-    expectHeaderMismatch(() =>
-      validateFrozenHeaders({ ...headers("tasks/get", "other"), "mcp-name": "other" }, request),
-    );
+  });
+
+  it("C-044 maps a Header and Body identity mismatch to -32001 and HTTP 400", () => {
+    const request = parsed("tasks/get", { taskId: "task-1" });
+    expectHeaderMismatch(() => validateFrozenHeaders(headers("tasks/get", "other"), request));
   });
 
   it("forbids Mcp-Name on subscriptions/listen", () => {

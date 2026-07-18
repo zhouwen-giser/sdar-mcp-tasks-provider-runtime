@@ -15,7 +15,7 @@ const authorization: AuthorizationContext = {
 };
 
 describe("frozen tools/call", () => {
-  it("returns the engine's flat CreateTaskResult with parsed timing", async () => {
+  it("C-013 returns the engine's flat CreateTaskResult with parsed timing", async () => {
     const callFrozenOperation = vi.fn().mockResolvedValue({
       resultType: "task",
       taskId: "task-1",
@@ -49,7 +49,7 @@ describe("frozen tools/call", () => {
     );
   });
 
-  it("rejects task-producing tools before execution when Tasks capability is absent", async () => {
+  it("C-011 rejects task-producing tools before execution when Tasks capability is absent", async () => {
     const callFrozenOperation = vi.fn();
     const handler = new Sep2663ProtocolHandler(
       new OperationRegistry().validate(manifest("TASK_REQUIRED")),
@@ -75,6 +75,62 @@ describe("frozen tools/call", () => {
       httpStatus: 400,
       body: { error: { code: -32602 } },
     });
+  });
+
+  it("C-012 returns a synchronous complete CallToolResult", async () => {
+    const callFrozenOperation = vi.fn().mockResolvedValue({
+      resultType: "complete",
+      content: [],
+      structuredContent: { ok: true },
+      isError: false,
+    });
+    const handler = new Sep2663ProtocolHandler(
+      new OperationRegistry().validate(manifest("SYNCHRONOUS")),
+      "2.0.0-rc.1",
+      { callFrozenOperation } as unknown as TaskEngine,
+    );
+    expect(await handler.dispatchAsync(request(true), headers(), authorization)).toMatchObject({
+      body: { result: { resultType: "complete", structuredContent: { ok: true } } },
+    });
+  });
+
+  it("C-014 makes a newly created Task immediately queryable", async () => {
+    const created = { resultType: "task", taskId: "task-immediate", status: "working" };
+    const getFrozenTask = vi.fn().mockResolvedValue({ ...created, resultType: "complete" });
+    const handler = new Sep2663ProtocolHandler(
+      new OperationRegistry().validate(manifest("TASK_REQUIRED")),
+      "2.0.0-rc.1",
+      {
+        callFrozenOperation: vi.fn().mockResolvedValue(created),
+        getFrozenTask,
+      } as unknown as TaskEngine,
+    );
+    expect(await handler.dispatchAsync(request(true), headers(), authorization)).toMatchObject({
+      body: { result: { taskId: "task-immediate" } },
+    });
+    const getRequest = {
+      jsonrpc: "2.0",
+      id: "get-1",
+      method: "tasks/get",
+      params: {
+        taskId: "task-immediate",
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+          "io.modelcontextprotocol/clientInfo": { name: "sdar", version: "1.0.0" },
+          "io.modelcontextprotocol/clientCapabilities": {
+            extensions: { "io.modelcontextprotocol/tasks": {} },
+          },
+        },
+      },
+    };
+    expect(
+      await handler.dispatchAsync(
+        getRequest,
+        { ...headers(), "mcp-method": "tasks/get", "mcp-name": "task-immediate" },
+        authorization,
+      ),
+    ).toMatchObject({ body: { result: { taskId: "task-immediate" } } });
+    expect(getFrozenTask).toHaveBeenCalledOnce();
   });
 });
 

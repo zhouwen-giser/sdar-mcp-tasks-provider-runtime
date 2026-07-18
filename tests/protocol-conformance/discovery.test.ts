@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { frozenDiscoveryResult } from "../../packages/mcp-protocol/src/index.js";
 
 describe("frozen server discovery", () => {
-  it("publishes the fixed version, Tasks Extension and mandatory notifications", () => {
+  it("C-004 C-005 publishes the fixed version, Tasks Extension and mandatory notifications", () => {
     expect(frozenDiscoveryResult("2.0.0-rc.1")).toEqual({
       resultType: "complete",
       supportedVersions: ["2026-07-28"],

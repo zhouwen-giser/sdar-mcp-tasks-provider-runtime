@@ -6,16 +6,14 @@ import {
 } from "../../packages/mcp-protocol/src/index.js";
 
 describe("frozen request meta", () => {
-  it("requires protocolVersion, clientInfo and clientCapabilities on every request", () => {
-    for (const missing of [
-      "io.modelcontextprotocol/protocolVersion",
-      "io.modelcontextprotocol/clientInfo",
-      "io.modelcontextprotocol/clientCapabilities",
-    ]) {
-      const request = validRequest();
-      request.params._meta[missing] = undefined;
-      expectFrozenCode(() => validateFrozenRequest(request), FrozenErrorCode.InvalidParams);
-    }
+  it.each([
+    ["C-007", "io.modelcontextprotocol/protocolVersion"],
+    ["C-009 C-066", "io.modelcontextprotocol/clientInfo"],
+    ["C-008", "io.modelcontextprotocol/clientCapabilities"],
+  ])("%s rejects a request missing %s", (_caseId, missing) => {
+    const request = validRequest();
+    request.params._meta[missing] = undefined;
+    expectFrozenCode(() => validateFrozenRequest(request), FrozenErrorCode.InvalidParams);
   });
 
   it("rejects a non-frozen protocol version", () => {
@@ -27,7 +25,7 @@ describe("frozen request meta", () => {
     );
   });
 
-  it("requires the Tasks Extension for relevant requests", () => {
+  it("C-010 C-011 requires the Tasks Extension for relevant requests", () => {
     const parsed = validateFrozenRequest(validRequest());
     expect(() => requireTasksCapability(parsed)).not.toThrow();
 

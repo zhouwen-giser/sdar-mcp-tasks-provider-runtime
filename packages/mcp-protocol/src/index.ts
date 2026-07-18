@@ -3,6 +3,7 @@ export * from "./legacy/handler.js";
 export * from "./protocol-router.js";
 export * from "./sep2663/discovery.js";
 export * from "./sep2663/availability.js";
+export * from "./sep2663/consumer-validation.js";
 export * from "./sep2663/tasks.js";
 export * from "./sep2663/notifications.js";
 export * from "./sep2663/tools-call.js";

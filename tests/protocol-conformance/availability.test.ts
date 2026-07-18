@@ -3,6 +3,10 @@ import {
   parseFrozenAvailability,
   validateFrozenRequest,
 } from "../../packages/mcp-protocol/src/index.js";
+import {
+  validateAvailabilityResponse,
+  type AvailabilityCheck,
+} from "../../packages/domain/src/index.js";
 
 describe("frozen Availability envelope", () => {
   it("parses complete and partial arguments with RFC 6901 pointers", () => {
@@ -69,6 +73,27 @@ describe("frozen Availability envelope", () => {
     ]) {
       expect(() => parseFrozenAvailability(validateFrozenRequest(request(checks)))).toThrow();
     }
+  });
+
+  it("C-073 rejects restricted Availability without a valid time hint", () => {
+    const requested: AvailabilityCheck[] = [
+      {
+        requestId: "restricted",
+        operationName: "op",
+        arguments: { state: "complete", value: {} },
+      },
+    ];
+    expect(() =>
+      validateAvailabilityResponse(new Date("2026-07-18T03:00:00.000Z"), requested, [
+        {
+          requestId: "restricted",
+          operationName: "op",
+          availability: "restricted",
+          riskLevel: "high",
+          validUntil: "2026-07-18T03:10:00.000Z",
+        },
+      ]),
+    ).toThrow("RESTRICTED_AVAILABILITY_FIELDS_MISSING");
   });
 });
 

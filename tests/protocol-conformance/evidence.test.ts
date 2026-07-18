@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { ExecutionSnapshot } from "../../packages/adapter-protocol/src/index.js";
-import { attachEvidenceToResult } from "../../packages/task-engine/src/result-contract.js";
+import {
+  jsonToProtoStruct,
+  type ExecutionSnapshot,
+  type ProviderManifest,
+} from "../../packages/adapter-protocol/src/index.js";
+import {
+  attachEvidenceToResult,
+  synchronousResult,
+  validatedSnapshotTransition,
+} from "../../packages/task-engine/src/result-contract.js";
+import { OperationRegistry } from "../../packages/operation-registry/src/index.js";
 
 describe("frozen type-only Evidence", () => {
   it("maps validated Adapter Evidence without requirementId", () => {
@@ -74,8 +83,61 @@ describe("frozen type-only Evidence", () => {
   ])("rejects invalid Evidence contracts", (items, code) => {
     expect(() => attachEvidenceToResult({}, snapshot(items), {})).toThrow(code);
   });
+
+  it("C-040 gives synchronous and asynchronous completion the same Evidence shape", () => {
+    const operation = new OperationRegistry().validate(evidenceManifest()).operations[0];
+    if (operation === undefined) throw new Error("missing test operation");
+    const adapterSnapshot = {
+      state: "SUCCEEDED",
+      result: jsonToProtoStruct({ finalPosition: { x: 1, y: 2 } }),
+      evidence: [
+        {
+          evidenceId: "position-1",
+          evidenceType: "position.observation",
+          observedAt: "2026-07-18T03:12:00.000Z",
+          payloadRef: { kind: "structured_content", jsonPointer: "/finalPosition" },
+        },
+      ],
+    } as ExecutionSnapshot;
+    expect(synchronousResult(operation, adapterSnapshot)).toEqual(
+      validatedSnapshotTransition(operation, adapterSnapshot).result,
+    );
+  });
 });
 
 function snapshot(evidence: unknown[]): ExecutionSnapshot {
   return { evidence } as unknown as ExecutionSnapshot;
+}
+
+function evidenceManifest(): ProviderManifest {
+  return {
+    adapterProtocolVersion: "1.0",
+    providerId: "evidence-provider",
+    providerType: "test",
+    providerVersion: "1.0.0",
+    inventoryMode: "OPAQUE",
+    operations: [
+      {
+        name: "evidence.read",
+        description: "Read Evidence",
+        execution: "SYNCHRONOUS",
+        inputSchema: jsonToProtoStruct({ type: "object" }),
+        outputSchema: jsonToProtoStruct({
+          type: "object",
+          properties: { finalPosition: { type: "object" } },
+          required: ["finalPosition"],
+        }),
+        capabilities: {
+          availability: false,
+          scheduling: false,
+          maxElapsed: false,
+          cancel: false,
+          pauseResume: false,
+          inputRequired: false,
+          idempotency: true,
+          observations: false,
+        },
+      },
+    ],
+  };
 }

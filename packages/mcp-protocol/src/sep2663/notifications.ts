@@ -11,6 +11,7 @@ export interface TaskNotificationStreamOptions {
 
 export class TaskNotificationStream {
   readonly #pollIntervalMs: number;
+  readonly #subscriptions = new Map<string, AbortController>();
 
   constructor(
     readonly taskEngine: Pick<TaskEngine, "getFrozenTask">,
@@ -24,6 +25,10 @@ export class TaskNotificationStream {
     response: ServerResponse,
     authorization: AuthorizationContext,
   ): Promise<void> {
+    const subscriptionId = String(request.id);
+    if (this.#subscriptions.has(subscriptionId)) throw invalidParams();
+    const cancellation = new AbortController();
+    this.#subscriptions.set(subscriptionId, cancellation);
     const requestedTaskIds = parseTaskIds(request.params);
     const current = new Map<string, Record<string, unknown>>();
     for (const taskId of requestedTaskIds) {
@@ -38,16 +43,23 @@ export class TaskNotificationStream {
     response.setHeader("connection", "keep-alive");
     response.flushHeaders();
 
-    if (!writeFrame(response, acknowledged(request.id, acceptedTaskIds))) return;
-    const revisions = new Map<string, string>();
+    if (!writeFrame(response, acknowledged(request.id, acceptedTaskIds))) {
+      this.#subscriptions.delete(subscriptionId);
+      return;
+    }
+    const revisions = new Map<string, NotificationState>();
     for (const taskId of acceptedTaskIds) {
       const snapshot = current.get(taskId);
       if (snapshot === undefined) continue;
       const revision = runtimeRevision(snapshot);
-      revisions.set(taskId, revision);
-      if (!writeFrame(response, taskNotification(request.id, snapshot))) return;
+      revisions.set(taskId, notificationState(snapshot, revision));
+      if (!writeFrame(response, taskNotification(request.id, snapshot))) {
+        this.#subscriptions.delete(subscriptionId);
+        return;
+      }
     }
     if (acceptedTaskIds.length === 0) {
+      this.#subscriptions.delete(subscriptionId);
       response.end();
       return;
     }
@@ -59,7 +71,13 @@ export class TaskNotificationStream {
         if (closed) return;
         closed = true;
         clearInterval(timer);
+        cancellation.signal.removeEventListener("abort", cancel);
+        this.#subscriptions.delete(subscriptionId);
         resolve();
+      };
+      const cancel = (): void => {
+        response.end();
+        close();
       };
       const timer = setInterval(() => {
         if (polling || closed) return;
@@ -82,13 +100,43 @@ export class TaskNotificationStream {
       timer.unref();
       response.once("close", close);
       response.once("error", close);
+      cancellation.signal.addEventListener("abort", cancel, { once: true });
     });
+  }
+
+  cancel(requestId: string | number): boolean {
+    const subscription = this.#subscriptions.get(String(requestId));
+    if (subscription === undefined) return false;
+    subscription.abort();
+    return true;
+  }
+
+  handleCancelledNotification(value: unknown): boolean {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw invalidParams();
+    }
+    const notification = value as Record<string, unknown>;
+    if (notification.jsonrpc !== "2.0" || notification.method !== "notifications/cancelled") {
+      throw invalidParams();
+    }
+    const params = notification.params;
+    if (typeof params !== "object" || params === null || Array.isArray(params)) {
+      throw invalidParams();
+    }
+    const record = params as Record<string, unknown>;
+    if (
+      Object.keys(record).length !== 1 ||
+      (typeof record.requestId !== "string" && !Number.isInteger(record.requestId))
+    ) {
+      throw invalidParams();
+    }
+    return this.cancel(record.requestId as string | number);
   }
 
   async #poll(
     subscriptionId: string | number,
     taskIds: readonly string[],
-    revisions: Map<string, string>,
+    revisions: Map<string, NotificationState>,
     response: ServerResponse,
     authorization: AuthorizationContext,
   ): Promise<boolean> {
@@ -97,11 +145,20 @@ export class TaskNotificationStream {
       if (snapshot === undefined) continue;
       const revision = runtimeRevision(snapshot);
       const previous = revisions.get(taskId);
-      if (previous !== undefined && BigInt(revision) < BigInt(previous)) {
+      if (previous !== undefined && BigInt(revision) < BigInt(previous.revision)) {
         throw new Error("TASK_NOTIFICATION_REVISION_REGRESSION");
       }
-      if (previous === revision) continue;
-      revisions.set(taskId, revision);
+      const next = notificationState(snapshot, revision);
+      if (previous?.revision === revision) {
+        if (previous.signature !== next.signature) {
+          throw new Error("TASK_NOTIFICATION_REVISION_CONFLICT");
+        }
+        continue;
+      }
+      if (previous?.terminal === true && !next.terminal) {
+        throw new Error("TASK_NOTIFICATION_TERMINAL_REGRESSION");
+      }
+      revisions.set(taskId, next);
       if (!writeFrame(response, taskNotification(subscriptionId, snapshot))) return false;
     }
     return true;
@@ -123,6 +180,20 @@ export class TaskNotificationStream {
       throw error;
     }
   }
+}
+
+interface NotificationState {
+  revision: string;
+  signature: string;
+  terminal: boolean;
+}
+
+function notificationState(snapshot: Record<string, unknown>, revision: string): NotificationState {
+  return {
+    revision,
+    signature: JSON.stringify(snapshot),
+    terminal: new Set(["completed", "failed", "cancelled"]).has(String(snapshot.status)),
+  };
 }
 
 function parseTaskIds(params: Record<string, unknown>): string[] {

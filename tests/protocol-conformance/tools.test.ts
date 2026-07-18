@@ -5,7 +5,7 @@ import { Sep2663ProtocolHandler } from "../../packages/mcp-protocol/src/index.js
 import { OperationRegistry } from "../../packages/operation-registry/src/index.js";
 
 describe("frozen tools/list", () => {
-  it("publishes taskBehavior and no legacy execution fields", () => {
+  it("C-001 discovers embodied.move exactly and publishes taskBehavior without legacy fields", () => {
     const handler = new Sep2663ProtocolHandler(
       new OperationRegistry().validate(manifest("embodied.move", "TASK_REQUIRED")),
     );
@@ -34,7 +34,19 @@ describe("frozen tools/list", () => {
     expect(serialized).not.toContain('"supportsIdempotency"');
   });
 
-  it("returns frozen Method not found for legacy task methods", () => {
+  it.each([
+    ["C-002", "vehicle.move.precisely"],
+    ["C-003", "vehicle/patrol"],
+  ])("%s preserves an exact valid Tool name", (_caseId, name) => {
+    const handler = new Sep2663ProtocolHandler(
+      new OperationRegistry().validate(manifest(name, "SYNCHRONOUS")),
+    );
+    expect(handler.dispatch(request("tools/list"), headers("tools/list"))).toMatchObject({
+      body: { result: { tools: [{ name }] } },
+    });
+  });
+
+  it("C-036 C-037 reserves tasks/observations and detects legacy experimental methods", () => {
     const handler = new Sep2663ProtocolHandler(
       new OperationRegistry().validate(manifest("vehicle/patrol", "SYNCHRONOUS")),
     );

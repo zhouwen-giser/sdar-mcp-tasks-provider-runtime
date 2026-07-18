@@ -22,7 +22,7 @@ describe("frozen protocol baseline", () => {
     );
   });
 
-  it("preserves the pinned MCP schema blob and SHA-256", () => {
+  it("C-006 rejects drift from the pinned MCP source commit, blob and SHA-256", () => {
     const bytes = readFileSync(upstreamSchemaPath);
     const gitHeader = Buffer.from(`blob ${String(bytes.length)}\0`, "utf8");
     const blob = createHash("sha1").update(gitHeader).update(bytes).digest("hex");

@@ -129,7 +129,7 @@ describe("durable task lifecycle", () => {
     });
   });
 
-  it("publishes before returning, maps working to completed, and survives engine restart", async () => {
+  it("C-038 C-039 publishes before returning and remains queryable across Runtime/SDAR restart", async () => {
     const operation = requiredOperation("durable_task");
     const created = await engine.callOperation(
       operation,
@@ -335,6 +335,67 @@ describe("durable task lifecycle", () => {
       taskId,
       _meta: { "io.sdar/taskExecution": { runtimeRevision: "1" } },
     });
+  });
+
+  it("C-019 ignores an unknown frozen input response key", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-input-unknown", scenario: "input_required_frozen" },
+      authorization,
+    );
+    const taskId = String(created.taskId);
+    await engine.updateTaskInputResponses(
+      taskId,
+      { unknown: { action: "accept", content: true } },
+      authorization,
+    );
+    const commands = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='UPDATE'",
+      [taskId],
+    );
+    expect(commands.rows[0]?.count).toBe("0");
+  });
+
+  it("C-020 accepts an identical repeat of an answered frozen input key", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-input-repeat", scenario: "input_required_frozen" },
+      authorization,
+    );
+    const taskId = String(created.taskId);
+    const response = { approval: { action: "accept" as const, content: true } };
+    await engine.updateTaskInputResponses(taskId, response, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expect(
+      engine.updateTaskInputResponses(taskId, response, authorization),
+    ).resolves.toBeUndefined();
+    const commands = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='UPDATE'",
+      [taskId],
+    );
+    expect(commands.rows[0]?.count).toBe("1");
+  });
+
+  it("C-021 detects reuse of an answered frozen input key with different content", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-input-conflict", scenario: "input_required_frozen" },
+      authorization,
+    );
+    const taskId = String(created.taskId);
+    await engine.updateTaskInputResponses(
+      taskId,
+      { approval: { action: "accept", content: true } },
+      authorization,
+    );
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expect(
+      engine.updateTaskInputResponses(
+        taskId,
+        { approval: { action: "accept", content: false } },
+        authorization,
+      ),
+    ).rejects.toMatchObject({ reasonCode: "INPUT_RESPONSE_CONFLICT" });
   });
 
   it("returns an inline result for terminal task-capable admission", async () => {
@@ -3045,7 +3106,7 @@ describe("durable task lifecycle", () => {
     ]);
   });
 
-  it("keeps cancellation Ack-only, idempotent, and preserves natural completion races", async () => {
+  it("C-023 C-024 C-025 keeps cancel Ack-only and preserves cancelled/completed outcomes", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "resource-cancel" },

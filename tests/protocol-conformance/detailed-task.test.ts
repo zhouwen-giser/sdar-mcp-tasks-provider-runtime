@@ -3,7 +3,7 @@ import type { TaskRecord } from "../../packages/domain/src/index.js";
 import { mapTaskToDetailedTask } from "../../packages/task-engine/src/index.js";
 
 describe("frozen DetailedTask projection", () => {
-  it("uses flat result types, true handle TTL, and the Runtime revision", () => {
+  it("C-013 C-016 C-027 C-029 C-070 uses flat results, true TTL and one Runtime revision", () => {
     const task = fixture({
       mcpStatus: "completed",
       result: { content: [], structuredContent: { ok: true }, isError: false },
@@ -28,7 +28,7 @@ describe("frozen DetailedTask projection", () => {
     expect(mapTaskToDetailedTask(task)).not.toHaveProperty("resultType");
   });
 
-  it("maps open MRTR requests by stable request key", () => {
+  it("C-017 maps input_required with open MRTR requests by stable request key", () => {
     const task = fixture({ mcpStatus: "input_required" });
     expect(
       mapTaskToDetailedTask(
@@ -86,10 +86,39 @@ describe("frozen DetailedTask projection", () => {
     });
   });
 
-  it("uses null TTL when the handle has no expiry", () => {
+  it("C-026 uses null TTL when the handle has no expiry", () => {
     expect(mapTaskToDetailedTask(fixture({ handleExpiresAt: null }), [], "get")).toMatchObject({
       ttlMs: null,
     });
+  });
+
+  it("C-028 projects a dynamic pollIntervalMs", () => {
+    expect(mapTaskToDetailedTask(fixture({ pollIntervalMs: 2_500 }), [], "get")).toMatchObject({
+      pollIntervalMs: 2_500,
+    });
+  });
+
+  it.each([
+    ["C-030", true],
+    ["C-029", false],
+  ])("%s preserves completed isError=%s", (_caseId, isError) => {
+    expect(
+      mapTaskToDetailedTask(
+        fixture({ mcpStatus: "completed", result: { structuredContent: {}, isError } }),
+        [],
+        "get",
+      ),
+    ).toMatchObject({ status: "completed", result: { isError } });
+  });
+
+  it("C-031 projects failed as a JSON-RPC Error", () => {
+    expect(
+      mapTaskToDetailedTask(
+        fixture({ mcpStatus: "failed", error: { code: -32603, message: "Execution failed" } }),
+        [],
+        "get",
+      ),
+    ).toMatchObject({ status: "failed", error: { code: -32603 } });
   });
 });
 

@@ -15,7 +15,7 @@ const authorization: AuthorizationContext = {
 };
 
 describe("frozen Task acknowledgements", () => {
-  it("returns empty complete acknowledgements for update and cooperative cancel", async () => {
+  it("C-022 returns empty complete acknowledgements for update and cooperative cancel", async () => {
     const updateTaskInputResponses = vi.fn().mockResolvedValue(undefined);
     const cancelTaskCooperatively = vi.fn().mockResolvedValue(undefined);
     const handler = new Sep2663ProtocolHandler(
@@ -51,7 +51,7 @@ describe("frozen Task acknowledgements", () => {
     expect(cancelTaskCooperatively).toHaveBeenCalledOnce();
   });
 
-  it("requires the Tasks capability", async () => {
+  it("C-046 requires the Tasks capability", async () => {
     const handler = new Sep2663ProtocolHandler(
       new OperationRegistry().validate(manifest()),
       "2.0.0-rc.1",
