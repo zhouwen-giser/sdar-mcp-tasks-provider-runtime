@@ -1,6 +1,6 @@
 # Home Assistant Climate Provider ExecPlan
 
-Status: in progress
+Status: complete
 
 Base: `origin/main` at `d16cc55f3459148c86959db13427c26e45ace95f`
 
@@ -37,7 +37,7 @@ vendor protocols, pause/resume, and cancellation after dispatch are out of scope
 | C2      | durable execution, confirmation and recovery        | integration/recovery tests | complete |
 | C3      | durable Provider telemetry and security             | telemetry/security tests   | complete |
 | C4      | Fake HA, Runtime E2E, image, Compose and docs       | E2E/deployment checks      | complete |
-| Release | full repository verification and phased commits     | `pnpm verify:v1.1`         | pending  |
+| Release | full repository verification and phased commits     | `pnpm verify:v1.1`         | complete |
 
 ## Verification ledger
 
@@ -47,3 +47,4 @@ vendor protocols, pause/resume, and cancellation after dispatch are out of scope
 | 2026-07-18 | TypeScript and ESLint                       | PASS   |
 | 2026-07-18 | focused suite (4 files, 7 tests)            | PASS   |
 | 2026-07-18 | Runtime/PostgreSQL climate E2E              | PASS   |
+| 2026-07-18 | `pnpm verify:v1.1` (343.1 seconds)          | PASS   |
