@@ -64,7 +64,6 @@ const results = catalog.cases.map((entry) => {
 const passed = results.filter((entry) => entry.status === "passed").length;
 const report = {
   schemaVersion: 1,
-  generatedAt: new Date().toISOString(),
   protocolVersion: "2026-07-28",
   frozenContractSha256: "d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845",
   sourceCommit: "26897cc322f356487da89113451bd16b520b9288",
