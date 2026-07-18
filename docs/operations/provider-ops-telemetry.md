@@ -47,9 +47,9 @@ transition/Outbox facts, never from API-handler intent. A rollback emits no life
 | `provider.task.lifecycle`     | committed Task transition Outbox facts | queued/running/waiting/paused/resuming/stopping/terminal/expired        |
 | `provider.command.lifecycle`  | Durable Command Dispatcher facts       | created/claimed/retry/ack/reject/exhaust/supersede                      |
 | `adapter.rpc`                 | real gRPC Adapter boundary             | method, provider, safe identities, duration, status; never RPC payloads |
-| `provider.scheduler_decision` | Durable Scheduler results              | scheduled/claimed/started/retry/deadline/start-window miss              |
-| `provider.recovery_event`     | Recovery Manager results               | reconcile start/success/failure and lease conflict                      |
-| `provider.ttl_event`          | TTL Cleaner committed results          | renew/expire/purge/blocked                                              |
+| `provider.scheduler.decision` | Durable Scheduler results              | scheduled/claimed/started/retry/deadline/start-window miss              |
+| `provider.recovery.lifecycle` | Recovery Manager results               | per-Task reconcile success/failure                                      |
+| `provider.ttl.lifecycle`      | TTL Cleaner committed results          | per-Task expire/purge/blocked                                           |
 
 Lifecycle payloads include previous/current state and substate, reason, Observation and Adapter
 revisions, terminal flag, and result class. Command payloads include command type/sequence,
@@ -81,10 +81,18 @@ valid and include the persisted Task trace id as a link attribute.
 
 ## Privacy and failure behavior
 
-The sanitizer recursively removes passwords, tokens, authorization/JWT material, raw arguments,
-input/answer values, and Adapter payloads before export. `argumentHash`,
+The sanitizer recursively removes passwords, secrets, API keys, cookies, tokens,
+authorization/JWT material, raw arguments, input/answer values, and Adapter payloads before
+export. It applies depth, node, per-string, and total-byte budgets to objects, arrays, maps, and
+sets; cycles and exceeded limits become stable redaction/truncation markers. `argumentHash`,
 `authorizationContextHash`, `simulationId`, and `executionMode` are allowed where the event
 contract requires them. Adapter spans never contain request or response bodies.
+
+Provider event payloads use event-specific allowlists. `resource.state` accepts `state`,
+`reasonCode`, and bounded `attributes`; `resource.metric` accepts `metricName`, `value`, `unit`, and
+`quality`; `resource.health` accepts `health` and `reasonCode`; `execution.progress` accepts
+`current`, `total`, `percentage`, and `unit`. Unknown payload fields are dropped before durable
+persistence.
 
 Diagnostic processors use bounded queues, batches, and export timeouts. Audit facts use the durable
 delivery table, lease-safe claims, bounded backoff, and exporter acknowledgement before marking a

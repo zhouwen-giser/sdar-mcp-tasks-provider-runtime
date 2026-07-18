@@ -289,7 +289,10 @@ export class ProviderTelemetry {
       } catch (error) {
         try {
           span.setStatus({ code: SpanStatusCode.ERROR });
-          span.setAttribute("error.type", error instanceof Error ? error.name : "unknown");
+          const safe = safeTraceError(error);
+          span.setAttribute("error.type", safe.type);
+          span.setAttribute("error.reason_code", safe.reasonCode);
+          span.setAttribute("error.retryable", safe.retryable);
         } catch {
           // Raw exception content is never exported.
         }
@@ -412,6 +415,31 @@ export class ProviderTelemetry {
       // Instrumentation must never alter Runtime state or readiness.
     }
   }
+}
+
+function safeTraceError(error: unknown): {
+  type: string;
+  reasonCode: string;
+  retryable: boolean;
+} {
+  const knownTypes = new Set([
+    "Error",
+    "TypeError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "AggregateError",
+  ]);
+  const record =
+    typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+  const name = error instanceof Error && knownTypes.has(error.name) ? error.name : "Error";
+  const reason = record.reasonCode;
+  return {
+    type: name,
+    reasonCode:
+      typeof reason === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(reason) ? reason : "UNKNOWN",
+    retryable: record.retryable === true,
+  };
 }
 
 function batchOptions(options: ProviderTelemetryBatchOptions | undefined) {

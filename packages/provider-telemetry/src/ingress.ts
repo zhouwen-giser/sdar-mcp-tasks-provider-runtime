@@ -44,7 +44,7 @@ export interface ProviderTelemetryIngressOptions {
 
 export class ProviderTelemetryIngress {
   readonly #taskRepository: TaskRepository;
-  readonly #sanitizer = new TelemetrySanitizer();
+  readonly #sanitizer: TelemetrySanitizer;
   readonly #windows = new Map<string, { startedAt: number; count: number }>();
 
   constructor(
@@ -52,6 +52,13 @@ export class ProviderTelemetryIngress {
     readonly options: ProviderTelemetryIngressOptions,
   ) {
     this.#taskRepository = new TaskRepository(pool);
+    const maxEventBytes = options.maxEventBytes ?? 65_536;
+    this.#sanitizer = new TelemetrySanitizer({
+      maxDepth: options.maxDepth ?? 16,
+      maxNodes: options.maxNodes ?? 4_096,
+      maxStringBytes: Math.min(4_096, maxEventBytes),
+      maxTotalBytes: maxEventBytes,
+    });
   }
 
   async emit(
@@ -103,7 +110,11 @@ export class ProviderTelemetryIngress {
     }
     const eventCategory = eventCategoryFor(event.eventType as ProviderTelemetryEventType);
     const sanitizedAttributes = this.#sanitizer.sanitize(event.attributes) as CanonicalJsonValue;
-    const sanitizedPayload = this.#sanitizer.sanitize(event.payload) as CanonicalJsonValue;
+    const sanitizedPayload = sanitizeProviderPayload(
+      event.eventType as ProviderTelemetryEventType,
+      event.payload,
+      this.#sanitizer,
+    ) as CanonicalJsonValue;
     const authoritativeExternalExecutionId = task?.externalExecutionId;
     const authoritativeSimulationId = task?.simulationId;
     const providerTrace = contextFromTraceparent(event.traceparent);
@@ -321,6 +332,26 @@ function eventCategoryFor(type: ProviderTelemetryEventType): string {
   return type.toLowerCase().replaceAll("_", ".");
 }
 
+function sanitizeProviderPayload(
+  eventType: ProviderTelemetryEventType,
+  payload: Record<string, unknown>,
+  sanitizer: TelemetrySanitizer,
+): Record<string, unknown> {
+  const allowedFields: Record<ProviderTelemetryEventType, readonly string[]> = {
+    RESOURCE_STATE: ["state", "reasonCode", "attributes"],
+    RESOURCE_METRIC: ["metricName", "value", "unit", "quality"],
+    RESOURCE_HEALTH: ["health", "reasonCode"],
+    EXECUTION_PROGRESS: ["current", "total", "percentage", "unit"],
+  };
+  const selected = Object.fromEntries(
+    allowedFields[eventType]
+      .filter((key) => Object.hasOwn(payload, key))
+      .map((key) => [key, payload[key]]),
+  );
+  const sanitized = sanitizer.sanitize(selected);
+  return isRecord(sanitized) ? sanitized : {};
+}
+
 function timestampToDate(timestamp: ProviderTelemetryEventInput["occurredAt"]): Date {
   if (timestamp === undefined || timestamp === null) return new Date(Number.NaN);
   return new Date(Number(timestamp.seconds) * 1_000 + Math.floor(timestamp.nanos / 1_000_000));
@@ -436,4 +467,8 @@ function serviceError(error: unknown): grpc.ServiceError {
 function safeErrorName(error: unknown): string {
   const name = error instanceof Error ? error.name : "unknown";
   return createHash("sha256").update(name).digest("hex").slice(0, 16);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

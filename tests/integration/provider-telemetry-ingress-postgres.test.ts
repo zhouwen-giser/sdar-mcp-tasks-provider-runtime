@@ -160,6 +160,24 @@ describe("Runtime ProviderTelemetryIngress", () => {
     expect(stored.rows[0]?.body).toContain("ready");
   });
 
+  it("provider_event_unknown_fields_are_removed", async () => {
+    const input = event("RESOURCE_STATE", {
+      payload: {
+        state: "ready",
+        reasonCode: "HEALTHY",
+        unknown: "must-not-cross-boundary",
+        nestedUnknown: { value: "also-removed" },
+      },
+    });
+    expect(await emit(new ProviderTelemetryIngress(pool, options), input)).toMatchObject({
+      accepted: true,
+    });
+    const stored = await pool.query<{ payload: Record<string, unknown> }>(
+      "SELECT record_body->'payload' AS payload FROM provider_ops_delivery",
+    );
+    expect(stored.rows[0]?.payload).toEqual({ state: "ready", reasonCode: "HEALTHY" });
+  });
+
   it("oversized_provider_event_is_rejected", async () => {
     const ingress = new ProviderTelemetryIngress(pool, { ...options, maxEventBytes: 512 });
     expect(

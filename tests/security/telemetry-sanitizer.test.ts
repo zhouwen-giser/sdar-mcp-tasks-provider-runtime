@@ -4,6 +4,39 @@ import { describe, expect, it } from "vitest";
 import { ProviderTelemetry, TelemetrySanitizer } from "../../packages/observability/src/index.js";
 
 describe("TelemetrySanitizer", () => {
+  it("api_key_in_free_text_is_redacted", () => {
+    const output = String(
+      new TelemetrySanitizer().sanitize("url=https://host/?api_key=classified&mode=read"),
+    );
+    expect(output).not.toContain("classified");
+    expect(output).toContain("api_key=[REDACTED]");
+  });
+
+  it("cookie_is_redacted", () => {
+    const output = String(
+      new TelemetrySanitizer().sanitize("Cookie: session=classified; set-cookie=also-secret"),
+    );
+    expect(output).not.toMatch(/classified|also-secret/);
+  });
+
+  it("circular_array_does_not_overflow", () => {
+    const circular: unknown[] = [];
+    circular.push(circular);
+    expect(new TelemetrySanitizer().sanitize(circular)).toEqual(["[REDACTED_CIRCULAR]"]);
+  });
+
+  it("deep_payload_is_truncated", () => {
+    expect(
+      new TelemetrySanitizer({ maxDepth: 2 }).sanitize({ one: { two: { three: "value" } } }),
+    ).toEqual({ one: { two: { three: "[TRUNCATED]" } } });
+  });
+
+  it("oversized_string_is_truncated", () => {
+    expect(new TelemetrySanitizer({ maxStringBytes: 32 }).sanitize("x".repeat(1_000))).toContain(
+      "[TRUNCATED]",
+    );
+  });
+
   it("removes secrets and raw arguments while retaining approved hashes and execution context", () => {
     const sanitized = new TelemetrySanitizer().sanitize({
       password: "classified-password",
