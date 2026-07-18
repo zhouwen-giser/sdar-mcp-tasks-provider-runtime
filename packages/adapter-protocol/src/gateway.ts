@@ -8,6 +8,7 @@ import type {
   CheckAvailabilityResponse,
   CommandAck,
   ExecutionSnapshot,
+  McpTaskInputResponse,
   ProviderManifest,
   ReconcileExecutionResponse,
   StartOperationResponse,
@@ -71,6 +72,7 @@ export interface StartOperationOptions {
   correlationId?: string;
   rootTraceparent?: string;
   rootTracestate?: string;
+  reservationRef?: string;
 }
 
 export class GrpcAdapterGateway {
@@ -225,6 +227,40 @@ export class GrpcAdapterGateway {
     );
   }
 
+  updateMcpTaskExecution(
+    identity: {
+      taskId: string;
+      operationName: string;
+      argumentHash: string;
+      commandSequence: number;
+    },
+    inputResponses: McpTaskInputResponse[],
+    options: StartOperationOptions = {},
+  ): Promise<CommandAck> {
+    return this.#unary<CommandAck>(
+      "updateExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        identity: {
+          ...identity,
+          externalExecutionId: options.externalExecutionId ?? "",
+          executionContext: this.#executionContext(options),
+        },
+        inputResponses: inputResponses.map((response) => ({
+          key: response.key,
+          result: jsonToProtoStruct(response.result),
+        })),
+      },
+      rpcContext(
+        identity.taskId,
+        options.externalExecutionId,
+        identity.commandSequence,
+        identity.operationName,
+        options,
+      ),
+    );
+  }
+
   pauseExecution(
     identity: {
       taskId: string;
@@ -304,6 +340,7 @@ export class GrpcAdapterGateway {
         argumentHash:
           options.argumentHash ?? createHash("sha256").update(canonicalArguments).digest("hex"),
         invocationAttempt: options.invocationAttempt ?? 1,
+        reservationRef: options.reservationRef,
       },
       rpcContext(taskId, options.externalExecutionId, undefined, operationName, options),
     );

@@ -2,9 +2,10 @@
 
 An independently deployable, language-neutral Runtime for the SEP-2663 task lifecycle and the `io.sdar/taskExecution` Provider Profile. The Runtime is implemented in strict TypeScript and delegates resource facts and side effects to versioned gRPC/Protobuf Adapters.
 
-The current release is `v1.1.0`, adding fail-safe Provider Ops Telemetry without changing Runtime
-business semantics. Its live plan is
-[`runtime-v1.1-telemetry-exec-plan.md`](docs/implementation/runtime-v1.1-telemetry-exec-plan.md).
+The current development target is `v2.0.0-rc.1`, migrating the primary `/mcp` endpoint to the
+frozen SDAR MCP Tasks Unified Protocol Profile V1.0 while retaining the `1.1.0` Provider Ops Wire
+Schema. Its live plan is
+[`frozen-protocol-v1-exec-plan.md`](docs/implementation/frozen-protocol-v1-exec-plan.md).
 Published `v1.0.0-rc.2` and `v1.0.0-rc.3` migrations, reports, tags, and release history remain
 immutable.
 
@@ -43,7 +44,7 @@ readiness. The reference Adapter state and PostgreSQL data use named volumes.
 For a release gate with PostgreSQL and Docker available, run:
 
 ```bash
-TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify:rc3
+TEST_DATABASE_URL=postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime_test pnpm verify:v2
 ```
 
 Configuration and security are documented in
@@ -70,7 +71,8 @@ This Provider-to-Runtime service requires no Provider-side OpenTelemetry SDK.
 
 Production Kubernetes JSON manifests are under [`deploy/kubernetes`](deploy/kubernetes),
 with migration/upgrade instructions in [`docs/database/upgrade.md`](docs/database/upgrade.md).
-Root commands in `package.json` expose every release gate; `pnpm verify:v1.1` includes
+Root commands in `package.json` expose every release gate; `pnpm verify:v2` includes the frozen
+contract/hash checks, the numbered 74-case report, and the existing
 formatting, lint, types, build/Proto drift, audit/SBOM, deployment/container,
 unit/contract/integration/recovery/security/E2E/conformance, the six rc.1 red-regression guards,
 and the rc.3 capacity checks. CI additionally runs Buf lint/breaking against the immutable rc.1

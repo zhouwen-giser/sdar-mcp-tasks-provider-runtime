@@ -40,8 +40,38 @@ describe("Operation Registry", () => {
     expect(first.manifestHash).toBe(second.manifestHash);
     expect(first.operations[0]?.tool.name).toBe("echo_sync");
     expect(first.operations[0]?.tool._meta).toMatchObject({
-      "io.sdar/taskExecution": { execution: "synchronous", supportsScheduling: false },
+      "io.sdar/taskExecution": {
+        profileVersion: "1.0",
+        taskBehavior: "synchronous_only",
+        supportsScheduling: false,
+        idempotency: "server_managed",
+      },
     });
+    expect(first.operations[0]?.tool._meta).not.toHaveProperty("io.sdar/taskExecution.execution");
+    expect(first.operations[0]?.tool._meta).not.toHaveProperty(
+      "io.sdar/taskExecution.supportsCancel",
+    );
+    expect(first.operations[0]?.tool._meta).not.toHaveProperty(
+      "io.sdar/taskExecution.supportsIdempotency",
+    );
+  });
+
+  it("accepts the frozen SDAR Tool Name subset including dot and slash", () => {
+    for (const name of ["embodied.move", "vehicle/patrol", "light_set_power", "A-1"] as const) {
+      const value = manifest();
+      const operation = value.operations[0];
+      if (operation === undefined) throw new Error("fixture operation missing");
+      operation.name = name;
+      expect(new OperationRegistry().validate(value).operations[0]?.name).toBe(name);
+    }
+
+    for (const name of [".leading", "slash\\name", "space name", "x".repeat(65)] as const) {
+      const value = manifest();
+      const operation = value.operations[0];
+      if (operation === undefined) throw new Error("fixture operation missing");
+      operation.name = name;
+      expect(() => new OperationRegistry().validate(value)).toThrow("INVALID_OPERATION_NAME");
+    }
   });
 
   it("rejects duplicate operations and synchronous scheduling", () => {

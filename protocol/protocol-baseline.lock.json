@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "conformance-cases/cases.json",
+      "sha256": "e6dc1c2e0d398ed829e60a143aa393b41f248141332c354c8bbcb5e3470be891",
+      "sizeBytes": 12858
+    },
+    {
+      "path": "frozen/SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0.md",
+      "sha256": "d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845",
+      "sizeBytes": 58890
+    },
+    {
+      "path": "frozen/SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0.md.sha256",
+      "sha256": "03c71af30874db22e8ed8bff0bea2069dc4d9c2e03cc2e54ec71f3025f5822c1",
+      "sizeBytes": 114
+    },
+    {
+      "path": "mcp-stateless-base.schema.json",
+      "sha256": "83e92ff147f8367eef563ffa474b5d2dd1144a85f5afaaa5dd05e7860a47ff73",
+      "sizeBytes": 8968
+    },
+    {
+      "path": "mcp-streamable-http-routing.schema.json",
+      "sha256": "fe67f2ff51906319c27f432c350b84877b5daed10ef0888998375e0fea11b135",
+      "sizeBytes": 1791
+    },
+    {
+      "path": "mcp-task-notifications-sep2663.schema.json",
+      "sha256": "2d5f0bc358460232e54408465e7d045a5ef7b8491d81cd1f428ba1dc1240fcb2",
+      "sizeBytes": 35001
+    },
+    {
+      "path": "mcp-tasks-sep2663.schema.json",
+      "sha256": "728ca2f1c37643bdcf5f4ccb7bdbd52b1dda8f167a1941f7f28fb4bd8cfa3c8b",
+      "sizeBytes": 44038
+    },
+    {
+      "path": "pms-mismatch.schema.json",
+      "sha256": "aaeeb21b55b671dc5960e874de787967c09e1e8f49396c58b9c7767064b899aa",
+      "sizeBytes": 3481
+    },
+    {
+      "path": "protocol-baseline.json",
+      "sha256": "65a580fd775c1e8815794a95077c1272749be48ca1898f9be666aef9d5012344",
+      "sizeBytes": 596
+    },
+    {
+      "path": "sdar-availability-v1.schema.json",
+      "sha256": "9f2d2bfffea114a297ffa1ab3ce8f6b464fb43b9da8c347ceeb5eeaaf01c4977",
+      "sizeBytes": 12358
+    },
+    {
+      "path": "sdar-evidence-v1.schema.json",
+      "sha256": "fd951257333c4b7fdba5cbb9ff1087bdfc7808415d83a4957a4aded728f161fa",
+      "sizeBytes": 6024
+    },
+    {
+      "path": "sdar-task-execution-profile-v1.schema.json",
+      "sha256": "3118db54e7eb65b26c57bbea1525fcd74caace4f330922a3f5378f73770b99e1",
+      "sizeBytes": 1141
+    },
+    {
+      "path": "upstream/mcp-2026-07-28/schema.json",
+      "sha256": "9281c4890630e2d1e61792fa23b4084c4ea360cd58519610cd050545ab7b8708",
+      "sizeBytes": 180695
+    }
+  ]
+}

@@ -2,6 +2,7 @@ import * as grpc from "@grpc/grpc-js";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { Pool, PoolClient } from "pg";
+import { RUNTIME_VERSION } from "../../domain/src/index.js";
 import { createProviderOpsEnvelope, TelemetrySanitizer } from "../../observability/src/index.js";
 import type { CanonicalJsonValue } from "../../observability/src/index.js";
 import {
@@ -124,7 +125,7 @@ export class ProviderTelemetryIngress {
       eventCategory,
       deliveryClass: "audit",
       providerId: this.options.providerId,
-      runtimeVersion: this.options.runtimeVersion ?? "1.1.0",
+      runtimeVersion: this.options.runtimeVersion ?? RUNTIME_VERSION,
       instanceId: this.options.instanceId,
       ...(event.taskId.length === 0 ? {} : { taskId: event.taskId }),
       resourceId: event.resourceId,

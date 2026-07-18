@@ -54,6 +54,7 @@ let gateway: GrpcAdapterGateway;
 let engine: TaskEngine;
 let sideEffectCount = 0;
 let controlSideEffectCount = 0;
+let lastReservationRef: string | undefined;
 
 class FakeClock implements Clock {
   constructor(private value: Date) {}
@@ -73,8 +74,9 @@ beforeAll(async () => {
   await runMigrations(pool);
   adapter = createMockAdapterServer({
     providerId: "task-provider",
-    onStartSideEffect: () => {
+    onStartSideEffect: (_taskId, reservationRef) => {
       sideEffectCount += 1;
+      lastReservationRef = reservationRef;
     },
     onControlSideEffect: () => {
       controlSideEffectCount += 1;
@@ -97,6 +99,7 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  lastReservationRef = undefined;
   await pool.query(`TRUNCATE TABLE
     provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
     task_observation, provider_task, admission_intent
@@ -126,7 +129,7 @@ describe("durable task lifecycle", () => {
     });
   });
 
-  it("publishes before returning, maps working to completed, and survives engine restart", async () => {
+  it("C-038 C-039 publishes before returning and remains queryable across Runtime/SDAR restart", async () => {
     const operation = requiredOperation("durable_task");
     const created = await engine.callOperation(
       operation,
@@ -137,6 +140,9 @@ describe("durable task lifecycle", () => {
     if (created.kind !== "task") throw new Error("Expected task result");
     expect(created.task.status).toBe("working");
     const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const initiallyCommitted = await repository.getById(taskId);
+    expect(initiallyCommitted?.runtimeRevision).toBe("1");
 
     const visible = await pool.query<{ state: string }>(
       `SELECT admission_intent.state FROM provider_task
@@ -158,7 +164,11 @@ describe("durable task lifecycle", () => {
       structuredContent: { resourceId: "resource-1", completed: true },
     });
 
-    const repository = new TaskRepository(pool);
+    const finallyCommitted = await repository.getById(taskId);
+    expect(BigInt(finallyCommitted?.runtimeRevision ?? "0")).toBeGreaterThan(1n);
+    expect(finallyCommitted?.runtimeUpdatedAt.toISOString()).toBe(
+      finallyCommitted?.updatedAt.toISOString(),
+    );
     const unchanged = await repository.applySnapshot(taskId, 99, {
       internalState: "RUNNING",
       mcpStatus: "working",
@@ -200,6 +210,192 @@ describe("durable task lifecycle", () => {
     } finally {
       await singleConnectionPool.end();
     }
+  });
+
+  it("persists and dispatches frozen MRTR inputResponses over the additive Adapter fields", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-mrtr", scenario: "input_required_frozen" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected frozen MRTR Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    expect(await repository.listInputRequests(taskId)).toMatchObject([
+      {
+        key: "approval",
+        status: "OPEN",
+        requestJson: {
+          method: "elicitation/create",
+          params: { mode: "form", message: "Approve the reference operation." },
+        },
+      },
+    ]);
+
+    const before = controlSideEffectCount;
+    await engine.updateTaskInputResponses(
+      taskId,
+      { approval: { action: "accept", content: true }, unknown: { action: "decline" } },
+      authorization,
+    );
+    expect(controlSideEffectCount).toBe(before);
+    await new DurableCommandDispatcher(gateway, repository).tick();
+    expect(controlSideEffectCount).toBe(before + 1);
+    expect(await repository.listInputRequests(taskId)).toMatchObject([
+      {
+        key: "approval",
+        status: "ANSWERED",
+        responseJson: { action: "accept", content: true },
+      },
+    ]);
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
+  });
+
+  it("records cooperative cancellation when the Adapter cannot stop", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("flex_task"),
+      { resourceId: "cooperative-cancel", scenario: "running" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected task-capable Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    const before = await repository.getById(taskId);
+
+    await engine.cancelTaskCooperatively(taskId, authorization);
+
+    const after = await repository.getById(taskId);
+    expect(after).toMatchObject({
+      cancelRequested: true,
+      stopReason: "USER_REQUESTED",
+      mcpStatus: "working",
+    });
+    expect(after?.internalState).not.toBe("STOPPING");
+    expect(BigInt(after?.runtimeRevision ?? "0")).toBeGreaterThan(
+      BigInt(before?.runtimeRevision ?? "0"),
+    );
+    expect(
+      await pool.query("SELECT 1 FROM task_command WHERE task_id=$1", [taskId]),
+    ).toHaveProperty("rowCount", 0);
+  });
+
+  it("maps Adapter Evidence into completed frozen CallToolResult without requirementId", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "evidence-resource", scenario: "evidence_success" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected Evidence Task");
+    const taskId = String(created.task.taskId);
+    await engine.getTask(taskId, authorization);
+    const frozen = await engine.getFrozenTask(taskId, authorization);
+    expect(frozen).toMatchObject({
+      status: "completed",
+      result: {
+        resultType: "complete",
+        _meta: {
+          "io.sdar/evidence": {
+            profileVersion: "1.0",
+            items: [
+              {
+                evidenceType: "resource.completion",
+                payloadRef: { kind: "structured_content", jsonPointer: "/resourceId" },
+              },
+            ],
+          },
+        },
+      },
+    });
+    expect(JSON.stringify(frozen)).not.toContain("requirementId");
+  });
+
+  it("returns flat frozen CreateTaskResult and immediately consistent tasks/get", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "flat-frozen-task", scenario: "queued_start" },
+      authorization,
+      "flat-frozen-idempotency",
+      undefined,
+      "reservation-flat-frozen",
+    );
+    expect(created).toMatchObject({
+      resultType: "task",
+      status: "working",
+      _meta: { "io.sdar/taskExecution": { runtimeRevision: "1" } },
+    });
+    expect(typeof created.ttlMs).toBe("number");
+    expect(created).not.toHaveProperty("task");
+    expect(created).not.toHaveProperty("ttl");
+    expect(created).not.toHaveProperty("pollInterval");
+    expect(lastReservationRef).toBe("reservation-flat-frozen");
+    const taskId = String(created.taskId);
+    const queried = await engine.getFrozenTask(taskId, authorization);
+    expect(queried).toMatchObject({
+      resultType: "complete",
+      taskId,
+      _meta: { "io.sdar/taskExecution": { runtimeRevision: "1" } },
+    });
+  });
+
+  it("C-019 ignores an unknown frozen input response key", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-input-unknown", scenario: "input_required_frozen" },
+      authorization,
+    );
+    const taskId = String(created.taskId);
+    await engine.updateTaskInputResponses(
+      taskId,
+      { unknown: { action: "accept", content: true } },
+      authorization,
+    );
+    const commands = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='UPDATE'",
+      [taskId],
+    );
+    expect(commands.rows[0]?.count).toBe("0");
+  });
+
+  it("C-020 accepts an identical repeat of an answered frozen input key", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-input-repeat", scenario: "input_required_frozen" },
+      authorization,
+    );
+    const taskId = String(created.taskId);
+    const response = { approval: { action: "accept" as const, content: true } };
+    await engine.updateTaskInputResponses(taskId, response, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expect(
+      engine.updateTaskInputResponses(taskId, response, authorization),
+    ).resolves.toBeUndefined();
+    const commands = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='UPDATE'",
+      [taskId],
+    );
+    expect(commands.rows[0]?.count).toBe("1");
+  });
+
+  it("C-021 detects reuse of an answered frozen input key with different content", async () => {
+    const created = await engine.callFrozenOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-input-conflict", scenario: "input_required_frozen" },
+      authorization,
+    );
+    const taskId = String(created.taskId);
+    await engine.updateTaskInputResponses(
+      taskId,
+      { approval: { action: "accept", content: true } },
+      authorization,
+    );
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    await expect(
+      engine.updateTaskInputResponses(
+        taskId,
+        { approval: { action: "accept", content: false } },
+        authorization,
+      ),
+    ).rejects.toMatchObject({ reasonCode: "INPUT_RESPONSE_CONFLICT" });
   });
 
   it("returns an inline result for terminal task-capable admission", async () => {
@@ -516,21 +712,25 @@ describe("durable task lifecycle", () => {
   it("maps batched Availability and returns unknown on Adapter transport failure", async () => {
     const response = await engine.checkAvailability(
       [
-        { requestId: "available", operationName: "durable_task", arguments: { resourceId: "a" } },
+        {
+          requestId: "available",
+          operationName: "durable_task",
+          arguments: { state: "complete", value: { resourceId: "a" } },
+        },
         {
           requestId: "restricted",
           operationName: "durable_task",
-          arguments: { resourceId: "b", scenario: "restricted" },
+          arguments: { state: "complete", value: { resourceId: "b", scenario: "restricted" } },
         },
         {
           requestId: "disabled",
           operationName: "durable_task",
-          arguments: { resourceId: "c", scenario: "disabled" },
+          arguments: { state: "complete", value: { resourceId: "c", scenario: "disabled" } },
         },
       ],
       authorization,
     );
-    expect(response.checks.map((check) => check.availability)).toEqual([
+    expect(response.results.map((check) => check.availability)).toEqual([
       "available",
       "restricted",
       "disabled",
@@ -549,10 +749,16 @@ describe("durable task lifecycle", () => {
         new TaskRepository(pool),
       );
       const fallback = await fallbackEngine.checkAvailability(
-        [{ requestId: "unknown", operationName: "durable_task", arguments: { resourceId: "u" } }],
+        [
+          {
+            requestId: "unknown",
+            operationName: "durable_task",
+            arguments: { state: "complete", value: { resourceId: "u" } },
+          },
+        ],
         authorization,
       );
-      expect(fallback.checks[0]).toMatchObject({
+      expect(fallback.results[0]).toMatchObject({
         availability: "unknown",
         reasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
       });
@@ -608,6 +814,7 @@ describe("durable task lifecycle", () => {
         },
         maxElapsedMs: 5_000,
       },
+      "reservation-scheduled",
     );
     expect(created.kind).toBe("task");
     if (created.kind !== "task") throw new Error("Expected scheduled task");
@@ -620,6 +827,7 @@ describe("durable task lifecycle", () => {
     const claims = await Promise.all([firstWorker.tick(), secondWorker.tick()]);
     expect(claims.reduce((sum, tick) => sum + tick.started, 0)).toBe(1);
     expect(sideEffectCount - before).toBe(1);
+    expect(lastReservationRef).toBe("reservation-scheduled");
     expect(schedulerEvents).toEqual([
       ["scheduled", 1],
       ["claimed", 1],
@@ -2898,7 +3106,7 @@ describe("durable task lifecycle", () => {
     ]);
   });
 
-  it("keeps cancellation Ack-only, idempotent, and preserves natural completion races", async () => {
+  it("C-023 C-024 C-025 keeps cancel Ack-only and preserves cancelled/completed outcomes", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "resource-cancel" },
@@ -3786,8 +3994,10 @@ describe("durable task lifecycle", () => {
       taskId,
     ]);
     await pool.query(
-      `INSERT INTO task_input_request(task_id,request_key,schema,status,description,required)
-       VALUES ($1,'retention-proof','{}'::jsonb,'ANSWERED','retention proof',false)`,
+      `INSERT INTO task_input_request(
+         task_id,request_key,schema,status,description,required,request_json)
+       VALUES ($1,'retention-proof','{}'::jsonb,'ANSWERED','retention proof',false,
+         '{"method":"elicitation/create","params":{}}'::jsonb)`,
       [taskId],
     );
     await pool.query(

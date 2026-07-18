@@ -120,31 +120,35 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
     await test(groups, "P1", "P1 checkAvailability four states, risk and windows", async () => {
       const availability = await engine.checkAvailability(
         [
-          { requestId: "available", operationName: "durable_task", arguments: { resourceId: "a" } },
+          {
+            requestId: "available",
+            operationName: "durable_task",
+            arguments: { state: "complete", value: { resourceId: "a" } },
+          },
           {
             requestId: "restricted",
             operationName: "durable_task",
-            arguments: { resourceId: "b", scenario: "restricted" },
+            arguments: { state: "complete", value: { resourceId: "b", scenario: "restricted" } },
           },
           {
             requestId: "disabled",
             operationName: "durable_task",
-            arguments: { resourceId: "c", scenario: "disabled" },
+            arguments: { state: "complete", value: { resourceId: "c", scenario: "disabled" } },
           },
           {
             requestId: "unknown",
             operationName: "durable_task",
-            arguments: { resourceId: "d", scenario: "unknown" },
+            arguments: { state: "complete", value: { resourceId: "d", scenario: "unknown" } },
           },
         ],
         authorization,
       );
       assert(
-        availability.checks.map((item) => item.availability).join(",") ===
+        availability.results.map((item) => item.availability).join(",") ===
           "available,restricted,disabled,unknown",
         "availability state mismatch",
       );
-      const restricted = availability.checks[1];
+      const restricted = availability.results[1];
       assert(restricted?.riskLevel === "high", "restricted risk level mismatch");
       assert(restricted.validUntil !== undefined, "restricted validUntil missing");
       assert(restricted.earliestStartTime !== undefined, "restricted earliest start missing");
@@ -350,6 +354,76 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
         ),
         "IDEMPOTENCY_KEY_CONFLICT",
       );
+    });
+
+    await test(
+      groups,
+      "P4",
+      "P4 frozen reservation reference is bound to Start identity",
+      async () => {
+        const taskId = randomUUID();
+        const argumentHash = "7".repeat(64);
+        const argumentsValue = { resourceId: `${options.language}-reservation` };
+        const first = await gateway.startOperation("durable_task", argumentsValue, {
+          taskId,
+          argumentHash,
+          reservationRef: "reservation-conformance",
+        });
+        assert(first.accepted !== undefined, "reserved start was not accepted");
+        const duplicate = await gateway.startOperation("durable_task", argumentsValue, {
+          taskId,
+          argumentHash,
+          reservationRef: "reservation-conformance",
+        });
+        assert(duplicate.accepted !== undefined, "reserved duplicate was not idempotent");
+        await expectFailure(
+          gateway.startOperation("durable_task", argumentsValue, {
+            taskId,
+            argumentHash,
+            reservationRef: "reservation-conflict",
+          }),
+          "conflict",
+        );
+      },
+    );
+
+    await test(groups, "P4", "P4 frozen MRTR request and keyed response", async () => {
+      const created = await engine.callFrozenOperation(
+        operation(engine, "durable_task"),
+        { resourceId: `${options.language}-frozen-input`, scenario: "input_required_frozen" },
+        authorization,
+      );
+      const taskId = String(created.taskId);
+      assert(taskId.length > 0, "frozen input Task was not published");
+      assert(JSON.stringify(created).includes("elicitation/create"), "frozen MRTR request missing");
+      await engine.updateTaskInputResponses(
+        taskId,
+        { approval: { action: "accept", content: true } },
+        authorization,
+      );
+      assert(
+        (await new DurableCommandDispatcher(gateway, repository).tick()).acknowledged === 1,
+        "frozen MRTR response was not acknowledged",
+      );
+      await engine.getTask(taskId, authorization);
+      assert(
+        (await engine.getFrozenTask(taskId, authorization)).status === "completed",
+        "frozen MRTR Task did not complete",
+      );
+    });
+
+    await test(groups, "P4", "P4 frozen type-only Evidence projection", async () => {
+      const created = await engine.callFrozenOperation(
+        operation(engine, "durable_task"),
+        { resourceId: `${options.language}-evidence`, scenario: "evidence_success" },
+        authorization,
+      );
+      const taskId = String(created.taskId);
+      await engine.getTask(taskId, authorization);
+      const completed = await engine.getFrozenTask(taskId, authorization);
+      const serialized = JSON.stringify(completed);
+      assert(serialized.includes("io.sdar/evidence"), "frozen Evidence missing");
+      assert(!serialized.includes("requirementId"), "Evidence leaked requirementId");
     });
 
     await test(groups, "P4", "P4 response-loss Reconcile without duplicate identity", async () => {

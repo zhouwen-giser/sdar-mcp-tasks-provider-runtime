@@ -20,6 +20,7 @@ import {
   PeriodicExportingMetricReader,
 } from "@opentelemetry/sdk-metrics";
 import type { MetricReader } from "@opentelemetry/sdk-metrics";
+import { RUNTIME_VERSION } from "../../domain/src/index.js";
 import {
   BatchSpanProcessor,
   InMemorySpanExporter,
@@ -32,7 +33,7 @@ import type { ProviderOpsEnvelope } from "./event-envelope.js";
 import { TelemetrySanitizer } from "./telemetry-sanitizer.js";
 
 const INSTRUMENTATION_NAME = "@sdar/provider-ops-telemetry";
-const INSTRUMENTATION_VERSION = "1.1.0";
+const INSTRUMENTATION_VERSION = RUNTIME_VERSION;
 
 export interface ProviderTelemetryBatchOptions {
   maxQueueSize?: number;
