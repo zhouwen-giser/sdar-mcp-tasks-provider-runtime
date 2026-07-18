@@ -1,1 +1,2 @@
 protocol/frozen/* -text
+protocol/upstream/mcp-2026-07-28/schema.json -text -diff
