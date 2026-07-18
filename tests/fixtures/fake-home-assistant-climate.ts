@@ -9,6 +9,7 @@ export class FakeHomeAssistantClimate {
   #server: Server | undefined;
   #ws: WebSocketServer | undefined;
   url = "";
+  applyDelayMs = 0;
   suppressChanges = false;
   statusOverride: number | undefined;
   setState(entity: string, state: string, attributes: Record<string, unknown>): void {
@@ -90,7 +91,8 @@ export class FakeHomeAssistantClimate {
       const data = await body(q);
       this.serviceCalls.push({ service: match[1], data });
       json(s, 200, []);
-      if (!this.suppressChanges) setTimeout(() => this.#apply(match[1] ?? "", data), 0);
+      if (!this.suppressChanges)
+        setTimeout(() => this.#apply(match[1] ?? "", data), this.applyDelayMs);
       return;
     }
     json(s, 404, {});

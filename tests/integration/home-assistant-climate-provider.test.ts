@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { GrpcAdapterGateway } from "../../packages/adapter-protocol/src/index.js";
+import {
+  GrpcAdapterGateway,
+  protoStructToJson,
+} from "../../packages/adapter-protocol/src/index.js";
 import { ClimateExecutionEngine } from "../../apps/home-assistant-climate-provider/src/execution.js";
 import {
   HomeAssistantClimateClient,
@@ -73,6 +76,18 @@ describe("Home Assistant climate Provider", () => {
       service: "set_temperature",
       data: { entity_id: resource.entityId, temperature: 22.5 },
     });
+    expect(store.get("temperature-task")?.confirmedState).toMatchObject({
+      targetTemperature: 22.5,
+      reachable: true,
+    });
+    const snapshot = await gateway?.getExecution("temperature-task");
+    expect(protoStructToJson(snapshot?.result)).toMatchObject({ targetTemperature: 22.5 });
+    expect(snapshot?.evidence?.[0]?.evidenceType).toBe("climate.target_temperature.observation");
+    expect(snapshot?.evidence?.[0]?.payloadRef).toMatchObject({
+      kind: "structured_content",
+      jsonPointer: "/targetTemperature",
+    });
+    expect(JSON.stringify(snapshot?.evidence)).not.toContain("requirementId");
   });
   it("uses REST polling when WebSocket is stopped and rejects disallowed modes", async () => {
     const { store, engine } = await setup();

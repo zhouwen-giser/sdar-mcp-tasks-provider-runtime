@@ -1,0 +1,208 @@
+{
+  "schemaVersion": 1,
+  "frozenContractSha256": "d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845",
+  "protocolVersion": "2026-07-28",
+  "runtimeMergeCommit": "798656827ea747fb824df2975f8e66135e80fcc2",
+  "component": "home-assistant-climate-provider",
+  "claim": "Provider Component Conformant",
+  "realResourceQualified": false,
+  "cases": [
+    {
+      "caseId": "P-HAC-001",
+      "requirement": "Merged frozen Runtime main is an ancestor of the Provider branch.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "git merge-base --is-ancestor 798656827ea747fb824df2975f8e66135e80fcc2 HEAD",
+          "files": [
+            {
+              "path": "apps/home-assistant-climate-provider/src/manifest.ts",
+              "sha256": "0eec8e6b0f511bb5d9842128b873d71a534189f8a63e5f1bd53bbe04b9769f3d"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-002",
+      "requirement": "Operation names remain explicit and execution maps to frozen taskBehavior.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "Manifest plus tools/list taskBehavior assertions",
+          "files": [
+            {
+              "path": "apps/home-assistant-climate-provider/src/manifest.ts",
+              "sha256": "0eec8e6b0f511bb5d9842128b873d71a534189f8a63e5f1bd53bbe04b9769f3d"
+            },
+            {
+              "path": "tests/integration/home-assistant-climate-runtime-e2e.test.ts",
+              "sha256": "160abc127596fcf1906c3a96f3f4c0b5d31206ba6458c936937b940575ea8a70"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-003",
+      "requirement": "All Runtime E2E calls use frozen request meta and routing headers.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "2026-07-28 meta and MCP routing header assertions",
+          "files": [
+            {
+              "path": "tests/integration/home-assistant-climate-runtime-e2e.test.ts",
+              "sha256": "160abc127596fcf1906c3a96f3f4c0b5d31206ba6458c936937b940575ea8a70"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-004",
+      "requirement": "Task admission returns a flat CreateTaskResult and preserves idempotency.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "Flat resultType task and duplicate taskId assertions",
+          "files": [
+            {
+              "path": "tests/integration/home-assistant-climate-runtime-e2e.test.ts",
+              "sha256": "160abc127596fcf1906c3a96f3f4c0b5d31206ba6458c936937b940575ea8a70"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-005",
+      "requirement": "Ack-first Task notifications converge with tasks/get at the same revision.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "Ack, working, completed, and normalized equality assertions",
+          "files": [
+            {
+              "path": "tests/integration/home-assistant-climate-runtime-e2e.test.ts",
+              "sha256": "160abc127596fcf1906c3a96f3f4c0b5d31206ba6458c936937b940575ea8a70"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-006",
+      "requirement": "Evidence is derived from persisted observed Home Assistant confirmation.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "confirmedState and structured-content Evidence assertions",
+          "files": [
+            {
+              "path": "apps/home-assistant-climate-provider/src/execution.ts",
+              "sha256": "3616c969d67e0b30c5dc8c6dff94be019e4ef824d24b5cbca2d871ba648b12c1"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/execution.ts",
+              "sha256": "3616c969d67e0b30c5dc8c6dff94be019e4ef824d24b5cbca2d871ba648b12c1"
+            },
+            {
+              "path": "tests/integration/home-assistant-climate-provider.test.ts",
+              "sha256": "534e6041a8f529f40981c75a25e0acbb2d8162b58fe94d1acaf02bd1be6d3035"
+            },
+            {
+              "path": "tests/integration/home-assistant-climate-runtime-e2e.test.ts",
+              "sha256": "160abc127596fcf1906c3a96f3f4c0b5d31206ba6458c936937b940575ea8a70"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-007",
+      "requirement": "Provider Wire Evidence is type-only and never publishes requirementId.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "Recursive Provider source scan",
+          "files": [
+            {
+              "path": "apps/home-assistant-climate-provider/config/climates.example.json",
+              "sha256": "9ee1e87774ce1947e87326a066c5c7306c93c5d8d365321c997a53a042676352"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/package.json",
+              "sha256": "4df5b625b89716f3a33dd6fc506e0bc0a17cd04f277a35a6fc2811f0db91da86"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/config.ts",
+              "sha256": "3da9f27bdcb18ab18b7b3323bfe400f4752127357a9d6a8da32f0b23d6b36c1f"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/errors.ts",
+              "sha256": "4a8cb783d8f1a40dc6524cddfe9b0336de510d4af4e516709b99bb99a852d4a6"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/execution.ts",
+              "sha256": "3616c969d67e0b30c5dc8c6dff94be019e4ef824d24b5cbca2d871ba648b12c1"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/home-assistant.ts",
+              "sha256": "f971212fd78d4c3a0b9aafda0d3f299f08aafdba8e63eada49626e018a297a49"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/main.ts",
+              "sha256": "a3370ccce57f73a270d59ea50281d7faed0d99cdf58ac13c2cf4ca2b33a440df"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/manifest.ts",
+              "sha256": "0eec8e6b0f511bb5d9842128b873d71a534189f8a63e5f1bd53bbe04b9769f3d"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/resources.ts",
+              "sha256": "92c3ecf531254324965007fa6f582017f5f1f44294c5beb5d85e528dfc9af24e"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/server.ts",
+              "sha256": "231dc93c740edc8422ecfb16eaf60146488868ec9f1cb60af0951bfbc8a330bb"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/store.ts",
+              "sha256": "c3c1968e2aac538aff2fc5c1e4ec99dfdc32d3b8fe2a8f83f1b9ec94cd932d33"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/telemetry.ts",
+              "sha256": "4d00d67b9b32b9d35affeceda6ae04827e415ea8220d9bcf2a983366a9545174"
+            },
+            {
+              "path": "apps/home-assistant-climate-provider/src/types.ts",
+              "sha256": "a397dd3d58181d081e81968aa0f58466cd09804bc230e2598d60774fd648465f"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "caseId": "P-HAC-008",
+      "requirement": "Provider uses frozen Runtime over real HTTP/SSE and PostgreSQL in E2E.",
+      "status": "pass",
+      "evidence": [
+        {
+          "assertion": "Provider-specific Runtime/PostgreSQL E2E suite",
+          "files": [
+            {
+              "path": "tests/integration/home-assistant-climate-runtime-e2e.test.ts",
+              "sha256": "160abc127596fcf1906c3a96f3f4c0b5d31206ba6458c936937b940575ea8a70"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0
+  }
+}
