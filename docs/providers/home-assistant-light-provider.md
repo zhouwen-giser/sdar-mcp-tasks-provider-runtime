@@ -65,6 +65,18 @@ HTTP success is admission of the HA service call, not completion proof. WebSocke
 `state_changed` is preferred, while REST polling confirms when WebSocket is unavailable.
 Duplicate `taskId` requests replay the persisted execution without repeating a side effect.
 
+## Frozen MCP Tasks V1
+
+Runtime discovery, Tool calls, Task reads, and subscriptions use MCP Stateless `2026-07-28` with
+the required frozen Request Meta and routing headers. State reads are `synchronous_only`; power and
+brightness controls are `task_required` and return flat Task results. A subscription acknowledges
+before emitting complete Task snapshots, and a notification is byte-semantically equal to
+`tasks/get` at the same Runtime Revision after transport-only metadata is removed.
+
+Terminal results and Evidence are derived from the persisted Home Assistant observation that
+confirmed the change, never from the service-call HTTP 200. Evidence uses only `evidenceType` and
+structured-content pointers; the Provider never publishes `requirementId`.
+
 ## Telemetry and recovery
 
 Resource state, brightness metric, resource health, and Task-bound execution progress use

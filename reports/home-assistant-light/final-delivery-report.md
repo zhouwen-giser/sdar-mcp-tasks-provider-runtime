@@ -1,6 +1,6 @@
 # Home Assistant Light Provider Delivery Report
 
-Date: 2026-07-18
+Date: 2026-07-19
 
 Branch: `feature/home-assistant-light-provider`
 
@@ -23,6 +23,8 @@ Package: `@sdar/home-assistant-light-provider@0.1.0`
   real Runtime/PostgreSQL/MCP/ProviderTelemetryIngress end-to-end workflow.
 - Non-root multi-stage image, optional Compose override, example resource configuration, and
   operator documentation.
+- Normal merge of frozen Runtime main, frozen request metadata/headers, flat Task results,
+  Ack-first Task notifications, `tasks/get` equality, and actual-state type-only Evidence.
 
 ## Verification evidence
 
@@ -30,6 +32,8 @@ Package: `@sdar/home-assistant-light-provider@0.1.0`
 | ------------------------------------------- | ---------------------------------------------- |
 | `pnpm test:ha-light`                        | PASS, 4 files / 9 tests                        |
 | `pnpm test:ha-light:e2e`                    | PASS, real Runtime and PostgreSQL              |
+| `pnpm test:ha-light:protocol-v1`            | PASS, 5 files / 10 tests                       |
+| `pnpm protocol:ha-light:check`              | PASS, 8/8 SHA-locked Provider cases            |
 | `pnpm audit:dependencies`                   | PASS, no known vulnerabilities                 |
 | `pnpm verify:v1.1`                          | PASS, 380.5 seconds                            |
 | Unit suite                                  | PASS, 18 files / 75 tests                      |
@@ -42,14 +46,13 @@ Package: `@sdar/home-assistant-light-provider@0.1.0`
 | Runtime image audit                         | PASS, non-root, 99,880,617 bytes, reproducible |
 | Conformance, capacity, rc.1 red regressions | PASS                                           |
 
-The Home Assistant-specific E2E used an isolated `sdar_ha_light_test` database on the existing
-local PostgreSQL test container. Fake Home Assistant is used for CI; no real lamp or Xiaomi cloud
-was used or claimed as verification.
+The Home Assistant-specific frozen E2E used real Runtime HTTP/SSE and PostgreSQL. Fake Home
+Assistant is used for CI; no real lamp or Xiaomi cloud was used or claimed as verification. The
+maximum claim is **Home Assistant Light Provider Component Conformant**; this report does not claim
+`real-resource qualified` or `Interop Certified`.
 
 ## Publication boundary
 
-The branch was pushed and Draft PR
-[#12](https://github.com/zhouwen-giser/sdar-mcp-tasks-provider-runtime/pull/12) was opened against
-`main`. On the published implementation head, protected `runtime-compose` passed in 56 seconds
-and `runtime-ci` passed in 4 minutes 11 seconds. The final documentation-only evidence commit is
-subject to the same protected checks before delivery is declared complete.
+The frozen Runtime PR #13 merged normally as `7986568`. This branch continues on existing Draft PR
+[#12](https://github.com/zhouwen-giser/sdar-mcp-tasks-provider-runtime/pull/12); the new migration
+head must be pushed and pass its own protected checks before publication is complete.
