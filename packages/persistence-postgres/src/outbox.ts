@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 
 export interface OutboxRecord {
   eventId: string;
+  eventKey: string;
   aggregateId: string;
   eventType: string;
   payload: Record<string, unknown>;
@@ -14,18 +15,20 @@ export class OutboxRepository {
   async pending(limit = 100): Promise<OutboxRecord[]> {
     const result = await this.pool.query<{
       event_id: string;
+      event_key: string;
       aggregate_id: string;
       event_type: string;
       payload: Record<string, unknown>;
       created_at: Date;
     }>(
-      `SELECT event_id, aggregate_id, event_type, payload, created_at
+      `SELECT event_id, event_key, aggregate_id, event_type, payload, created_at
        FROM outbox_event WHERE published_at IS NULL
        ORDER BY created_at, event_id LIMIT $1`,
       [limit],
     );
     return result.rows.map((row) => ({
       eventId: row.event_id,
+      eventKey: row.event_key,
       aggregateId: row.aggregate_id,
       eventType: row.event_type,
       payload: row.payload,

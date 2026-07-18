@@ -154,6 +154,7 @@ function preparePython(directory) {
   const example = resolve(root, "examples/mock-adapter-python");
   const generated = resolve(example, "generated");
   const protoDirectory = resolve(root, "proto/io/sdar/mcp/tasks/adapter/v1");
+  const telemetryProtoDirectory = resolve(root, "proto/io/sdar/mcp/tasks/telemetry/v1");
   const environment = {
     ...process.env,
     PYTHONPATH: [sitePackages, process.env.PYTHONPATH].filter(Boolean).join(delimiter),
@@ -198,6 +199,36 @@ function preparePython(directory) {
     grpcModule,
     readFileSync(grpcModule, "utf8").replace("import adapter_pb2", "from . import adapter_pb2"),
   );
+  execFileSync(
+    python,
+    [
+      "-m",
+      "grpc_tools.protoc",
+      `-I${telemetryProtoDirectory}`,
+      `-I${grpcInclude}`,
+      `--python_out=${generated}`,
+      `--grpc_python_out=${generated}`,
+      resolve(telemetryProtoDirectory, "provider_telemetry.proto"),
+    ],
+    { stdio: "inherit", env: environment },
+  );
+  const telemetryGrpcModule = resolve(generated, "provider_telemetry_pb2_grpc.py");
+  writeFileSync(
+    telemetryGrpcModule,
+    readFileSync(telemetryGrpcModule, "utf8").replace(
+      "import provider_telemetry_pb2",
+      "from . import provider_telemetry_pb2",
+    ),
+  );
+  const telemetrySelfTest = execFileSync(python, ["provider_telemetry.py", "--self-test"], {
+    cwd: example,
+    encoding: "utf8",
+    env: environment,
+  });
+  const telemetryResult = JSON.parse(telemetrySelfTest);
+  if (telemetryResult.eventCount !== 4) {
+    throw new Error("Python Provider telemetry conformance did not construct all event classes");
+  }
   return { executable: python, environment, example };
 }
 

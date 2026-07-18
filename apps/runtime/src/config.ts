@@ -13,7 +13,30 @@ const EnvironmentSchema = z
     PROVIDER_ID: z.string().min(1).max(128).default("mock-provider"),
     OTEL_ENABLED: BooleanEnvironmentSchema.default(false),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.url().default("http://127.0.0.1:4318"),
+    OTEL_EXPORTER_OTLP_TLS_MODE: z.enum(["disabled", "required"]).default("disabled"),
+    OTEL_EXPORTER_OTLP_CA_PATH: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_CERT_PATH: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_KEY_PATH: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_HEADERS_FILE: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
     OTEL_SERVICE_INSTANCE_ID: z.string().min(1).max(256).optional(),
+    PROVIDER_TELEMETRY_INGRESS_ENABLED: BooleanEnvironmentSchema.default(false),
+    PROVIDER_TELEMETRY_HOST: z.string().min(1).max(255).default("127.0.0.1"),
+    PROVIDER_TELEMETRY_PORT: z.coerce.number().int().min(1).max(65_535).default(7002),
+    PROVIDER_TELEMETRY_TLS_MODE: z.enum(["disabled", "required"]).default("disabled"),
+    PROVIDER_TELEMETRY_TLS_CA_PATH: z.string().min(1).optional(),
+    PROVIDER_TELEMETRY_TLS_CERT_PATH: z.string().min(1).optional(),
+    PROVIDER_TELEMETRY_TLS_KEY_PATH: z.string().min(1).optional(),
+    PROVIDER_TELEMETRY_MAX_BATCH: z.coerce.number().int().min(1).max(10_000).default(100),
+    PROVIDER_TELEMETRY_MAX_EVENT_BYTES: z.coerce
+      .number()
+      .int()
+      .min(256)
+      .max(8_388_608)
+      .default(65_536),
+    PROVIDER_TELEMETRY_MAX_DEPTH: z.coerce.number().int().min(1).max(64).default(16),
+    PROVIDER_TELEMETRY_MAX_NODES: z.coerce.number().int().min(16).max(100_000).default(4_096),
+    PROVIDER_TELEMETRY_RATE_LIMIT: z.coerce.number().int().min(1).max(100_000).default(600),
     DATABASE_URL: z.url().default("postgresql://sdar:sdar@127.0.0.1:5432/sdar_runtime"),
     ADAPTER_ENDPOINT: z.string().refine(validAdapterEndpoint).default("127.0.0.1:7001"),
     ADAPTER_TLS_MODE: z.enum(["disabled", "required"]).default("disabled"),
@@ -79,6 +102,18 @@ const EnvironmentSchema = z
     if (value.AUTH_MODE === "jwt_hs256" && value.JWT_HS256_SECRET === undefined) {
       context.addIssue({ code: "custom", message: "jwt_hs256 requires JWT_HS256_SECRET" });
     }
+    if (
+      value.PROVIDER_TELEMETRY_INGRESS_ENABLED &&
+      value.PROVIDER_TELEMETRY_TLS_MODE === "required" &&
+      (value.PROVIDER_TELEMETRY_TLS_CA_PATH === undefined ||
+        value.PROVIDER_TELEMETRY_TLS_CERT_PATH === undefined ||
+        value.PROVIDER_TELEMETRY_TLS_KEY_PATH === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "Provider telemetry mTLS requires CA, certificate, and key paths",
+      });
+    }
     if (value.RUNTIME_ENV === "production") {
       if (value.AUTH_MODE === "development") {
         context.addIssue({ code: "custom", message: "production forbids development auth" });
@@ -86,12 +121,38 @@ const EnvironmentSchema = z
       if (value.ADAPTER_TLS_MODE !== "required") {
         context.addIssue({ code: "custom", message: "production requires Adapter mTLS" });
       }
+      if (
+        value.PROVIDER_TELEMETRY_INGRESS_ENABLED &&
+        value.PROVIDER_TELEMETRY_TLS_MODE !== "required"
+      ) {
+        context.addIssue({
+          code: "custom",
+          message: "production Provider telemetry ingress requires mTLS",
+        });
+      }
       if (value.ALLOW_WEAK_LEASE_CONFIGURATION) {
         context.addIssue({
           code: "custom",
           message: "production forbids weak lease configuration",
         });
       }
+      if (
+        value.OTEL_ENABLED &&
+        !value.OTEL_EXPORTER_OTLP_ENDPOINT.toLowerCase().startsWith("https://")
+      ) {
+        context.addIssue({ code: "custom", message: "production OTLP requires HTTPS" });
+      }
+    }
+    if (
+      value.OTEL_EXPORTER_OTLP_TLS_MODE === "required" &&
+      (value.OTEL_EXPORTER_OTLP_CA_PATH === undefined ||
+        value.OTEL_EXPORTER_OTLP_CERT_PATH === undefined ||
+        value.OTEL_EXPORTER_OTLP_KEY_PATH === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "OTLP mTLS requires CA, certificate, and key paths",
+      });
     }
     if (value.OUTBOX_SINK === "webhook" && value.OUTBOX_WEBHOOK_URL === undefined) {
       context.addIssue({ code: "custom", message: "webhook Outbox requires OUTBOX_WEBHOOK_URL" });

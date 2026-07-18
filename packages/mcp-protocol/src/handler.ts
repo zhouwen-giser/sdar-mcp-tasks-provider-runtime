@@ -15,7 +15,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { protoStructToJson } from "../../adapter-protocol/src/index.js";
 import type { GrpcAdapterGateway } from "../../adapter-protocol/src/index.js";
 import type { ValidatedManifest } from "../../operation-registry/src/index.js";
-import type { AvailabilityCheck, TaskExecutionTiming } from "../../domain/src/index.js";
+import type {
+  AuthorizationContext,
+  AvailabilityCheck,
+  TaskExecutionTiming,
+} from "../../domain/src/index.js";
 import {
   AdapterContractError,
   CapabilityNotSupportedError,
@@ -48,6 +52,15 @@ export interface McpProtocolOptions {
   maxJsonDepth?: number;
   maxJsonNodes?: number;
   onProtocolError?: (error: unknown, correlationId: string | null) => void;
+  traceRequest?: <T>(
+    name: string,
+    headers: Record<string, string | string[] | undefined>,
+    action: () => Promise<T>,
+  ) => Promise<T>;
+  currentTraceContext?: () => Pick<
+    AuthorizationContext,
+    "traceId" | "rootTraceparent" | "rootTracestate"
+  > | null;
 }
 
 const AvailabilityCheckSchema = z.object({
@@ -166,57 +179,64 @@ export class McpProtocolHandler {
       tools: this.manifest.operations.map((operation) => operation.tool),
     }));
     server.setRequestHandler(RuntimeCallToolRequestSchema, ({ params }) =>
-      this.#protocolResult(authorization.correlationId ?? null, async () => {
-        const operation = this.manifest.operations.find(
-          (candidate) => candidate.name === params.name,
-        );
-        if (operation === undefined) throw new InvalidParamsError("UNKNOWN_TOOL", "Unknown tool.");
-        const argumentsValue = params.arguments ?? {};
-        const ttl = taskTtl(params.task?.ttl);
-        assertJsonLimits(
-          argumentsValue,
-          this.options.maxArgumentBytes ?? 1_048_576,
-          this.options.maxJsonDepth ?? 32,
-          this.options.maxJsonNodes ?? 10_000,
-        );
-        operation.validateArguments(argumentsValue);
-        if (this.taskEngine !== undefined) {
-          const invocation = await this.taskEngine.callOperation(
-            operation,
-            argumentsValue,
-            authorization,
-            ttl,
-            idempotencyKey(params._meta),
-            taskTiming(params._meta),
+      this.#tracedProtocolResult(
+        "mcp.tools.call",
+        request,
+        authorization.correlationId ?? null,
+        authorization,
+        async () => {
+          const operation = this.manifest.operations.find(
+            (candidate) => candidate.name === params.name,
           );
-          return invocation.kind === "result" ? invocation.result : { task: invocation.task };
-        }
-        const start = await this.gateway.startOperation(operation.name, argumentsValue);
-        if (start.result === "rejected" || start.rejected !== undefined) {
-          const rejected = start.rejected;
+          if (operation === undefined)
+            throw new InvalidParamsError("UNKNOWN_TOOL", "Unknown tool.");
+          const argumentsValue = params.arguments ?? {};
+          const ttl = taskTtl(params.task?.ttl);
+          assertJsonLimits(
+            argumentsValue,
+            this.options.maxArgumentBytes ?? 1_048_576,
+            this.options.maxJsonDepth ?? 32,
+            this.options.maxJsonNodes ?? 10_000,
+          );
+          operation.validateArguments(argumentsValue);
+          if (this.taskEngine !== undefined) {
+            const invocation = await this.taskEngine.callOperation(
+              operation,
+              argumentsValue,
+              authorization,
+              ttl,
+              idempotencyKey(params._meta),
+              taskTiming(params._meta),
+            );
+            return invocation.kind === "result" ? invocation.result : { task: invocation.task };
+          }
+          const start = await this.gateway.startOperation(operation.name, argumentsValue);
+          if (start.result === "rejected" || start.rejected !== undefined) {
+            const rejected = start.rejected;
+            return {
+              content: [{ type: "text", text: rejected?.message ?? "Operation rejected." }],
+              isError: true,
+              structuredContent: {
+                outcome: "admission_rejected",
+                reasonCode: rejected?.reasonCode ?? "ADMISSION_REJECTED",
+                retryable: rejected?.retryable ?? false,
+                completedAt: new Date().toISOString(),
+              },
+            };
+          }
+          const snapshot = start.accepted?.initialSnapshot;
+          if (snapshot?.state !== "SUCCEEDED") {
+            throw new AdapterContractError("R2_NONTERMINAL_EXECUTION_REQUIRES_TASK_ENGINE");
+          }
+          const result = protoStructToJson(snapshot.result);
+          operation.validateOutput(result);
           return {
-            content: [{ type: "text", text: rejected?.message ?? "Operation rejected." }],
-            isError: true,
-            structuredContent: {
-              outcome: "admission_rejected",
-              reasonCode: rejected?.reasonCode ?? "ADMISSION_REJECTED",
-              retryable: rejected?.retryable ?? false,
-              completedAt: new Date().toISOString(),
-            },
+            content: [{ type: "text", text: snapshot.message || "Operation completed." }],
+            isError: false,
+            structuredContent: result,
           };
-        }
-        const snapshot = start.accepted?.initialSnapshot;
-        if (snapshot?.state !== "SUCCEEDED") {
-          throw new AdapterContractError("R2_NONTERMINAL_EXECUTION_REQUIRES_TASK_ENGINE");
-        }
-        const result = protoStructToJson(snapshot.result);
-        operation.validateOutput(result);
-        return {
-          content: [{ type: "text", text: snapshot.message || "Operation completed." }],
-          isError: false,
-          structuredContent: result,
-        };
-      }),
+        },
+      ),
     );
     const taskEngine = this.taskEngine;
     if (taskEngine !== undefined) {
@@ -228,8 +248,12 @@ export class McpProtocolHandler {
           ) as never,
       );
       server.setRequestHandler(GetTaskRequestSchema, ({ params }) =>
-        this.#protocolResult(authorization.correlationId ?? null, () =>
-          taskEngine.getTask(params.taskId, authorization),
+        this.#tracedProtocolResult(
+          "mcp.tasks.get",
+          request,
+          authorization.correlationId ?? null,
+          authorization,
+          () => taskEngine.getTask(params.taskId, authorization),
         ),
       );
       server.setRequestHandler(GetTaskPayloadRequestSchema, ({ params }) =>
@@ -238,45 +262,68 @@ export class McpProtocolHandler {
         ),
       );
       server.setRequestHandler(CancelTaskRequestSchema, ({ params }) =>
-        this.#protocolResult(authorization.correlationId ?? null, () =>
-          taskEngine.cancelTask(params.taskId, authorization),
+        this.#tracedProtocolResult(
+          "mcp.tasks.cancel",
+          request,
+          authorization.correlationId ?? null,
+          authorization,
+          () => taskEngine.cancelTask(params.taskId, authorization),
         ),
       );
       server.setRequestHandler(UpdateTaskRequestSchema, ({ params }) =>
-        this.#protocolResult(authorization.correlationId ?? null, async () => {
-          assertJsonLimits(
-            params.inputs,
-            this.options.maxArgumentBytes ?? 1_048_576,
-            this.options.maxJsonDepth ?? 32,
-            this.options.maxJsonNodes ?? 10_000,
-          );
-          return await taskEngine.updateTask(params.taskId, params.inputs, authorization);
-        }),
+        this.#tracedProtocolResult(
+          "mcp.tasks.update",
+          request,
+          authorization.correlationId ?? null,
+          authorization,
+          async () => {
+            assertJsonLimits(
+              params.inputs,
+              this.options.maxArgumentBytes ?? 1_048_576,
+              this.options.maxJsonDepth ?? 32,
+              this.options.maxJsonNodes ?? 10_000,
+            );
+            return await taskEngine.updateTask(params.taskId, params.inputs, authorization);
+          },
+        ),
       );
       server.setRequestHandler(
         TaskObservationsRequestSchema,
         ({ params }) =>
-          this.#protocolResult(authorization.correlationId ?? null, () =>
-            taskEngine.getTaskObservations(
-              params.taskId,
-              authorization,
-              params.cursor === undefined ? undefined : Number(params.cursor),
-              params.limit,
-            ),
+          this.#tracedProtocolResult(
+            "mcp.tasks.observations",
+            request,
+            authorization.correlationId ?? null,
+            authorization,
+            () =>
+              taskEngine.getTaskObservations(
+                params.taskId,
+                authorization,
+                params.cursor === undefined ? undefined : Number(params.cursor),
+                params.limit,
+              ),
           ) as never,
       );
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/pause"),
         ({ params }) =>
-          this.#protocolResult(authorization.correlationId ?? null, () =>
-            taskEngine.controlTask(params.taskId, "PAUSE", authorization),
+          this.#tracedProtocolResult(
+            "mcp.tasks.pause",
+            request,
+            authorization.correlationId ?? null,
+            authorization,
+            () => taskEngine.controlTask(params.taskId, "PAUSE", authorization),
           ),
       );
       server.setRequestHandler(
         ControlTaskRequestSchema("io.sdar/taskExecution/tasks/resume"),
         ({ params }) =>
-          this.#protocolResult(authorization.correlationId ?? null, () =>
-            taskEngine.controlTask(params.taskId, "RESUME", authorization),
+          this.#tracedProtocolResult(
+            "mcp.tasks.resume",
+            request,
+            authorization.correlationId ?? null,
+            authorization,
+            () => taskEngine.controlTask(params.taskId, "RESUME", authorization),
           ),
       );
     }
@@ -300,6 +347,23 @@ export class McpProtocolHandler {
       }
       throw mapped;
     }
+  }
+
+  #tracedProtocolResult<T>(
+    name: string,
+    request: IncomingMessage,
+    correlationId: string | null,
+    authorization: AuthorizationContext,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const execute = () => {
+      const traceContext = this.options.currentTraceContext?.();
+      if (traceContext !== null && traceContext !== undefined) {
+        Object.assign(authorization, traceContext);
+      }
+      return this.#protocolResult(correlationId, action);
+    };
+    return this.options.traceRequest?.(name, request.headers, execute) ?? execute();
   }
 }
 

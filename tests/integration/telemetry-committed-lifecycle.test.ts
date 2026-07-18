@@ -29,11 +29,12 @@ describe("committed Task lifecycle telemetry", () => {
 
     expect(emitter.envelopes).toHaveLength(1);
     expect(emitter.envelopes[0]).toMatchObject({
-      recordType: "provider.task_lifecycle",
+      recordType: "provider.task.lifecycle",
       eventCategory: "task.lifecycle",
       deliveryClass: "audit",
       taskId: "task-1",
       observationRevision: 4,
+      occurredAt: "2026-07-17T23:59:00.000Z",
       attributes: { lifecycleEvent: "task.completed" },
       payload: {
         previousState: "RUNNING",
@@ -42,6 +43,25 @@ describe("committed Task lifecycle telemetry", () => {
         resultClass: "success",
       },
     });
+  });
+
+  it("replays the same committed event key identically across Runtime replicas", async () => {
+    const firstEmitter = new RecordingEmitter();
+    const secondEmitter = new RecordingEmitter();
+    const first = lifecycleEvent();
+    const second = lifecycleEvent();
+    second.eventId = "00000000-0000-4000-8000-000000000099";
+
+    await new ProviderOpsOutboxSink(new InternalNoopOutboxSink(), firstEmitter, context).publish([
+      first,
+    ]);
+    await new ProviderOpsOutboxSink(new InternalNoopOutboxSink(), secondEmitter, {
+      ...context,
+      instanceId: "runtime-b",
+    }).publish([second]);
+
+    expect(firstEmitter.envelopes[0]?.recordId).toBe(secondEmitter.envelopes[0]?.recordId);
+    expect(firstEmitter.envelopes[0]?.recordHash).toBe(secondEmitter.envelopes[0]?.recordHash);
   });
 
   it("emits nothing when the transaction produced no committed Outbox event", async () => {
@@ -111,6 +131,7 @@ class MemoryOutboxRepository {
 function lifecycleEvent(): OutboxRecord {
   return {
     eventId: "00000000-0000-4000-8000-000000000001",
+    eventKey: "task-1:created",
     aggregateId: "task-1",
     eventType: "task.completed",
     payload: {
@@ -125,6 +146,7 @@ function lifecycleEvent(): OutboxRecord {
       terminal: true,
       resultClass: "success",
       observationRevision: 4,
+      occurredAt: "2026-07-17T23:59:00.000Z",
     },
     createdAt: new Date("2026-07-18T00:00:00.000Z"),
   };

@@ -5,5 +5,6 @@ export * from "./command-dispatcher.js";
 export * from "./bound-execution-watchdog.js";
 export * from "./outbox-publisher.js";
 export * from "./provider-ops-outbox-sink.js";
+export * from "./durable-provider-ops-publisher.js";
 export * from "./ttl-cleaner.js";
 export * from "./outbox-cleaner.js";

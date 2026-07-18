@@ -19,7 +19,7 @@ describe("command dispatch telemetry envelope", () => {
   ])("maps %s without command payload content", (eventType, commandState) => {
     const envelope = commandEnvelope(event(eventType, commandState), context);
     expect(envelope).toMatchObject({
-      recordType: "provider.command_dispatch",
+      recordType: "provider.command.lifecycle",
       eventCategory: "command.dispatch",
       attributes: { commandEvent: eventType },
       taskId: "task-1",
@@ -39,6 +39,7 @@ describe("command dispatch telemetry envelope", () => {
 function event(eventType: string, commandState: string): OutboxRecord {
   return {
     eventId: "00000000-0000-4000-8000-000000000003",
+    eventKey: `task-command:${eventType}:${commandState}`,
     aggregateId: "task-1",
     eventType,
     payload: {

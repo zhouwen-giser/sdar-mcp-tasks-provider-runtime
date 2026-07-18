@@ -44,6 +44,10 @@ const authorization: AuthorizationContext = {
   hash: "a".repeat(64),
   executionMode: "live",
   simulationId: null,
+  traceId: "1".repeat(32),
+  rootTraceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
+  rootTracestate: "vendor=test",
+  correlationId: "trace-persistence-test",
 };
 let adapter: grpc.Server;
 let gateway: GrpcAdapterGateway;
@@ -63,7 +67,7 @@ class FakeClock implements Clock {
 
 beforeAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS
-    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
     task_observation, provider_task, admission_intent, operation_snapshot,
     runtime_schema_migration CASCADE`);
   await runMigrations(pool);
@@ -94,7 +98,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await pool.query(`TRUNCATE TABLE
-    runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
     task_observation, provider_task, admission_intent
     RESTART IDENTITY CASCADE`);
 });
@@ -106,6 +110,22 @@ afterAll(async () => {
 });
 
 describe("durable task lifecycle", () => {
+  it("task_trace_context_survives_restart", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "trace-context" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected durable task");
+    const restored = await new TaskRepository(pool).getById(String(created.task.taskId));
+    expect(restored).toMatchObject({
+      traceId: "1".repeat(32),
+      rootTraceparent: `00-${"1".repeat(32)}-${"2".repeat(16)}-01`,
+      rootTracestate: "vendor=test",
+      correlationId: "trace-persistence-test",
+    });
+  });
+
   it("publishes before returning, maps working to completed, and survives engine restart", async () => {
     const operation = requiredOperation("durable_task");
     const created = await engine.callOperation(
@@ -541,7 +561,7 @@ describe("durable task lifecycle", () => {
     }
   });
 
-  it("T-013 starts scheduled work no earlier than notBefore and only once across workers", async () => {
+  it("scheduler_decision_uses_envelope", async () => {
     const clock = new FakeClock(new Date("2026-07-16T12:00:00Z"));
     const scheduledEngine = new TaskEngine(
       engine.manifest,
@@ -607,6 +627,15 @@ describe("durable task lifecycle", () => {
     ]);
     const task = await scheduledEngine.getTask(String(created.task.taskId), authorization);
     expect(task.status).toBe("completed");
+    const decisions = await pool.query<{ event_type: string }>(
+      `SELECT record_body->>'eventType' AS event_type FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.scheduler.decision'
+       ORDER BY created_at`,
+      [String(created.task.taskId)],
+    );
+    expect(decisions.rows.map((row) => row.event_type)).toEqual(
+      expect.arrayContaining(["claimed", "started"]),
+    );
   });
 
   it("T-013 reconciles a response-lost scheduled start without a duplicate side effect", async () => {
@@ -3039,7 +3068,7 @@ describe("durable task lifecycle", () => {
     expect(await repository.getById(taskId)).toMatchObject({ internalState: "STOPPING" });
   });
 
-  it("T-001 releases the database connection before a slow cancel RPC", async () => {
+  it("command_started_is_emitted_before_rpc", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "rc2-cancel-no-db-connection" },
@@ -3077,6 +3106,10 @@ describe("durable task lifecycle", () => {
     ).tick();
     await rpcStarted;
     try {
+      await expectCommandLifecycle(taskId, "task.command.started", {
+        currentState: "CLAIMED",
+        adapterRpcStatus: "started",
+      });
       await expect(
         Promise.race([
           singleConnectionPool.query("SELECT 1 AS ready"),
@@ -3118,7 +3151,7 @@ describe("durable task lifecycle", () => {
     expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "cancelled" });
   });
 
-  it("T-003 restores authoritative state after permanent user cancel rejection", async () => {
+  it("cancel_rejected_emits_task_and_command_events", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "rc2-cancel-rejected", scenario: "cancel_permanent_reject" },
@@ -3145,6 +3178,17 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(first.rows[0]).toMatchObject({ command_sequence: "1", state: "REJECTED" });
+    await expectCommandLifecycle(taskId, "task.command.rejected", {
+      currentState: "REJECTED",
+      adapterRpcStatus: "rejected",
+    });
+    const taskAudit = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.task.lifecycle'
+         AND record_body->>'eventType'='task.cancel_rejected'`,
+      [taskId],
+    );
+    expect(taskAudit.rows[0]?.count).toBe("1");
     await engine.cancelTask(taskId, authorization);
     const commands = await pool.query<{ command_sequence: string }>(
       "SELECT command_sequence FROM task_command WHERE task_id=$1 ORDER BY command_sequence",
@@ -3157,7 +3201,7 @@ describe("durable task lifecycle", () => {
     );
   });
 
-  it("T-004/T-005 keeps deadline stopping on transient failure and fails permanent rejection", async () => {
+  it("safe_stop_unconfirmed_emits_exhausted_command", async () => {
     const clock = new FakeClock(new Date("2026-07-16T17:00:00Z"));
     const deadlineEngine = new TaskEngine(
       engine.manifest,
@@ -3202,9 +3246,13 @@ describe("durable task lifecycle", () => {
       internalState: "TERMINAL_FAILED",
       error: { data: { reasonCode: "SAFE_STOP_UNCONFIRMED" } },
     });
+    await expectCommandLifecycle(rejectedId, "task.command.exhausted", {
+      currentState: "EXHAUSTED",
+      reasonCode: "SAFE_STOP_UNCONFIRMED",
+    });
   });
 
-  it("T-006 coalesces concurrent duplicate cancel into one durable command", async () => {
+  it("duplicate_request_is_diagnostic_not_lifecycle", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "rc2-cancel-concurrent" },
@@ -3222,6 +3270,98 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(commands.rows[0]?.count).toBe("1");
+    const lifecycle = await pool.query<{ event_type: string }>(
+      `SELECT record_body->>'eventType' AS event_type FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.command.lifecycle'
+       ORDER BY event_type`,
+      [taskId],
+    );
+    expect(lifecycle.rows).toEqual([{ event_type: "task.command.created" }]);
+  });
+
+  it("task_terminal_exhausts_and_emits_each_command", async () => {
+    const taskId = await createTwoPendingCommands("terminal-command-audit");
+    await new TaskRepository(pool).applySnapshot(taskId, 2, {
+      internalState: "TERMINAL_COMPLETED",
+      mcpStatus: "completed",
+      substate: null,
+      statusMessage: "done",
+      result: { isError: false, structuredContent: { outcome: "success" } },
+      error: null,
+      terminal: true,
+      observationType: "task.completed",
+    });
+    const exhausted = await pool.query<{ sequence: string }>(
+      `SELECT record_body->'payload'->>'commandSequence' AS sequence
+       FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.command.lifecycle'
+         AND record_body->>'eventType'='task.command.exhausted'
+       ORDER BY sequence`,
+      [taskId],
+    );
+    expect(exhausted.rows).toEqual([{ sequence: "1" }, { sequence: "2" }]);
+  });
+
+  it("expired_claim_supersede_emits_command_event", async () => {
+    const { taskId, repository } = await createTaskForRepositoryCommand("expired-supersede");
+    await repository.beginCommand(taskId, "PAUSE", randomUUID(), {});
+    const claimed = await repository.claimDueCommands(new Date(), "expired-owner", 1);
+    expect(claimed.some((command) => command.taskId === taskId)).toBe(true);
+    await repository.beginCancel(taskId, randomUUID());
+    await pool.query(
+      "UPDATE task_command SET claim_until=clock_timestamp()-interval '1 second' WHERE task_id=$1 AND command_type='PAUSE'",
+      [taskId],
+    );
+    await repository.claimDueCommands(new Date(), "supersede-observer", 30_000);
+    await expectCommandLifecycle(taskId, "task.command.superseded", {
+      currentState: "EXHAUSTED",
+      reasonCode: "SUPERSEDED_BY_SAFE_STOP",
+    });
+  });
+
+  it("every_committed_task_transition_has_audit_record", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "task-audit-completeness" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected audited Task");
+    const taskId = String(created.task.taskId);
+    await engine.getTask(taskId, authorization);
+    const committed = await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM task_observation WHERE task_id=$1",
+      [taskId],
+    );
+    const audited = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.task.lifecycle'`,
+      [taskId],
+    );
+    expect(audited.rows[0]?.count).toBe(committed.rows[0]?.count);
+  });
+
+  it("every_committed_command_transition_has_audit_record", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "command-audit-completeness" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected audited command Task");
+    const taskId = String(created.task.taskId);
+    await engine.cancelTask(taskId, authorization);
+    await new DurableCommandDispatcher(gateway, new TaskRepository(pool)).tick();
+    const events = await pool.query<{ event_type: string }>(
+      `SELECT record_body->>'eventType' AS event_type FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.command.lifecycle'
+       ORDER BY created_at`,
+      [taskId],
+    );
+    expect(events.rows.map((row) => row.event_type)).toEqual([
+      "task.command.created",
+      "task.command.claimed",
+      "task.command.started",
+      "task.command.acknowledged",
+    ]);
   });
 
   it("T-014/T-015 separates Runtime observation revision and publishes complete idempotent events", async () => {
@@ -3352,16 +3492,31 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(commandEvents.rows.map((row) => row.event_type)).toEqual([
+      "task.command.created",
       "task.command.claimed",
+      "task.command.started",
       "task.command.acknowledged",
     ]);
     expect(commandEvents.rows.map((row) => row.payload)).toEqual([
+      expect.objectContaining({
+        commandType: "CANCEL",
+        currentState: "PENDING",
+        attempt: 0,
+        adapterRpcStatus: "not_started",
+      }),
       expect.objectContaining({
         commandType: "CANCEL",
         previousState: "PENDING",
         currentState: "CLAIMED",
         attempt: 1,
         adapterRpcStatus: "not_started",
+      }),
+      expect.objectContaining({
+        commandType: "CANCEL",
+        previousState: "CLAIMED",
+        currentState: "CLAIMED",
+        attempt: 1,
+        adapterRpcStatus: "started",
       }),
       expect.objectContaining({
         commandType: "CANCEL",
@@ -3492,7 +3647,7 @@ describe("durable task lifecycle", () => {
     });
   });
 
-  it("T-021 rejects a command Ack sequence mismatch and leaves the command retryable", async () => {
+  it("identity_mismatch_emits_terminal_command_fact", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "rc2-command-identity", scenario: "command_sequence_mismatch" },
@@ -3513,14 +3668,18 @@ describe("durable task lifecycle", () => {
         undefined,
         "command-identity",
       ).tick(),
-    ).toMatchObject({ retried: 1, acknowledged: 0 });
+    ).toMatchObject({ rejected: 1, retried: 0, acknowledged: 0 });
     const command = await pool.query<{ state: string; last_error_message: string }>(
       "SELECT state,last_error_message FROM task_command WHERE task_id=$1",
       [taskId],
     );
     expect(command.rows[0]).toMatchObject({
-      state: "RETRY_WAIT",
+      state: "REJECTED",
       last_error_message: "ADAPTER_COMMAND_ACK_IDENTITY_MISMATCH",
+    });
+    await expectCommandLifecycle(taskId, "task.command.rejected", {
+      currentState: "REJECTED",
+      reasonCode: "ADAPTER_IDENTITY_MISMATCH",
     });
   });
 
@@ -3612,7 +3771,7 @@ describe("durable task lifecycle", () => {
     ).toBe(defaultRetained.ttlMs);
   });
 
-  it("T-026 lets concurrent TTL cleaners expire and purge each Task exactly once", async () => {
+  it("ttl_expire_uses_envelope and ttl_purge_uses_envelope", async () => {
     const created = await engine.callOperation(
       requiredOperation("durable_task"),
       { resourceId: "rc2-ttl-concurrency" },
@@ -3660,6 +3819,17 @@ describe("durable task lifecycle", () => {
       [taskId],
     );
     expect(expiryEvents.rows[0]?.count).toBe("1");
+    const expireEnvelope = await pool.query<{ payload: Record<string, unknown> }>(
+      `SELECT record_body->'payload' AS payload FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.ttl.lifecycle'
+         AND record_body->>'eventType'='expire'`,
+      [taskId],
+    );
+    expect(expireEnvelope.rows[0]?.payload).toMatchObject({
+      event: "expire",
+      taskId,
+      blockedReason: null,
+    });
     await pool.query("UPDATE provider_task SET purge_after='2000-01-02' WHERE task_id=$1", [
       taskId,
     ]);
@@ -3684,6 +3854,13 @@ describe("durable task lifecycle", () => {
     ]);
     expect(purged.reduce((sum, result) => sum + result.purged, 0)).toBe(1);
     expect(ttlEvents).toContainEqual(["purge", 1]);
+    const purgeEnvelope = await pool.query<{ payload: Record<string, unknown> }>(
+      `SELECT record_body->'payload' AS payload FROM provider_ops_delivery
+       WHERE aggregate_id=$1 AND record_type='provider.ttl.lifecycle'
+         AND record_body->>'eventType'='purge'`,
+      [taskId],
+    );
+    expect(purgeEnvelope.rows[0]?.payload).toMatchObject({ event: "purge", taskId });
     const residue = await pool.query<{ count: string }>(
       `SELECT (
          (SELECT count(*) FROM provider_task WHERE task_id=$1) +
@@ -4470,4 +4647,19 @@ async function claimedCommandCount(taskId: string): Promise<number> {
     [taskId],
   );
   return Number(result.rows[0]?.count ?? 0);
+}
+
+async function expectCommandLifecycle(
+  taskId: string,
+  eventType: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const result = await pool.query<{ record_body: { payload?: Record<string, unknown> } }>(
+    `SELECT record_body FROM provider_ops_delivery
+     WHERE aggregate_id=$1 AND record_type='provider.command.lifecycle'
+       AND record_body->>'eventType'=$2`,
+    [taskId, eventType],
+  );
+  expect(result.rows).toHaveLength(1);
+  expect(result.rows[0]?.record_body.payload).toMatchObject(payload);
 }

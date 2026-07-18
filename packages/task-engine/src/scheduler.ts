@@ -368,6 +368,12 @@ function executionOptions(task: TaskRecord) {
     authorizationContextHash: task.authorizationContextHash,
     executionMode: task.executionMode,
     simulationId: task.simulationId,
+    ...(task.rootTraceparent === undefined || task.rootTraceparent === null
+      ? {}
+      : { rootTraceparent: task.rootTraceparent }),
+    ...(task.rootTracestate === undefined || task.rootTracestate === null
+      ? {}
+      : { rootTracestate: task.rootTracestate }),
   };
 }
 

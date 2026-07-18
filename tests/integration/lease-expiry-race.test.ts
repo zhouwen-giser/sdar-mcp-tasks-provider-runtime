@@ -133,6 +133,11 @@ class LeaseRaceRepository {
     return Promise.resolve(0);
   }
 
+  recordCommandStarted(command: PendingCommandRecord): Promise<void> {
+    this.requiredOwned(command);
+    return Promise.resolve();
+  }
+
   getById(taskId: string): Promise<TaskRecord> {
     return Promise.resolve({
       taskId,

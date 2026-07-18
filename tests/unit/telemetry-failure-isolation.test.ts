@@ -5,10 +5,49 @@ import {
   PeriodicExportingMetricReader,
 } from "@opentelemetry/sdk-metrics";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-node";
+import { InMemorySpanExporter } from "@opentelemetry/sdk-trace-node";
 import { describe, expect, it } from "vitest";
 import { ProviderTelemetry } from "../../packages/observability/src/index.js";
 
 describe("Provider telemetry failure isolation", () => {
+  it.each(["exception_message_is_not_exported", "exception_stack_is_not_exported"])(
+    "%s",
+    async () => {
+      const spans = new RetainingSpanExporter();
+      const telemetry = new ProviderTelemetry({
+        resource: {
+          serviceVersion: "1.1.0",
+          instanceId: "safe-exception",
+          deploymentEnvironment: "test",
+          providerId: "failure-provider",
+          providerVersion: "1.0.0",
+        },
+        enabled: true,
+        spanExporter: spans,
+        metricReader: new PeriodicExportingMetricReader({
+          exporter: new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE),
+          exportIntervalMillis: 60_000,
+        }),
+      });
+      telemetry.start();
+      const failure = new Error("classified database url and token=classified");
+      failure.stack = "classified-stack /secret/path";
+      await expect(
+        telemetry.trace("provider.safe_failure", {}, () => Promise.reject(failure)),
+      ).rejects.toBe(failure);
+      await telemetry.shutdown();
+      const exported = JSON.stringify(
+        spans.getFinishedSpans().map((span) => ({
+          attributes: span.attributes,
+          events: span.events,
+          status: span.status,
+        })),
+      );
+      expect(exported).not.toMatch(/classified|secret\/path|database url/);
+      expect(exported).toContain("error.type");
+    },
+  );
+
   it("keeps business execution successful when export times out and queues overflow", async () => {
     const telemetry = new ProviderTelemetry({
       resource: {
@@ -34,9 +73,14 @@ describe("Provider telemetry failure isolation", () => {
     });
     telemetry.start();
 
+    let executions = 0;
     await expect(
-      telemetry.trace("provider.business", {}, () => Promise.resolve("task_create_success")),
+      telemetry.trace("provider.business", {}, () => {
+        executions += 1;
+        return Promise.resolve("task_create_success");
+      }),
     ).resolves.toBe("task_create_success");
+    expect(executions).toBe(1);
     for (let index = 0; index < 20; index += 1) {
       telemetry.event("provider.queue_pressure", { index });
       telemetry.metric("provider_command_total", 1, { outcome: "success" });
@@ -45,6 +89,12 @@ describe("Provider telemetry failure isolation", () => {
     await expect(telemetry.shutdown()).resolves.toBeUndefined();
   });
 });
+
+class RetainingSpanExporter extends InMemorySpanExporter {
+  override shutdown(): Promise<void> {
+    return Promise.resolve();
+  }
+}
 
 class NeverCompletesSpanExporter implements SpanExporter {
   export(spans: ReadableSpan[], resultCallback: Parameters<SpanExporter["export"]>[1]): void {

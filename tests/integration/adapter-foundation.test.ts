@@ -46,7 +46,12 @@ describe("TypeScript Adapter foundation", () => {
     const calls: {
       method: string;
       outcome: "success" | "error";
-      context: { taskId?: string; externalExecutionId?: string; commandSequence?: number };
+      context: {
+        taskId?: string;
+        externalExecutionId?: string;
+        operationName?: string;
+        commandSequence?: number;
+      };
     }[] = [];
     gateway = new GrpcAdapterGateway({
       endpoint: `127.0.0.1:${String(port)}`,
@@ -70,6 +75,7 @@ describe("TypeScript Adapter foundation", () => {
         context: {
           taskId: "task-telemetry",
           externalExecutionId: "execution-telemetry",
+          operationName: "durable_task",
         },
       },
     ]);

@@ -90,7 +90,7 @@ export function commandEnvelope(
   }
   const payload = commandPayload(event.payload);
   return createProviderOpsEnvelope({
-    recordType: "provider.command_dispatch",
+    recordType: "provider.command.lifecycle",
     eventCategory: "command.dispatch",
     deliveryClass: "operational",
     providerId: context.providerId,
@@ -100,9 +100,9 @@ export function commandEnvelope(
     ...optionalIdentityFields(event.payload),
     commandSequence: sequence,
     stableAggregateIdentity: event.aggregateId,
-    eventIdentity: event.eventId,
+    eventIdentity: event.eventKey,
     revision: sequence,
-    occurredAt: event.createdAt,
+    occurredAt: authoritativeOccurredAt(event),
     attributes: { source: "committed_outbox", commandEvent: event.eventType },
     payload,
   });
@@ -138,7 +138,7 @@ export function lifecycleEnvelope(
   const payload = allowlistedLifecyclePayload(event.payload);
   const revision = numericField(event.payload, "observationRevision");
   return createProviderOpsEnvelope({
-    recordType: "provider.task_lifecycle",
+    recordType: "provider.task.lifecycle",
     eventCategory: "task.lifecycle",
     deliveryClass: "audit",
     providerId: context.providerId,
@@ -147,9 +147,9 @@ export function lifecycleEnvelope(
     taskId: event.aggregateId,
     ...optionalIdentityFields(event.payload),
     stableAggregateIdentity: event.aggregateId,
-    eventIdentity: event.eventId,
+    eventIdentity: event.eventKey,
     ...(revision === undefined ? {} : { revision, observationRevision: revision }),
-    occurredAt: event.createdAt,
+    occurredAt: authoritativeOccurredAt(event),
     attributes: { source: "committed_outbox", lifecycleEvent: event.eventType },
     payload,
   });
@@ -211,4 +211,11 @@ function numericField(payload: Record<string, unknown>, key: string): number | u
 function finiteNumberField(payload: Record<string, unknown>, key: string): number | undefined {
   const value = payload[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function authoritativeOccurredAt(event: OutboxRecord): Date {
+  const value = event.payload.occurredAt;
+  if (typeof value !== "string") return event.createdAt;
+  const occurredAt = new Date(value);
+  return Number.isNaN(occurredAt.getTime()) ? event.createdAt : occurredAt;
 }

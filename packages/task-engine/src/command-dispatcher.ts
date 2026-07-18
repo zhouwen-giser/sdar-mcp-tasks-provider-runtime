@@ -94,6 +94,7 @@ export class DurableCommandDispatcher {
       const operation = (
         await this.operationSnapshots.loadOperationSnapshot(task.operationSnapshotId)
       ).operation;
+      await this.repository.recordCommandStarted(command);
       let outcome: "acknowledged" | "retriable" | "rejected" | "exhausted";
       if (command.commandType === "CANCEL") {
         await this.repository.supersedeExpiredClaimedNormalCommandsForSafeStop(command.taskId);
@@ -118,6 +119,13 @@ export class DurableCommandDispatcher {
           command.taskId,
           error instanceof Error ? error.message : "ADAPTER_IDENTITY_MISMATCH",
         );
+        await this.repository.rejectClaimedCommand(
+          command,
+          "ADAPTER_IDENTITY_MISMATCH",
+          error instanceof Error ? error.message : "Adapter identity mismatch.",
+        );
+        result.rejected += 1;
+        return;
       }
       if (
         command.commandType === "CANCEL" &&
@@ -214,9 +222,7 @@ export class DurableCommandDispatcher {
     }
     const reconciled = await this.withClaimHeartbeat(command, () =>
       this.gateway.reconcileExecution(task.taskId, operationName, task.argumentHash, {
-        authorizationContextHash: task.authorizationContextHash,
-        executionMode: task.executionMode,
-        simulationId: task.simulationId,
+        ...executionOptions(task),
         externalExecutionId: task.externalExecutionId,
       }),
     );
@@ -487,10 +493,18 @@ function executionOptions(task: {
   authorizationContextHash: string;
   executionMode: ExecutionMode;
   simulationId: string | null;
+  rootTraceparent?: string | null;
+  rootTracestate?: string | null;
 }): Record<string, unknown> {
   return {
     authorizationContextHash: task.authorizationContextHash,
     executionMode: task.executionMode,
     simulationId: task.simulationId,
+    ...(task.rootTraceparent === undefined || task.rootTraceparent === null
+      ? {}
+      : { rootTraceparent: task.rootTraceparent }),
+    ...(task.rootTracestate === undefined || task.rootTracestate === null
+      ? {}
+      : { rootTracestate: task.rootTracestate }),
   };
 }

@@ -66,6 +66,7 @@ class MemoryOutboxRepository {
 function event(id: string): OutboxRecord {
   return {
     eventId: `00000000-0000-4000-8000-${id.padStart(12, "0")}`,
+    eventKey: `test-event-${id}`,
     aggregateId: "00000000-0000-4000-8000-000000000001",
     eventType: `task.${id}`,
     payload: { taskId: "task" },

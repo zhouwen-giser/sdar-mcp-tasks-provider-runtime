@@ -18,18 +18,23 @@ import {
 import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
 import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
 import {
+  ProviderTelemetryGrpcServer,
+  ProviderTelemetryIngress,
+} from "../../../packages/provider-telemetry/src/index.js";
+import {
   OperationSnapshotRepository,
   IdempotencyRepository,
   OutboxRepository,
+  ProviderOpsDeliveryRepository,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
 import {
   DurableCommandDispatcher,
+  DurableProviderOpsPublisher,
   DurableScheduler,
   InternalNoopOutboxSink,
   OutboxPublisher,
-  ProviderOpsOutboxSink,
   RecoveryManager,
   TaskEngine,
   OutboxCleaner,
@@ -56,6 +61,7 @@ export interface RuntimeDependencies {
   ttlCleaner: "starting" | "ready" | "failed";
   outboxPublisher: "starting" | "ready" | "failed";
   outboxCleaner: "starting" | "ready" | "failed";
+  providerTelemetryIngress: "starting" | "ready" | "failed";
 }
 
 export interface RuntimeApplication {
@@ -76,8 +82,10 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   }
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
+  const telemetrySelfGauges: Record<string, number> = {};
   const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
   let telemetry: ProviderTelemetry | undefined;
+  let providerTelemetryServer: ProviderTelemetryGrpcServer | undefined;
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
   const gateway = new GrpcAdapterGateway({
@@ -85,12 +93,34 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     providerId: config.PROVIDER_ID,
     credentials: adapterCredentials(config),
     timeoutMs: config.ADAPTER_RPC_TIMEOUT_MS,
-    onRpc: (method, outcome, durationMs, context) => {
+    onRpc: (method, outcome, durationMs) => {
       metrics.increment("sdar_adapter_rpc_total", { method, outcome });
-      telemetry?.adapterRpc(method, outcome, durationMs, context);
       telemetry?.metric("adapter_rpc_total", 1, { method, outcome });
       telemetry?.metric("adapter_rpc_duration", durationMs, { method, outcome }, "histogram");
     },
+    traceRpc: (method, rpcContext, operation) =>
+      telemetry?.traceAdapterRpc(
+        method,
+        {
+          ...(rpcContext.taskId === undefined ? {} : { taskId: rpcContext.taskId }),
+          ...(rpcContext.externalExecutionId === undefined
+            ? {}
+            : { externalExecutionId: rpcContext.externalExecutionId }),
+          ...(rpcContext.operationName === undefined
+            ? {}
+            : { operationName: rpcContext.operationName }),
+          ...(rpcContext.commandSequence === undefined
+            ? {}
+            : { commandSequence: rpcContext.commandSequence }),
+        },
+        operation,
+        rpcContext.traceparent === undefined
+          ? undefined
+          : {
+              traceparent: rpcContext.traceparent,
+              ...(rpcContext.tracestate === undefined ? {} : { tracestate: rpcContext.tracestate }),
+            },
+      ) ?? operation(new grpc.Metadata()),
   });
   const dependencies: RuntimeDependencies = {
     database: "starting",
@@ -102,6 +132,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     ttlCleaner: "starting",
     outboxPublisher: "starting",
     outboxCleaner: "starting",
+    providerTelemetryIngress: config.PROVIDER_TELEMETRY_INGRESS_ENABLED ? "starting" : "ready",
   };
   let manifest: ProviderManifest | undefined;
   let mcpHandler: McpProtocolHandler | undefined;
@@ -113,6 +144,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let adapterHealthTimer: NodeJS.Timeout | undefined;
   let adapterManifestTimer: NodeJS.Timeout | undefined;
   let outboxPublisherTimer: NodeJS.Timeout | undefined;
+  let providerOpsPublisherTimer: NodeJS.Timeout | undefined;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
@@ -121,6 +153,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let adapterHealthTicking = false;
   let adapterManifestTicking = false;
   let outboxPublisherTicking = false;
+  let providerOpsPublisherTicking = false;
   let adapterHealthFailures = 0;
   const rateLimiter = new BoundedRateLimiter(
     config.RATE_LIMIT_MAX,
@@ -158,8 +191,20 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     const pendingOutbox = await pool.query<{ count: string }>(
       "SELECT count(*) FROM outbox_event WHERE published_at IS NULL",
     );
+    const telemetryDelivery = await pool.query<{ backlog: string; oldest_age_seconds: string }>(
+      `SELECT count(*) FILTER (WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text AS backlog,
+              COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(created_at)
+                FILTER (WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))),0)::text
+                AS oldest_age_seconds
+       FROM provider_ops_delivery`,
+    );
     const gauges: Record<string, number> = {
       sdar_outbox_pending: Number(pendingOutbox.rows[0]?.count ?? 0),
+      telemetry_audit_backlog: Number(telemetryDelivery.rows[0]?.backlog ?? 0),
+      telemetry_audit_oldest_age_seconds: Number(
+        telemetryDelivery.rows[0]?.oldest_age_seconds ?? 0,
+      ),
+      ...telemetrySelfGauges,
     };
     for (const row of taskStates.rows) {
       gauges[`sdar_task_state{state="${row.internal_state}"}`] = Number(row.count);
@@ -216,7 +261,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (adapterHealthTimer !== undefined) clearInterval(adapterHealthTimer);
     if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
     if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
+    if (providerOpsPublisherTimer !== undefined) clearInterval(providerOpsPublisherTimer);
     gateway.close();
+    await providerTelemetryServer?.close();
     await telemetry?.shutdown();
     await pool.end();
   });
@@ -240,19 +287,31 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       }
       const validated = new OperationRegistry().validate(manifest);
       if (telemetry === undefined) {
-        telemetry = new ProviderTelemetry({
-          enabled: config.OTEL_ENABLED,
-          otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
-          resource: {
-            serviceVersion: "1.1.0",
-            instanceId: telemetryInstanceId,
-            deploymentEnvironment: config.RUNTIME_ENV,
-            providerId: validated.providerId,
-            providerVersion: manifest.providerVersion,
-          },
-        });
         try {
-          telemetry.start();
+          const security = loadOtlpExporterSecurity(config);
+          const candidate = new ProviderTelemetry({
+            enabled: config.OTEL_ENABLED,
+            otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+            otlpTimeoutMillis: config.OTEL_EXPORTER_OTLP_TIMEOUT_MS,
+            ...security,
+            resource: {
+              serviceVersion: "1.1.0",
+              instanceId: telemetryInstanceId,
+              deploymentEnvironment: config.RUNTIME_ENV,
+              providerId: validated.providerId,
+              providerVersion: manifest.providerVersion,
+            },
+            onSelfMetric: (name, value, attributes, kind) => {
+              const labels = Object.fromEntries(
+                Object.entries(attributes).map(([key, label]) => [key, String(label)]),
+              );
+              const metricName = prometheusMetricKey(name, labels);
+              if (kind === "gauge") telemetrySelfGauges[metricName] = value;
+              else metrics.increment(name, labels, value);
+            },
+          });
+          candidate.start();
+          telemetry = candidate;
         } catch (error) {
           logger.warn({ err: error }, "Provider telemetry initialization failed");
         }
@@ -280,10 +339,60 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         maxArgumentBytes: config.ARGUMENT_MAX_BYTES,
         maxJsonDepth: config.ARGUMENT_MAX_DEPTH,
         maxJsonNodes: config.ARGUMENT_MAX_NODES,
+        traceRequest: (name, headers, action) =>
+          telemetry?.traceRequest(
+            name,
+            headers,
+            { "sdar.provider.id": validated.providerId },
+            action,
+          ) ?? action(),
+        currentTraceContext: () => telemetry?.currentTraceContext() ?? null,
         onProtocolError: (error, correlationId) =>
           logger.error({ err: error, correlationId }, "MCP technical request failure"),
       });
       const taskRepository = new TaskRepository(pool);
+      if (
+        config.PROVIDER_TELEMETRY_INGRESS_ENABLED &&
+        dependencies.providerTelemetryIngress !== "ready"
+      ) {
+        providerTelemetryServer ??= new ProviderTelemetryGrpcServer(
+          new ProviderTelemetryIngress(pool, {
+            providerId: validated.providerId,
+            runtimeVersion: "1.1.0",
+            instanceId: telemetryInstanceId,
+            maxBatch: config.PROVIDER_TELEMETRY_MAX_BATCH,
+            maxEventBytes: config.PROVIDER_TELEMETRY_MAX_EVENT_BYTES,
+            maxDepth: config.PROVIDER_TELEMETRY_MAX_DEPTH,
+            maxNodes: config.PROVIDER_TELEMETRY_MAX_NODES,
+            rateLimit: config.PROVIDER_TELEMETRY_RATE_LIMIT,
+            traceEvent: (traceContext, operation) =>
+              telemetry?.traceProviderEvent(traceContext, operation) ?? operation(),
+          }),
+          {
+            host: config.PROVIDER_TELEMETRY_HOST,
+            port: config.PROVIDER_TELEMETRY_PORT,
+            tlsMode: config.PROVIDER_TELEMETRY_TLS_MODE,
+            ...(config.PROVIDER_TELEMETRY_TLS_CA_PATH === undefined
+              ? {}
+              : { tlsCaPath: config.PROVIDER_TELEMETRY_TLS_CA_PATH }),
+            ...(config.PROVIDER_TELEMETRY_TLS_CERT_PATH === undefined
+              ? {}
+              : { tlsCertPath: config.PROVIDER_TELEMETRY_TLS_CERT_PATH }),
+            ...(config.PROVIDER_TELEMETRY_TLS_KEY_PATH === undefined
+              ? {}
+              : { tlsKeyPath: config.PROVIDER_TELEMETRY_TLS_KEY_PATH }),
+          },
+        );
+        try {
+          await providerTelemetryServer.start();
+          dependencies.providerTelemetryIngress = "ready";
+        } catch (error) {
+          dependencies.providerTelemetryIngress = "failed";
+          await providerTelemetryServer.close();
+          providerTelemetryServer = undefined;
+          throw error;
+        }
+      }
       const scheduler = new DurableScheduler(
         validated,
         gateway,
@@ -296,7 +405,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           concurrency: config.SCHEDULER_CONCURRENCY,
           leaseMilliseconds: config.SCHEDULE_CLAIM_LEASE_MS,
           onEvent: (decision, amount) =>
-            telemetry?.event("provider.scheduler_decision", { decision, amount }),
+            telemetry?.metric("provider_scheduler_total", amount, { decision }),
         },
       );
       const commandDispatcher = new DurableCommandDispatcher(
@@ -325,7 +434,6 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         recoveryLeaseMs: config.RECOVERY_LEASE_MS,
         onMetric: (outcome, amount) =>
           metrics.increment("sdar_ttl_cleaner_total", { outcome }, amount),
-        onEvent: (event, amount) => telemetry?.event("provider.ttl_event", { event, amount }),
       });
       const downstreamOutboxSink =
         config.OUTBOX_SINK === "webhook"
@@ -336,12 +444,35 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           : new InternalNoopOutboxSink();
       const outboxPublisher = new OutboxPublisher(
         new OutboxRepository(pool),
-        new ProviderOpsOutboxSink(downstreamOutboxSink, telemetry, {
-          providerId: validated.providerId,
-          runtimeVersion: "1.1.0",
-          instanceId: telemetryInstanceId,
-        }),
+        downstreamOutboxSink,
         config.OUTBOX_BATCH_SIZE,
+      );
+      const providerOpsPublisher = new DurableProviderOpsPublisher(
+        new ProviderOpsDeliveryRepository(pool),
+        {
+          export: async (records) =>
+            telemetry?.exportAudit(
+              records.map((record) => ({
+                ...record.recordBody,
+                instanceId: telemetryInstanceId,
+                emittedAt: new Date().toISOString(),
+              })),
+            ) ?? Promise.reject(new Error("TELEMETRY_AUDIT_EXPORT_UNAVAILABLE")),
+        },
+        telemetryInstanceId,
+        {
+          onEvent: (event, amount) => {
+            if (event === "retry") {
+              telemetry?.metric("telemetry_audit_retry_total", amount, {
+                signal: "audit",
+                reason: "exporter_error",
+              });
+              metrics.increment("telemetry_audit_retry_total", {}, amount);
+            } else {
+              telemetry?.metric("provider_telemetry_delivery_total", amount, { event });
+            }
+          },
+        },
       );
       const recovery = new RecoveryManager(
         taskEngine,
@@ -355,13 +486,17 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           );
         },
         (event, amount) => {
-          telemetry?.event("provider.recovery_event", { event, amount });
           telemetry?.metric("provider_recovery_total", amount, { event });
         },
       );
       const recoveryStartedAt = performance.now();
       const recovered = await recovery.scan();
-      telemetry.metric("recovery_duration", performance.now() - recoveryStartedAt, {}, "histogram");
+      telemetry?.metric(
+        "recovery_duration",
+        performance.now() - recoveryStartedAt,
+        {},
+        "histogram",
+      );
       metrics.increment("sdar_recovery_total", { outcome: "scan" });
       dependencies.recovery = "ready";
       logger.info(
@@ -378,6 +513,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       dependencies.ttlCleaner = "ready";
       await outboxPublisher.tick();
       dependencies.outboxPublisher = "ready";
+      await providerOpsPublisher.tick().catch((error: unknown) => {
+        logger.warn({ err: error }, "Provider telemetry delivery deferred");
+      });
       await updateOperationalGauges(pool, telemetry);
       schedulerTimer = setInterval(() => {
         if (schedulerTicking) return;
@@ -465,6 +603,19 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           });
       }, config.OUTBOX_POLL_MS);
       outboxPublisherTimer.unref();
+      providerOpsPublisherTimer = setInterval(() => {
+        if (providerOpsPublisherTicking) return;
+        providerOpsPublisherTicking = true;
+        void providerOpsPublisher
+          .tick()
+          .catch((error: unknown) => {
+            logger.warn({ err: error }, "Provider telemetry delivery deferred");
+          })
+          .finally(() => {
+            providerOpsPublisherTicking = false;
+          });
+      }, config.OUTBOX_POLL_MS);
+      providerOpsPublisherTimer.unref();
       recoveryTimer = setInterval(() => {
         if (recoveryTicking) return;
         recoveryTicking = true;
@@ -560,6 +711,8 @@ async function updateOperationalGauges(
       pending_commands: string;
       outbox_pending: string;
       recovery_backlog: string;
+      telemetry_audit_backlog: string;
+      telemetry_audit_oldest_age_seconds: string;
     }>(`SELECT
       (SELECT count(*) FROM provider_task WHERE internal_state NOT LIKE 'TERMINAL_%')::text
         AS active_tasks,
@@ -569,13 +722,26 @@ async function updateOperationalGauges(
       ((SELECT count(*) FROM admission_intent WHERE state IN ('PENDING','UNCERTAIN')) +
        (SELECT count(*) FROM provider_task
         WHERE internal_state NOT LIKE 'TERMINAL_%' AND next_recovery_at <= clock_timestamp()))::text
-        AS recovery_backlog`);
+        AS recovery_backlog,
+      (SELECT count(*) FROM provider_ops_delivery
+       WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text AS telemetry_audit_backlog,
+      (SELECT COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(created_at)),0)
+       FROM provider_ops_delivery
+       WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text
+        AS telemetry_audit_oldest_age_seconds`);
     const row = counts.rows[0];
     if (row === undefined) return;
     telemetry.metric("active_tasks", Number(row.active_tasks), {}, "gauge");
     telemetry.metric("pending_commands", Number(row.pending_commands), {}, "gauge");
     telemetry.metric("outbox_pending", Number(row.outbox_pending), {}, "gauge");
     telemetry.metric("recovery_backlog", Number(row.recovery_backlog), {}, "gauge");
+    telemetry.metric("telemetry_audit_backlog", Number(row.telemetry_audit_backlog), {}, "gauge");
+    telemetry.metric(
+      "telemetry_audit_oldest_age_seconds",
+      Number(row.telemetry_audit_oldest_age_seconds),
+      {},
+      "gauge",
+    );
   } catch {
     // Metrics collection is best effort and never affects Runtime readiness or Task state.
   }
@@ -617,4 +783,54 @@ function isValidInternalAdminToken(token: string, expected: string): boolean {
 
 function adminTokenDigest(token: string): Buffer {
   return createHash("sha256").update("sdar-internal-admin-token-v1").update(token).digest();
+}
+
+function prometheusMetricKey(name: string, labels: Record<string, string>): string {
+  const entries = Object.entries(labels).sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length === 0) return name;
+  return `${name}{${entries
+    .map(([key, value]) => `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`)
+    .join(",")}}`;
+}
+
+export function loadOtlpExporterSecurity(config: RuntimeConfig): {
+  otlpHeaders?: Record<string, string>;
+  otlpTls?: { ca: Buffer; cert: Buffer; key: Buffer };
+} {
+  if (!config.OTEL_ENABLED) return {};
+  let otlpHeaders: Record<string, string> | undefined;
+  if (config.OTEL_EXPORTER_OTLP_HEADERS_FILE !== undefined) {
+    const content = readFileSync(config.OTEL_EXPORTER_OTLP_HEADERS_FILE, "utf8");
+    if (Buffer.byteLength(content, "utf8") > 65_536) throw new Error("OTLP_HEADERS_FILE_TOO_LARGE");
+    const parsed: unknown = JSON.parse(content);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("OTLP_HEADERS_FILE_INVALID");
+    }
+    otlpHeaders = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!/^[a-z0-9-]{1,128}$/i.test(key) || typeof value !== "string" || /[\r\n]/.test(value)) {
+        throw new Error("OTLP_HEADERS_FILE_INVALID");
+      }
+      otlpHeaders[key] = value;
+    }
+  }
+  let otlpTls: { ca: Buffer; cert: Buffer; key: Buffer } | undefined;
+  if (config.OTEL_EXPORTER_OTLP_TLS_MODE === "required") {
+    if (
+      config.OTEL_EXPORTER_OTLP_CA_PATH === undefined ||
+      config.OTEL_EXPORTER_OTLP_CERT_PATH === undefined ||
+      config.OTEL_EXPORTER_OTLP_KEY_PATH === undefined
+    ) {
+      throw new Error("OTLP_MTLS_FILES_REQUIRED");
+    }
+    otlpTls = {
+      ca: readFileSync(config.OTEL_EXPORTER_OTLP_CA_PATH),
+      cert: readFileSync(config.OTEL_EXPORTER_OTLP_CERT_PATH),
+      key: readFileSync(config.OTEL_EXPORTER_OTLP_KEY_PATH),
+    };
+  }
+  return {
+    ...(otlpHeaders === undefined ? {} : { otlpHeaders }),
+    ...(otlpTls === undefined ? {} : { otlpTls }),
+  };
 }

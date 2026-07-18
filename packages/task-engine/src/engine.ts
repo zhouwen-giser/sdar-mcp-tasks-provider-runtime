@@ -612,6 +612,12 @@ export class TaskEngine {
           hash: task.authorizationContextHash,
           executionMode: task.executionMode,
           simulationId: task.simulationId,
+          ...(task.rootTraceparent === undefined || task.rootTraceparent === null
+            ? {}
+            : { rootTraceparent: task.rootTraceparent }),
+          ...(task.rootTracestate === undefined || task.rootTracestate === null
+            ? {}
+            : { rootTracestate: task.rootTracestate }),
         }),
         externalExecutionId: task.externalExecutionId,
       },
@@ -1286,6 +1292,12 @@ function executionOptions(authorization: AuthorizationContext) {
     ...(authorization.correlationId === undefined
       ? {}
       : { correlationId: authorization.correlationId }),
+    ...(authorization.rootTraceparent === undefined
+      ? {}
+      : { rootTraceparent: authorization.rootTraceparent }),
+    ...(authorization.rootTracestate === undefined
+      ? {}
+      : { rootTracestate: authorization.rootTracestate }),
   };
 }
 
