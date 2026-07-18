@@ -99,17 +99,20 @@ describe("durable Provider Ops audit delivery", () => {
     expect(await stateOf("event:race")).toBe("DELIVERED");
   });
 
-  it("retries the same durable record after exporter failure", async () => {
+  it("audit_retry_increments_retry_counter", async () => {
     const original = await capture("retry");
     const repository = new ProviderOpsDeliveryRepository(pool);
+    const events: [string, number][] = [];
     const failing = new DurableProviderOpsPublisher(
       repository,
       { export: async () => Promise.reject(new Error("collector unavailable")) },
       "replica-a",
+      { onEvent: (event, amount) => events.push([event, amount]) },
     );
 
     expect(await failing.tick()).toMatchObject({ claimed: 1, retried: 1, delivered: 0 });
     expect(await stateOf("event:retry")).toBe("RETRY_WAIT");
+    expect(events).toContainEqual(["retry", 1]);
     await pool.query(
       "UPDATE provider_ops_delivery SET next_attempt_at=clock_timestamp()-interval '1 second'",
     );

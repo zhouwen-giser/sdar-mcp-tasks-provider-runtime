@@ -1,6 +1,6 @@
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Attributes, Context, Link, TextMapGetter, TextMapSetter } from "@opentelemetry/api";
-import { W3CTraceContextPropagator } from "@opentelemetry/core";
+import { ExportResultCode, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import * as grpc from "@grpc/grpc-js";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
@@ -41,6 +41,12 @@ export interface ProviderTelemetryOptions {
   eventExporter?: LogRecordExporter;
   auditExporter?: LogRecordExporter;
   metricReader?: MetricReader;
+  onSelfMetric?: (
+    name: string,
+    value: number,
+    attributes: Attributes,
+    kind: ProviderMetricKind,
+  ) => void;
 }
 
 export type ProviderMetricKind = "counter" | "histogram" | "gauge";
@@ -62,7 +68,98 @@ const BOUNDED_METRIC_LABELS = new Set([
   "source",
   "state",
   "status",
+  "signal",
+  "reason",
 ]);
+
+const METRIC_LABEL_VALUES: Record<string, ReadonlySet<string>> = {
+  commandType: new Set(["CANCEL", "UPDATE", "PAUSE", "RESUME", "other"]),
+  decision: new Set([
+    "scheduled",
+    "claimed",
+    "started",
+    "retry",
+    "deadline",
+    "start_window_missed",
+    "other",
+  ]),
+  event: new Set([
+    "reconcile_start",
+    "reconcile_success",
+    "reconcile_failed",
+    "lease_conflict",
+    "delivered",
+    "retry",
+    "exhausted",
+    "other",
+  ]),
+  method: new Set([
+    "StartOperation",
+    "startOperation",
+    "GetExecution",
+    "RequestCancel",
+    "UpdateExecution",
+    "PauseExecution",
+    "ResumeExecution",
+    "ReconcileExecution",
+    "other",
+  ]),
+  outcome: new Set([
+    "success",
+    "error",
+    "rejected",
+    "timeout",
+    "unavailable",
+    "scan",
+    "renewed",
+    "expired",
+    "purged",
+    "blocked",
+    "other",
+  ]),
+  reasonCode: new Set([
+    "ADMISSION_REJECTED",
+    "START_WINDOW_MISSED",
+    "DEADLINE_REACHED",
+    "TASK_TERMINAL",
+    "SUPERSEDED_BY_SAFE_STOP",
+    "SAFE_STOP_UNCONFIRMED",
+    "other",
+  ]),
+  reason: new Set(["queue_full", "timeout", "exporter_error", "serialization", "invalid", "other"]),
+  resultClass: new Set([
+    "success",
+    "business_failure",
+    "technical_failure",
+    "cancelled",
+    "expired",
+    "other",
+  ]),
+  signal: new Set(["trace", "log", "metric", "audit", "other"]),
+  source: new Set(["mcp", "scheduler", "dispatcher", "recovery", "ttl", "provider", "other"]),
+  state: new Set([
+    "SCHEDULED",
+    "STARTING",
+    "WAITING_START_CONFIRMATION",
+    "RUNNING",
+    "WAITING_INPUT",
+    "PAUSED",
+    "RESUMING",
+    "STOPPING",
+    "TERMINAL_COMPLETED",
+    "TERMINAL_FAILED",
+    "TERMINAL_CANCELLED",
+    "PENDING",
+    "CLAIMED",
+    "RETRY_WAIT",
+    "ACKNOWLEDGED",
+    "REJECTED",
+    "EXHAUSTED",
+    "EXPIRED",
+    "other",
+  ]),
+  status: new Set(["success", "error", "rejected", "timeout", "unavailable", "other"]),
+};
 
 export class ProviderTelemetry {
   readonly #options: ProviderTelemetryOptions;
@@ -72,6 +169,7 @@ export class ProviderTelemetry {
   #meterProvider?: MeterProvider;
   #started = false;
   #shutdown = false;
+  #queuedEvents = 0;
   readonly #metricInstruments = new Map<string, ProviderMetricInstrument>();
   readonly #sanitizer = new TelemetrySanitizer();
   readonly #propagator = new W3CTraceContextPropagator();
@@ -84,15 +182,34 @@ export class ProviderTelemetry {
   start(): void {
     if (this.#started || this.#shutdown || this.#options.enabled !== true) return;
     const resource = createProviderResource(this.#options.resource);
-    const spanExporter =
+    const rawSpanExporter =
       this.#options.spanExporter ??
       new OTLPTraceExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "traces") });
-    const eventExporter =
+    const rawEventExporter =
       this.#options.eventExporter ??
       new OTLPLogExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "logs") });
-    const auditExporter =
+    const rawAuditExporter =
       this.#options.auditExporter ??
       new OTLPLogExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "logs") });
+    const exportTimeoutMillis = this.#options.batch?.exportTimeoutMillis ?? 10_000;
+    const spanExporter = observedSpanExporter(
+      rawSpanExporter,
+      exportTimeoutMillis,
+      (reason) => this.#recordExportFailure("trace", reason),
+      () => this.#recordExportAttempt("trace"),
+    );
+    const eventExporter = observedLogExporter(
+      rawEventExporter,
+      exportTimeoutMillis,
+      (reason) => this.#recordExportFailure("log", reason),
+      () => this.#recordExportAttempt("log"),
+    );
+    const auditExporter = observedLogExporter(
+      rawAuditExporter,
+      exportTimeoutMillis,
+      (reason) => this.#recordExportFailure("audit", reason),
+      () => this.#recordExportAttempt("audit"),
+    );
     const metricReader =
       this.#options.metricReader ??
       new PeriodicExportingMetricReader({
@@ -128,14 +245,40 @@ export class ProviderTelemetry {
   async shutdown(): Promise<void> {
     if (this.#shutdown) return;
     this.#shutdown = true;
-    const providers = [
-      this.#tracerProvider,
-      this.#loggerProvider,
-      this.#auditLoggerProvider,
-      this.#meterProvider,
-    ].filter((provider) => provider !== undefined);
-    await Promise.allSettled(providers.map((provider) => provider.forceFlush()));
-    await Promise.allSettled(providers.map((provider) => provider.shutdown()));
+    const signalProviders: {
+      signal: "trace" | "log" | "audit";
+      provider: { forceFlush(): Promise<void>; shutdown(): Promise<void> };
+    }[] = [];
+    if (this.#tracerProvider !== undefined) {
+      signalProviders.push({ signal: "trace", provider: this.#tracerProvider });
+    }
+    if (this.#loggerProvider !== undefined) {
+      signalProviders.push({ signal: "log", provider: this.#loggerProvider });
+    }
+    if (this.#auditLoggerProvider !== undefined) {
+      signalProviders.push({ signal: "audit", provider: this.#auditLoggerProvider });
+    }
+    const flushes = await Promise.allSettled(
+      signalProviders.map(({ provider }) => provider.forceFlush()),
+    );
+    for (const [index, result] of flushes.entries()) {
+      if (result.status !== "rejected") continue;
+      const signal = signalProviders[index]?.signal ?? "log";
+      this.#recordExportFailure(signal, "timeout");
+      if (signal === "log" && this.#queuedEvents > 0) {
+        this.metric("telemetry_events_dropped_total", this.#queuedEvents, {
+          signal: "log",
+          reason: "timeout",
+        });
+      }
+    }
+    this.#queuedEvents = 0;
+    this.metric("telemetry_queue_depth", 0, { signal: "log" }, "gauge");
+    await this.#meterProvider?.forceFlush().catch(() => undefined);
+    await Promise.allSettled([
+      ...signalProviders.map(({ provider }) => provider.shutdown()),
+      ...(this.#meterProvider === undefined ? [] : [this.#meterProvider.shutdown()]),
+    ]);
     this.#contextManager.disable();
   }
 
@@ -272,6 +415,7 @@ export class ProviderTelemetry {
           { kind, links, attributes: this.#sanitizer.sanitizeAttributes(attributes) },
           parent,
         );
+      this.metric("telemetry_events_emitted_total", 1, { signal: "trace" });
     } catch {
       return operation();
     }
@@ -315,6 +459,16 @@ export class ProviderTelemetry {
 
   event(name: string, body: unknown, attributes: Attributes = {}): void {
     if (!this.#started || this.#loggerProvider === undefined) return;
+    const maximum = this.#options.batch?.maxQueueSize ?? 2_048;
+    if (this.#queuedEvents >= maximum) {
+      this.metric("telemetry_events_dropped_total", 1, {
+        signal: "log",
+        reason: "queue_full",
+      });
+      return;
+    }
+    this.#queuedEvents += 1;
+    this.metric("telemetry_queue_depth", this.#queuedEvents, { signal: "log" }, "gauge");
     try {
       this.#loggerProvider.getLogger(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION).emit({
         eventName: name,
@@ -322,8 +476,18 @@ export class ProviderTelemetry {
         attributes: this.#sanitizer.sanitizeAttributes(attributes),
         timestamp: new Date(),
       });
+      this.metric("telemetry_events_emitted_total", 1, { signal: "log" });
+      const release = setTimeout(() => {
+        this.#queuedEvents = Math.max(0, this.#queuedEvents - 1);
+        this.metric("telemetry_queue_depth", this.#queuedEvents, { signal: "log" }, "gauge");
+      }, this.#options.batch?.scheduledDelayMillis ?? 5_000);
+      release.unref();
     } catch {
-      // Instrumentation must never alter Runtime state or readiness.
+      this.#queuedEvents = Math.max(0, this.#queuedEvents - 1);
+      this.metric("telemetry_events_dropped_total", 1, {
+        signal: "log",
+        reason: "serialization",
+      });
     }
   }
 
@@ -362,21 +526,30 @@ export class ProviderTelemetry {
       `${INSTRUMENTATION_NAME}/audit`,
       INSTRUMENTATION_VERSION,
     );
-    for (const envelope of envelopes) {
-      logger.emit({
-        eventName: envelope.recordType,
-        body: this.#sanitizer.sanitize(envelope) as never,
-        attributes: {
-          "sdar.schema.name": envelope.schemaName,
-          "sdar.schema.version": envelope.schemaVersion,
-          "sdar.record.id": envelope.recordId,
-          "sdar.record.hash": envelope.recordHash,
-          "sdar.delivery.class": envelope.deliveryClass,
-        },
-        timestamp: new Date(envelope.occurredAt),
+    try {
+      for (const envelope of envelopes) {
+        logger.emit({
+          eventName: envelope.recordType,
+          body: this.#sanitizer.sanitize(envelope) as never,
+          attributes: {
+            "sdar.schema.name": envelope.schemaName,
+            "sdar.schema.version": envelope.schemaVersion,
+            "sdar.record.id": envelope.recordId,
+            "sdar.record.hash": envelope.recordHash,
+            "sdar.delivery.class": envelope.deliveryClass,
+          },
+          timestamp: new Date(envelope.occurredAt),
+        });
+        this.metric("telemetry_events_emitted_total", 1, { signal: "audit" });
+      }
+      await this.#auditLoggerProvider.forceFlush();
+    } catch (error) {
+      this.metric("telemetry_export_failed_total", 1, {
+        signal: "audit",
+        reason: "exporter_error",
       });
+      throw error;
     }
-    await this.#auditLoggerProvider.forceFlush();
   }
 
   metric(
@@ -408,12 +581,33 @@ export class ProviderTelemetry {
         this.#metricInstruments.set(key, instrument);
       }
       const boundedAttributes = boundedMetricAttributes(attributes);
+      if (name.startsWith("telemetry_")) {
+        try {
+          this.#options.onSelfMetric?.(name, value, boundedAttributes, kind);
+        } catch {
+          // Self-monitoring cannot alter signal delivery.
+        }
+      }
       if (kind === "counter") instrument.add?.(value, boundedAttributes);
       else if (kind === "histogram") instrument.record?.(value, boundedAttributes);
       else instrument.set?.(value, boundedAttributes);
+      if (!name.startsWith("telemetry_")) {
+        this.metric("telemetry_events_emitted_total", 1, { signal: "metric" });
+      }
     } catch {
       // Instrumentation must never alter Runtime state or readiness.
     }
+  }
+
+  #recordExportAttempt(signal: "trace" | "log" | "audit"): void {
+    this.metric("telemetry_export_attempt_total", 1, { signal });
+  }
+
+  #recordExportFailure(
+    signal: "trace" | "log" | "audit",
+    reason: "timeout" | "exporter_error",
+  ): void {
+    this.metric("telemetry_export_failed_total", 1, { signal, reason });
   }
 }
 
@@ -442,6 +636,74 @@ function safeTraceError(error: unknown): {
   };
 }
 
+function observedSpanExporter(
+  exporter: SpanExporter,
+  timeoutMs: number,
+  onFailure: (reason: "timeout" | "exporter_error") => void,
+  onAttempt: () => void,
+): SpanExporter {
+  const observed: SpanExporter = {
+    export: (spans, callback) => {
+      onAttempt();
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) onFailure("timeout");
+      }, timeoutMs);
+      timer.unref();
+      try {
+        exporter.export(spans, (result) => {
+          settled = true;
+          clearTimeout(timer);
+          if (result.code !== ExportResultCode.SUCCESS) onFailure("exporter_error");
+          callback(result);
+        });
+      } catch (error) {
+        settled = true;
+        clearTimeout(timer);
+        onFailure("exporter_error");
+        throw error;
+      }
+    },
+    shutdown: () => exporter.shutdown(),
+  };
+  const forceFlush = exporter.forceFlush?.bind(exporter);
+  if (forceFlush !== undefined) observed.forceFlush = forceFlush;
+  return observed;
+}
+
+function observedLogExporter(
+  exporter: LogRecordExporter,
+  timeoutMs: number,
+  onFailure: (reason: "timeout" | "exporter_error") => void,
+  onAttempt: () => void,
+): LogRecordExporter {
+  return {
+    export: (logs, callback) => {
+      onAttempt();
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) onFailure("timeout");
+      }, timeoutMs);
+      timer.unref();
+      try {
+        exporter.export(logs, (result) => {
+          settled = true;
+          clearTimeout(timer);
+          if (result.code !== ExportResultCode.SUCCESS) onFailure("exporter_error");
+          callback(result);
+        });
+      } catch (error) {
+        settled = true;
+        clearTimeout(timer);
+        onFailure("exporter_error");
+        throw error;
+      }
+    },
+    shutdown: () => exporter.shutdown(),
+    forceFlush: () => exporter.forceFlush(),
+  };
+}
+
 function batchOptions(options: ProviderTelemetryBatchOptions | undefined) {
   const maxQueueSize = options?.maxQueueSize ?? 2_048;
   return {
@@ -460,9 +722,12 @@ function batchOptions(options: ProviderTelemetryBatchOptions | undefined) {
 
 function boundedMetricAttributes(attributes: Attributes): Attributes {
   return Object.fromEntries(
-    Object.entries(attributes).filter(
-      ([key, value]) => BOUNDED_METRIC_LABELS.has(key) && value !== undefined,
-    ),
+    Object.entries(attributes)
+      .filter(([key, value]) => BOUNDED_METRIC_LABELS.has(key) && value !== undefined)
+      .map(([key, value]) => {
+        const text = typeof value === "string" ? value : "other";
+        return [key, METRIC_LABEL_VALUES[key]?.has(text) === true ? text : "other"];
+      }),
   );
 }
 

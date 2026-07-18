@@ -82,6 +82,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   }
   const app = createHttpServer(logger, config.HTTP_BODY_LIMIT_BYTES);
   const metrics = new RuntimeMetrics();
+  const telemetrySelfGauges: Record<string, number> = {};
   const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
   let telemetry: ProviderTelemetry | undefined;
   let providerTelemetryServer: ProviderTelemetryGrpcServer | undefined;
@@ -190,8 +191,20 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     const pendingOutbox = await pool.query<{ count: string }>(
       "SELECT count(*) FROM outbox_event WHERE published_at IS NULL",
     );
+    const telemetryDelivery = await pool.query<{ backlog: string; oldest_age_seconds: string }>(
+      `SELECT count(*) FILTER (WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text AS backlog,
+              COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(created_at)
+                FILTER (WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))),0)::text
+                AS oldest_age_seconds
+       FROM provider_ops_delivery`,
+    );
     const gauges: Record<string, number> = {
       sdar_outbox_pending: Number(pendingOutbox.rows[0]?.count ?? 0),
+      telemetry_audit_backlog: Number(telemetryDelivery.rows[0]?.backlog ?? 0),
+      telemetry_audit_oldest_age_seconds: Number(
+        telemetryDelivery.rows[0]?.oldest_age_seconds ?? 0,
+      ),
+      ...telemetrySelfGauges,
     };
     for (const row of taskStates.rows) {
       gauges[`sdar_task_state{state="${row.internal_state}"}`] = Number(row.count);
@@ -283,6 +296,14 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             deploymentEnvironment: config.RUNTIME_ENV,
             providerId: validated.providerId,
             providerVersion: manifest.providerVersion,
+          },
+          onSelfMetric: (name, value, attributes, kind) => {
+            const labels = Object.fromEntries(
+              Object.entries(attributes).map(([key, label]) => [key, String(label)]),
+            );
+            const metricName = prometheusMetricKey(name, labels);
+            if (kind === "gauge") telemetrySelfGauges[metricName] = value;
+            else metrics.increment(name, labels, value);
           },
         });
         try {
@@ -436,8 +457,17 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         },
         telemetryInstanceId,
         {
-          onEvent: (event, amount) =>
-            telemetry?.metric("provider_telemetry_delivery_total", amount, { event }),
+          onEvent: (event, amount) => {
+            if (event === "retry") {
+              telemetry?.metric("telemetry_audit_retry_total", amount, {
+                signal: "audit",
+                reason: "exporter_error",
+              });
+              metrics.increment("telemetry_audit_retry_total", {}, amount);
+            } else {
+              telemetry?.metric("provider_telemetry_delivery_total", amount, { event });
+            }
+          },
         },
       );
       const recovery = new RecoveryManager(
@@ -672,6 +702,8 @@ async function updateOperationalGauges(
       pending_commands: string;
       outbox_pending: string;
       recovery_backlog: string;
+      telemetry_audit_backlog: string;
+      telemetry_audit_oldest_age_seconds: string;
     }>(`SELECT
       (SELECT count(*) FROM provider_task WHERE internal_state NOT LIKE 'TERMINAL_%')::text
         AS active_tasks,
@@ -681,13 +713,26 @@ async function updateOperationalGauges(
       ((SELECT count(*) FROM admission_intent WHERE state IN ('PENDING','UNCERTAIN')) +
        (SELECT count(*) FROM provider_task
         WHERE internal_state NOT LIKE 'TERMINAL_%' AND next_recovery_at <= clock_timestamp()))::text
-        AS recovery_backlog`);
+        AS recovery_backlog,
+      (SELECT count(*) FROM provider_ops_delivery
+       WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text AS telemetry_audit_backlog,
+      (SELECT COALESCE(EXTRACT(EPOCH FROM clock_timestamp()-min(created_at)),0)
+       FROM provider_ops_delivery
+       WHERE state IN ('PENDING','CLAIMED','RETRY_WAIT'))::text
+        AS telemetry_audit_oldest_age_seconds`);
     const row = counts.rows[0];
     if (row === undefined) return;
     telemetry.metric("active_tasks", Number(row.active_tasks), {}, "gauge");
     telemetry.metric("pending_commands", Number(row.pending_commands), {}, "gauge");
     telemetry.metric("outbox_pending", Number(row.outbox_pending), {}, "gauge");
     telemetry.metric("recovery_backlog", Number(row.recovery_backlog), {}, "gauge");
+    telemetry.metric("telemetry_audit_backlog", Number(row.telemetry_audit_backlog), {}, "gauge");
+    telemetry.metric(
+      "telemetry_audit_oldest_age_seconds",
+      Number(row.telemetry_audit_oldest_age_seconds),
+      {},
+      "gauge",
+    );
   } catch {
     // Metrics collection is best effort and never affects Runtime readiness or Task state.
   }
@@ -729,4 +774,12 @@ function isValidInternalAdminToken(token: string, expected: string): boolean {
 
 function adminTokenDigest(token: string): Buffer {
   return createHash("sha256").update("sdar-internal-admin-token-v1").update(token).digest();
+}
+
+function prometheusMetricKey(name: string, labels: Record<string, string>): string {
+  const entries = Object.entries(labels).sort(([left], [right]) => left.localeCompare(right));
+  if (entries.length === 0) return name;
+  return `${name}{${entries
+    .map(([key, value]) => `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`)
+    .join(",")}}`;
 }

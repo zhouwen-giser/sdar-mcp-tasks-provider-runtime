@@ -59,12 +59,20 @@ previous/current durable command state, attempt, retry delay, reason, and Adapte
 
 Prometheus compatibility is unchanged. OTel counters are `provider_task_transition_total`,
 `provider_command_total`, `adapter_rpc_total`, `provider_error_total`, and
-`provider_recovery_total`. Histograms are `adapter_rpc_duration`, `command_dispatch_duration`,
+`provider_recovery_total`. Telemetry self-monitoring counters are
+`telemetry_events_emitted_total`, `telemetry_events_dropped_total`,
+`telemetry_export_attempt_total`, `telemetry_export_failed_total`, and
+`telemetry_audit_retry_total`. Histograms are `adapter_rpc_duration`, `command_dispatch_duration`,
 `task_transition_duration`, and `recovery_duration`. Gauges are `active_tasks`,
-`pending_commands`, `outbox_pending`, and `recovery_backlog`.
+`pending_commands`, `outbox_pending`, `recovery_backlog`, `telemetry_queue_depth`,
+`telemetry_audit_backlog`, and `telemetry_audit_oldest_age_seconds`. The self-monitoring counters
+and gauges are also exposed by the Prometheus endpoint.
 
-Metric labels are allowlisted and bounded. Task ids, execution ids, correlation ids, user ids,
-argument hashes, and authorization hashes are never metric labels.
+Metric labels are allowlisted and bounded by both key and value. Unknown values become `other`;
+arbitrary Adapter reason text cannot create a series. Self-monitoring labels are limited to
+`signal=trace|log|metric|audit|other` and
+`reason=queue_full|timeout|exporter_error|serialization|invalid|other`. Task ids, execution ids,
+correlation ids, user ids, argument hashes, and authorization hashes are never metric labels.
 
 ## Trace propagation
 

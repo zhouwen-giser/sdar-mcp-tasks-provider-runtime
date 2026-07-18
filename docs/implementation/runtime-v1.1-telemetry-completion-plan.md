@@ -42,9 +42,9 @@ final-report repair are explicitly out of scope.
 | H4    | real root/RPC trace propagation and persistence           | trace parent/restart tests          | complete    | `c3d8cbc` |
 | H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | complete    | `acd4850` |
 | H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | complete    | `5b911f0` |
-| H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | complete    | pending   |
-| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | in progress | pending   |
-| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | pending     | pending   |
+| H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | complete    | `e795267` |
+| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | complete    | pending   |
+| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | in progress | pending   |
 | H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | pending     | pending   |
 
 ## Verification ledger
@@ -68,6 +68,8 @@ final-report repair are explicitly out of scope.
 | 2026-07-18 | H6 aggregate-metric and stable-ID unit regressions   | PASS, 2 tests                                                                    |
 | 2026-07-18 | H7 privacy, failure-isolation and ingress allowlist  | PASS, 24 focused tests                                                           |
 | 2026-07-18 | H7 completion guard status                           | PASS for H7; only H8/H9 guards remain red                                        |
+| 2026-07-18 | H8 bounded labels, queue/export failure, audit retry | PASS, 10 focused tests                                                           |
+| 2026-07-18 | H8 completion guard status                           | PASS for H8; only H9 guard remains red                                           |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.
