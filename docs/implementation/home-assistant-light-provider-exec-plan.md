@@ -46,6 +46,7 @@ must not enter logs, snapshots, errors, results, or telemetry.
 | 2026-07-19 | merge protected Runtime main                | PASS   |
 | 2026-07-19 | `pnpm test:ha-light:protocol-v1` (10 tests) | PASS   |
 | 2026-07-19 | `pnpm protocol:ha-light:check` (8/8)        | PASS   |
+| 2026-07-19 | exact `004d3d6` `pnpm verify:v2` (500.8s)   | PASS   |
 
 This plan is updated as implementation and evidence evolve. A phase is complete only after its
 tests pass and its commit is created.

@@ -28,12 +28,18 @@ Package: `@sdar/home-assistant-light-provider@0.1.0`
 
 ## Verification evidence
 
+Exact implementation commit `004d3d6` passed `pnpm verify:v2` in a clean detached worktree in
+500.8 seconds. This report-only follow-up commit requires independent protected CI validation.
+
 | Command or suite                            | Result                                         |
 | ------------------------------------------- | ---------------------------------------------- |
 | `pnpm test:ha-light`                        | PASS, 4 files / 9 tests                        |
 | `pnpm test:ha-light:e2e`                    | PASS, real Runtime and PostgreSQL              |
 | `pnpm test:ha-light:protocol-v1`            | PASS, 5 files / 10 tests                       |
 | `pnpm protocol:ha-light:check`              | PASS, 8/8 SHA-locked Provider cases            |
+| Frozen protocol / numbered catalog          | PASS, 68/68 and 74/74                          |
+| Unit / contract / integration               | PASS, 79 / 9 / 199 tests                       |
+| Recovery / security                         | PASS, 9 / 30 tests                             |
 | `pnpm audit:dependencies`                   | PASS, no known vulnerabilities                 |
 | `pnpm verify:v1.1`                          | PASS, 380.5 seconds                            |
 | Unit suite                                  | PASS, 18 files / 75 tests                      |
@@ -50,6 +56,10 @@ The Home Assistant-specific frozen E2E used real Runtime HTTP/SSE and PostgreSQL
 Assistant is used for CI; no real lamp or Xiaomi cloud was used or claimed as verification. The
 maximum claim is **Home Assistant Light Provider Component Conformant**; this report does not claim
 `real-resource qualified` or `Interop Certified`.
+
+The exact v2 audit rebuilt the Runtime image as non-root, reproducible filesystem/config, at
+99,914,755 bytes. TypeScript and Python Adapter conformance, dependency audit, SBOM, Kubernetes,
+capacity, rc.2 regression, protocol locks, and the Provider 8/8 report verifier also passed.
 
 ## Publication boundary
 
