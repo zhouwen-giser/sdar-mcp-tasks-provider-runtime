@@ -163,14 +163,12 @@ describe("Home Assistant light Runtime E2E", () => {
     });
     expect(duplicate.task.taskId).toBe(created.task.taskId);
     expect(fake.serviceCalls).toHaveLength(1);
-    await waitFor(
-      async () => {
-        const result = await pool.query<{ count: string }>(
-          "SELECT count(*) AS count FROM provider_ops_delivery",
-        );
-        return Number(result.rows[0]?.count ?? 0) >= 4;
-      },
-    );
+    await waitFor(async () => {
+      const result = await pool.query<{ count: string }>(
+        "SELECT count(*) AS count FROM provider_ops_delivery",
+      );
+      return Number(result.rows[0]?.count ?? 0) >= 4;
+    });
   });
 });
 
