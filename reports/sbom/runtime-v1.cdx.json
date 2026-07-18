@@ -12,7 +12,7 @@
     "properties": [
       {
         "name": "sdar:pnpm-lock-sha256",
-        "value": "cdd388dcda8a6af1dbf635062f721ed7caf37d3e7faf15be0598c741b2f6e9a5"
+        "value": "aa8cef491dda7c6df985379c216ff01b86679cfd43073ebdc423a856a078dfdd"
       }
     ]
   },
@@ -1294,6 +1294,12 @@
       "name": "wrappy",
       "version": "1.0.2",
       "purl": "pkg:npm/wrappy@1.0.2"
+    },
+    {
+      "type": "library",
+      "name": "ws",
+      "version": "8.21.0",
+      "purl": "pkg:npm/ws@8.21.0"
     },
     {
       "type": "library",
