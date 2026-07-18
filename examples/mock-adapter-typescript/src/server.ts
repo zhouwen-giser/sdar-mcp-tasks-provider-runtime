@@ -20,6 +20,7 @@ interface MockExecution {
   externalExecutionId: string;
   operationName: string;
   argumentHash: string;
+  reservationRef?: string;
   executionContext: Record<string, unknown>;
   snapshot: Record<string, unknown>;
   terminalSnapshot: Record<string, unknown>;
@@ -522,7 +523,10 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
       const taskId = call.request.taskId ?? "missing";
       const existing = executions.get(taskId);
       if (existing !== undefined) {
-        if (existing.argumentHash !== (call.request.argumentHash ?? "")) {
+        if (
+          existing.argumentHash !== (call.request.argumentHash ?? "") ||
+          existing.reservationRef !== call.request.reservationRef
+        ) {
           callback(
             Object.assign(new Error("taskId argument conflict"), {
               code: grpc.status.ALREADY_EXISTS,
@@ -620,6 +624,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           externalExecutionId,
           operationName: call.request.operationName ?? "",
           argumentHash: call.request.argumentHash ?? "",
+          ...(call.request.reservationRef === undefined
+            ? {}
+            : { reservationRef: call.request.reservationRef }),
           executionContext: call.request.executionContext ?? {},
           snapshot: terminalSnapshot,
           terminalSnapshot,
@@ -746,6 +753,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           externalExecutionId,
           operationName: call.request.operationName ?? "",
           argumentHash: call.request.argumentHash ?? "",
+          ...(call.request.reservationRef === undefined
+            ? {}
+            : { reservationRef: call.request.reservationRef }),
           executionContext: call.request.executionContext ?? {},
           snapshot: initialSnapshot,
           terminalSnapshot,
@@ -806,6 +816,9 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         externalExecutionId,
         operationName: call.request.operationName ?? "",
         argumentHash: call.request.argumentHash ?? "",
+        ...(call.request.reservationRef === undefined
+          ? {}
+          : { reservationRef: call.request.reservationRef }),
         executionContext: call.request.executionContext ?? {},
         snapshot: terminalSnapshot,
         terminalSnapshot,

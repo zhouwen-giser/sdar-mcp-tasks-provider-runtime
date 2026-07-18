@@ -356,6 +356,76 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       );
     });
 
+    await test(
+      groups,
+      "P4",
+      "P4 frozen reservation reference is bound to Start identity",
+      async () => {
+        const taskId = randomUUID();
+        const argumentHash = "7".repeat(64);
+        const argumentsValue = { resourceId: `${options.language}-reservation` };
+        const first = await gateway.startOperation("durable_task", argumentsValue, {
+          taskId,
+          argumentHash,
+          reservationRef: "reservation-conformance",
+        });
+        assert(first.accepted !== undefined, "reserved start was not accepted");
+        const duplicate = await gateway.startOperation("durable_task", argumentsValue, {
+          taskId,
+          argumentHash,
+          reservationRef: "reservation-conformance",
+        });
+        assert(duplicate.accepted !== undefined, "reserved duplicate was not idempotent");
+        await expectFailure(
+          gateway.startOperation("durable_task", argumentsValue, {
+            taskId,
+            argumentHash,
+            reservationRef: "reservation-conflict",
+          }),
+          "conflict",
+        );
+      },
+    );
+
+    await test(groups, "P4", "P4 frozen MRTR request and keyed response", async () => {
+      const created = await engine.callFrozenOperation(
+        operation(engine, "durable_task"),
+        { resourceId: `${options.language}-frozen-input`, scenario: "input_required_frozen" },
+        authorization,
+      );
+      const taskId = String(created.taskId);
+      assert(taskId.length > 0, "frozen input Task was not published");
+      assert(JSON.stringify(created).includes("elicitation/create"), "frozen MRTR request missing");
+      await engine.updateTaskInputResponses(
+        taskId,
+        { approval: { action: "accept", content: true } },
+        authorization,
+      );
+      assert(
+        (await new DurableCommandDispatcher(gateway, repository).tick()).acknowledged === 1,
+        "frozen MRTR response was not acknowledged",
+      );
+      await engine.getTask(taskId, authorization);
+      assert(
+        (await engine.getFrozenTask(taskId, authorization)).status === "completed",
+        "frozen MRTR Task did not complete",
+      );
+    });
+
+    await test(groups, "P4", "P4 frozen type-only Evidence projection", async () => {
+      const created = await engine.callFrozenOperation(
+        operation(engine, "durable_task"),
+        { resourceId: `${options.language}-evidence`, scenario: "evidence_success" },
+        authorization,
+      );
+      const taskId = String(created.taskId);
+      await engine.getTask(taskId, authorization);
+      const completed = await engine.getFrozenTask(taskId, authorization);
+      const serialized = JSON.stringify(completed);
+      assert(serialized.includes("io.sdar/evidence"), "frozen Evidence missing");
+      assert(!serialized.includes("requirementId"), "Evidence leaked requirementId");
+    });
+
     await test(groups, "P4", "P4 response-loss Reconcile without duplicate identity", async () => {
       const key = `response-loss-${options.language}`;
       await expectFailure(
