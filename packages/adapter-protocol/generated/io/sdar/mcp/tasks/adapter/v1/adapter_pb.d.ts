@@ -730,6 +730,61 @@ export namespace InputRequest {
     }
 }
 
+export class McpTaskInputRequest extends jspb.Message {
+    getKey(): string;
+    setKey(value: string): McpTaskInputRequest;
+    getMethod(): string;
+    setMethod(value: string): McpTaskInputRequest;
+
+    hasParams(): boolean;
+    clearParams(): void;
+    getParams(): google_protobuf_struct_pb.Struct | undefined;
+    setParams(value?: google_protobuf_struct_pb.Struct): McpTaskInputRequest;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): McpTaskInputRequest.AsObject;
+    static toObject(includeInstance: boolean, msg: McpTaskInputRequest): McpTaskInputRequest.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: McpTaskInputRequest, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): McpTaskInputRequest;
+    static deserializeBinaryFromReader(message: McpTaskInputRequest, reader: jspb.BinaryReader): McpTaskInputRequest;
+}
+
+export namespace McpTaskInputRequest {
+    export type AsObject = {
+        key: string,
+        method: string,
+        params?: google_protobuf_struct_pb.Struct.AsObject,
+    }
+}
+
+export class McpTaskInputResponse extends jspb.Message {
+    getKey(): string;
+    setKey(value: string): McpTaskInputResponse;
+
+    hasResult(): boolean;
+    clearResult(): void;
+    getResult(): google_protobuf_struct_pb.Struct | undefined;
+    setResult(value?: google_protobuf_struct_pb.Struct): McpTaskInputResponse;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): McpTaskInputResponse.AsObject;
+    static toObject(includeInstance: boolean, msg: McpTaskInputResponse): McpTaskInputResponse.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: McpTaskInputResponse, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): McpTaskInputResponse;
+    static deserializeBinaryFromReader(message: McpTaskInputResponse, reader: jspb.BinaryReader): McpTaskInputResponse;
+}
+
+export namespace McpTaskInputResponse {
+    export type AsObject = {
+        key: string,
+        result?: google_protobuf_struct_pb.Struct.AsObject,
+    }
+}
+
 export class ExecutionSnapshot extends jspb.Message {
     getTaskId(): string;
     setTaskId(value: string): ExecutionSnapshot;
@@ -777,6 +832,10 @@ export class ExecutionSnapshot extends jspb.Message {
     clearExecutionContext(): void;
     getExecutionContext(): ExecutionContext | undefined;
     setExecutionContext(value?: ExecutionContext): ExecutionSnapshot;
+    clearMcpInputRequestsList(): void;
+    getMcpInputRequestsList(): Array<McpTaskInputRequest>;
+    setMcpInputRequestsList(value: Array<McpTaskInputRequest>): ExecutionSnapshot;
+    addMcpInputRequests(value?: McpTaskInputRequest, index?: number): McpTaskInputRequest;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): ExecutionSnapshot.AsObject;
@@ -805,6 +864,7 @@ export namespace ExecutionSnapshot {
         operationName: string,
         argumentHash: string,
         executionContext?: ExecutionContext.AsObject,
+        mcpInputRequestsList: Array<McpTaskInputRequest.AsObject>,
     }
 }
 
@@ -1021,6 +1081,10 @@ export class UpdateExecutionRequest extends jspb.Message {
     getInputsList(): Array<UpdateValue>;
     setInputsList(value: Array<UpdateValue>): UpdateExecutionRequest;
     addInputs(value?: UpdateValue, index?: number): UpdateValue;
+    clearInputResponsesList(): void;
+    getInputResponsesList(): Array<McpTaskInputResponse>;
+    setInputResponsesList(value: Array<McpTaskInputResponse>): UpdateExecutionRequest;
+    addInputResponses(value?: McpTaskInputResponse, index?: number): McpTaskInputResponse;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): UpdateExecutionRequest.AsObject;
@@ -1037,6 +1101,7 @@ export namespace UpdateExecutionRequest {
         metadata?: RequestMetadata.AsObject,
         identity?: SideEffectIdentity.AsObject,
         inputsList: Array<UpdateValue.AsObject>,
+        inputResponsesList: Array<McpTaskInputResponse.AsObject>,
     }
 }
 

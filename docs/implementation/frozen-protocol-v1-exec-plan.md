@@ -69,3 +69,8 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
 - Legacy `ttl`/`pollInterval` output remains confined to the Legacy handler path.
 - Verified with TypeScript, ESLint, protocol projection tests, forward migration, and 115 real
   PostgreSQL lifecycle cases.
+- Migration 020 and additive Adapter fields preserve exact keyed MRTR request/response JSON and
+  response hashes. The frozen dispatch path uses `McpTaskInputRequest` and
+  `McpTaskInputResponse`; Legacy `InputRequest` and `UpdateValue` retain their field numbers and
+  are explicitly deprecated. A real gRPC/PostgreSQL lifecycle case proves persistence,
+  Command Sequence dispatch, Adapter acknowledgement, and completion.

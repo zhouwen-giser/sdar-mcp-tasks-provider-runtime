@@ -8,6 +8,7 @@ import type {
   CheckAvailabilityResponse,
   CommandAck,
   ExecutionSnapshot,
+  McpTaskInputResponse,
   ProviderManifest,
   ReconcileExecutionResponse,
   StartOperationResponse,
@@ -213,6 +214,40 @@ export class GrpcAdapterGateway {
           inputRequestKey: input.key,
           value: jsonToProtoValue(input.value),
           answerHash: input.answerHash,
+        })),
+      },
+      rpcContext(
+        identity.taskId,
+        options.externalExecutionId,
+        identity.commandSequence,
+        identity.operationName,
+        options,
+      ),
+    );
+  }
+
+  updateMcpTaskExecution(
+    identity: {
+      taskId: string;
+      operationName: string;
+      argumentHash: string;
+      commandSequence: number;
+    },
+    inputResponses: McpTaskInputResponse[],
+    options: StartOperationOptions = {},
+  ): Promise<CommandAck> {
+    return this.#unary<CommandAck>(
+      "updateExecution",
+      {
+        metadata: this.#metadata(options.correlationId),
+        identity: {
+          ...identity,
+          externalExecutionId: options.externalExecutionId ?? "",
+          executionContext: this.#executionContext(options),
+        },
+        inputResponses: inputResponses.map((response) => ({
+          key: response.key,
+          result: jsonToProtoStruct(response.result),
         })),
       },
       rpcContext(

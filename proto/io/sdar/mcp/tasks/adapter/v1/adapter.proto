@@ -241,10 +241,22 @@ message Progress {
 }
 
 message InputRequest {
+  option deprecated = true;
   string key = 1;
   string description = 2;
   google.protobuf.Struct input_schema = 3;
   bool required = 4;
+}
+
+message McpTaskInputRequest {
+  string key = 1;
+  string method = 2;
+  google.protobuf.Struct params = 3;
+}
+
+message McpTaskInputResponse {
+  string key = 1;
+  google.protobuf.Struct result = 2;
 }
 
 message ExecutionSnapshot {
@@ -255,7 +267,7 @@ message ExecutionSnapshot {
   string reason_code = 5;
   string message = 6;
   Progress progress = 7;
-  repeated InputRequest input_requests = 8;
+  repeated InputRequest input_requests = 8 [deprecated = true];
   google.protobuf.Struct result = 9;
   bool retryable = 10;
   repeated Alternative alternatives = 11;
@@ -263,6 +275,7 @@ message ExecutionSnapshot {
   string operation_name = 13;
   string argument_hash = 14;
   ExecutionContext execution_context = 15;
+  repeated McpTaskInputRequest mcp_input_requests = 17;
 }
 
 message ExecutionAccepted {
@@ -306,6 +319,7 @@ message RequestCancelRequest {
 }
 
 message UpdateValue {
+  option deprecated = true;
   string input_request_key = 1;
   google.protobuf.Value value = 2;
   string answer_hash = 3;
@@ -314,7 +328,8 @@ message UpdateValue {
 message UpdateExecutionRequest {
   RequestMetadata metadata = 1;
   SideEffectIdentity identity = 2;
-  repeated UpdateValue inputs = 3;
+  repeated UpdateValue inputs = 3 [deprecated = true];
+  repeated McpTaskInputResponse input_responses = 4;
 }
 
 message PauseExecutionRequest {

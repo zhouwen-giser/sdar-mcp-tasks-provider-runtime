@@ -110,13 +110,19 @@ internal persistence maintenance. New and upgraded Tasks start with a positive
 authoritative `DetailedTask` projection changes. Lease renewals and recovery bookkeeping may
 continue to update the internal `updated_at` without changing frozen Wire output.
 
+`020_frozen_protocol_mrtr.sql` stores the exact MCP server-to-client request JSON and the exact
+keyed response JSON/hash alongside the retained Legacy input columns. Existing requests are
+backfilled as `elicitation/create`; answered Legacy rows are represented as accepted responses.
+The Adapter proto adds `McpTaskInputRequest` and `McpTaskInputResponse` on new field numbers while
+marking the old `InputRequest` and `UpdateValue` fields deprecated without deleting them.
+
 Runtime startup runs migrations. CI verifies an empty database, repeated startup, duplicate
 Snapshot insertion, task lifecycle constraints, crash windows, applied-migration tamper
 detection, and a complete 001-006 rc.1 fixture containing pending/uncertain admissions,
 working/queued/input/stopping/scheduled/terminal Tasks, a pending command, observation/outbox and
 idempotency data. After 007-016 it proves data/backfills and executes Recovery, Dispatcher and
 Scheduler in startup order against PostgreSQL 17 and a real gRPC Adapter. v1.1 verifies all
-20 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths, including
+21 migration files through both the rc.1 full-state and rc.2 forward-upgrade paths, including
 Provider Ops durable delivery and persisted Trace Context（持久化链路上下文）.
 
 rc.2 repository code reads the committed Task through the same client used for the publication

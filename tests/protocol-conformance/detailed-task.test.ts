@@ -41,6 +41,19 @@ describe("frozen DetailedTask projection", () => {
             required: true,
             status: "OPEN",
             answerHash: null,
+            requestJson: {
+              method: "elicitation/create",
+              params: {
+                mode: "form",
+                message: "Approve the movement?",
+                requestedSchema: {
+                  type: "object",
+                  properties: { approved: { type: "boolean" } },
+                },
+              },
+            },
+            responseHash: null,
+            responseJson: null,
           },
           {
             key: "answered-1",
@@ -49,6 +62,12 @@ describe("frozen DetailedTask projection", () => {
             required: true,
             status: "ANSWERED",
             answerHash: "a".repeat(64),
+            requestJson: {
+              method: "elicitation/create",
+              params: { mode: "form", message: "Already answered", requestedSchema: {} },
+            },
+            responseHash: "a".repeat(64),
+            responseJson: { action: "accept", content: true },
           },
         ],
         "get",

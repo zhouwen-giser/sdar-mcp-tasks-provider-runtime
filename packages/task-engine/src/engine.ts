@@ -766,6 +766,44 @@ export class TaskEngine {
     return this.#taskWithCommandReceipt(taskId, authorization, command);
   }
 
+  async updateTaskInputResponses(
+    taskId: string,
+    inputResponses: Record<string, { action: "accept" | "decline" | "cancel"; content?: unknown }>,
+    authorization: AuthorizationContext,
+  ): Promise<void> {
+    const task = await this.#repository.getAuthorized(taskId, authorization);
+    const operation = await this.loadOperationSnapshot(task.operationSnapshotId);
+    if (!operation.capabilities.inputRequired) {
+      throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
+    }
+    const requests = await this.#repository.listInputRequests(taskId);
+    const ajv = new Ajv2020({ strict: true, allErrors: true });
+    const pending: [string, { action: "accept" | "decline" | "cancel"; content?: unknown }][] = [];
+    for (const [key, response] of Object.entries(inputResponses)) {
+      const request = requests.find((candidate) => candidate.key === key);
+      if (request === undefined) continue;
+      const hash = createHash("sha256").update(canonicalize(response)).digest("hex");
+      if (request.status === "ANSWERED") {
+        if (request.responseHash !== hash) {
+          throw new InvalidParamsError("INPUT_RESPONSE_CONFLICT");
+        }
+        continue;
+      }
+      if (response.action === "accept" && !ajv.compile(request.schema)(response.content)) {
+        throw new InvalidParamsError("INVALID_INPUT_RESPONSE");
+      }
+      pending.push([key, response]);
+    }
+    if (pending.length === 0) return;
+    const normalized = Object.fromEntries(
+      pending.sort(([left], [right]) => left.localeCompare(right)),
+    );
+    const requestHash = createHash("sha256").update(canonicalize(normalized)).digest("hex");
+    await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
+      inputResponses: normalized,
+    });
+  }
+
   async controlTask(
     taskId: string,
     commandType: "PAUSE" | "RESUME",
@@ -994,11 +1032,47 @@ function expectedTaskIdentity(task: TaskRecord, operationName: string) {
 }
 
 function normalizeInputRequests(snapshot: ExecutionSnapshot) {
-  return (snapshot.inputRequests ?? []).map((request) => ({
+  const frozen = snapshot.mcpInputRequests ?? [];
+  const legacy = snapshot.inputRequests ?? [];
+  if (frozen.length > 0 && legacy.length > 0) throw new Error("ADAPTER_MRTR_WIRE_MIXED");
+  if (frozen.length > 0) {
+    return frozen.map((request) => {
+      const method: unknown = request.method;
+      if (method !== "elicitation/create") {
+        throw new Error("ADAPTER_MRTR_METHOD_UNSUPPORTED");
+      }
+      const params = protoStructToJson(request.params);
+      const description = typeof params.message === "string" ? params.message : "Input required";
+      const requestedSchema = params.requestedSchema;
+      const schema =
+        typeof requestedSchema === "object" &&
+        requestedSchema !== null &&
+        !Array.isArray(requestedSchema)
+          ? (requestedSchema as Record<string, unknown>)
+          : {};
+      return {
+        key: request.key,
+        description,
+        schema,
+        required: true,
+        requestJson: { method: "elicitation/create" as const, params },
+        status: "OPEN" as const,
+      };
+    });
+  }
+  return legacy.map((request) => ({
     key: request.key,
     description: request.description,
     schema: protoStructToJson(request.inputSchema),
     required: request.required,
+    requestJson: {
+      method: "elicitation/create" as const,
+      params: {
+        mode: "form",
+        message: request.description,
+        requestedSchema: protoStructToJson(request.inputSchema),
+      },
+    },
     status: "OPEN" as const,
   }));
 }

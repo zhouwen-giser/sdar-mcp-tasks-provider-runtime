@@ -52,6 +52,7 @@ export interface ExecutionSnapshot {
   observedAt?: unknown;
   result?: unknown;
   inputRequests?: AdapterInputRequest[];
+  mcpInputRequests?: McpTaskInputRequest[];
   operationName: string;
   argumentHash: string;
   executionContext?: AdapterExecutionContext;
@@ -69,6 +70,20 @@ export interface AdapterInputRequest {
   description: string;
   inputSchema: unknown;
   required: boolean;
+}
+
+export interface McpTaskInputRequest {
+  key: string;
+  method: "elicitation/create";
+  params: unknown;
+}
+
+export interface McpTaskInputResponse {
+  key: string;
+  result: {
+    action: "accept" | "decline" | "cancel";
+    content?: unknown;
+  };
 }
 
 export interface StartOperationResponse {

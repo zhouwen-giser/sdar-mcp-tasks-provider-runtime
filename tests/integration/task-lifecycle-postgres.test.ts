@@ -209,6 +209,45 @@ describe("durable task lifecycle", () => {
     }
   });
 
+  it("persists and dispatches frozen MRTR inputResponses over the additive Adapter fields", async () => {
+    const created = await engine.callOperation(
+      requiredOperation("durable_task"),
+      { resourceId: "frozen-mrtr", scenario: "input_required_frozen" },
+      authorization,
+    );
+    if (created.kind !== "task") throw new Error("Expected frozen MRTR Task");
+    const taskId = String(created.task.taskId);
+    const repository = new TaskRepository(pool);
+    expect(await repository.listInputRequests(taskId)).toMatchObject([
+      {
+        key: "approval",
+        status: "OPEN",
+        requestJson: {
+          method: "elicitation/create",
+          params: { mode: "form", message: "Approve the reference operation." },
+        },
+      },
+    ]);
+
+    const before = controlSideEffectCount;
+    await engine.updateTaskInputResponses(
+      taskId,
+      { approval: { action: "accept", content: true }, unknown: { action: "decline" } },
+      authorization,
+    );
+    expect(controlSideEffectCount).toBe(before);
+    await new DurableCommandDispatcher(gateway, repository).tick();
+    expect(controlSideEffectCount).toBe(before + 1);
+    expect(await repository.listInputRequests(taskId)).toMatchObject([
+      {
+        key: "approval",
+        status: "ANSWERED",
+        responseJson: { action: "accept", content: true },
+      },
+    ]);
+    expect(await engine.getTask(taskId, authorization)).toMatchObject({ status: "completed" });
+  });
+
   it("returns an inline result for terminal task-capable admission", async () => {
     const before = await pool.query<{ count: string }>("SELECT count(*) FROM provider_task");
     const result = await engine.callOperation(
@@ -3803,8 +3842,10 @@ describe("durable task lifecycle", () => {
       taskId,
     ]);
     await pool.query(
-      `INSERT INTO task_input_request(task_id,request_key,schema,status,description,required)
-       VALUES ($1,'retention-proof','{}'::jsonb,'ANSWERED','retention proof',false)`,
+      `INSERT INTO task_input_request(
+         task_id,request_key,schema,status,description,required,request_json)
+       VALUES ($1,'retention-proof','{}'::jsonb,'ANSWERED','retention proof',false,
+         '{"method":"elicitation/create","params":{}}'::jsonb)`,
       [taskId],
     );
     await pool.query(

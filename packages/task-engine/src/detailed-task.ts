@@ -51,17 +51,7 @@ export function mapTaskToDetailedTask(
     const open = inputRequests.filter((request) => request.status === "OPEN");
     if (open.length === 0) throw new Error("TASK_INPUT_REQUESTS_MISSING");
     base.inputRequests = Object.fromEntries(
-      open.map((request) => [
-        request.key,
-        {
-          method: "elicitation/create",
-          params: {
-            mode: "form",
-            message: request.description,
-            requestedSchema: request.schema,
-          },
-        },
-      ]),
+      open.map((request) => [request.key, request.requestJson]),
     );
   } else if (task.mcpStatus === "completed") {
     if (task.result === null) throw new Error("TASK_RESULT_MISSING");

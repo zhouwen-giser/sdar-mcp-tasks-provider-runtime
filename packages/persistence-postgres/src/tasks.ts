@@ -37,12 +37,15 @@ export interface PublishTaskInput extends AdmissionIntentInput {
   adapterResponse: Record<string, unknown>;
   actualStartedAt?: Date | null;
   startWindowMissedAt?: Date;
-  inputRequests?: {
-    key: string;
-    description: string;
-    schema: Record<string, unknown>;
-    required: boolean;
-  }[];
+  inputRequests?: NewInputRequest[];
+}
+
+export interface NewInputRequest {
+  key: string;
+  description: string;
+  schema: Record<string, unknown>;
+  required: boolean;
+  requestJson?: InputRequestRecord["requestJson"];
 }
 
 export type PublishScheduledInput = AdmissionIntentInput;
@@ -138,6 +141,12 @@ export interface InputRequestRecord {
   required: boolean;
   status: "OPEN" | "ANSWERED";
   answerHash: string | null;
+  requestJson: {
+    method: "elicitation/create";
+    params: Record<string, unknown>;
+  };
+  responseHash: string | null;
+  responseJson: Record<string, unknown> | null;
 }
 
 export interface ObservationRecord {
@@ -1363,12 +1372,7 @@ export class TaskRepository {
     adapterRevision: number,
     transition: SnapshotTransition,
     adapterResponse: Record<string, unknown>,
-    inputRequests: {
-      key: string;
-      description: string;
-      schema: Record<string, unknown>;
-      required: boolean;
-    }[] = [],
+    inputRequests: NewInputRequest[] = [],
     startWindowMissedAt?: Date,
     actualStartedAt?: Date | null,
   ): Promise<TaskRecord> {
@@ -1981,8 +1985,12 @@ export class TaskRepository {
       required: boolean;
       status: "OPEN" | "ANSWERED";
       answer_hash: string | null;
+      request_json: InputRequestRecord["requestJson"];
+      response_hash: string | null;
+      response_json: Record<string, unknown> | null;
     }>(
-      `SELECT request_key, description, schema, required, status, answer_hash
+      `SELECT request_key, description, schema, required, status, answer_hash,
+              request_json, response_hash, response_json
        FROM task_input_request WHERE task_id=$1 ORDER BY created_at, request_key`,
       [taskId],
     );
@@ -1993,6 +2001,9 @@ export class TaskRepository {
       required: row.required,
       status: row.status,
       answerHash: row.answer_hash,
+      requestJson: row.request_json,
+      responseHash: row.response_hash,
+      responseJson: row.response_json,
     }));
   }
 
@@ -2614,7 +2625,12 @@ export class TaskRepository {
   async acknowledgeUpdateAndCompleteInputAnswers(
     command: PendingCommandRecord,
     ack: Record<string, unknown>,
-    answers: { key: string; answerHash: string; value: unknown }[],
+    answers: {
+      key: string;
+      answerHash: string;
+      value: unknown;
+      response: Record<string, unknown>;
+    }[],
   ): Promise<"acknowledged" | "task_terminal" | "superseded_by_safe_stop"> {
     const client = await this.pool.connect();
     try {
@@ -2705,9 +2721,16 @@ export class TaskRepository {
         const result = await client.query(
           `UPDATE task_input_request
              SET status='ANSWERED', answer_hash=$3, answer=$4::jsonb,
+                 response_hash=$3, response_json=$5::jsonb,
                  answered_at=clock_timestamp()
            WHERE task_id=$1 AND request_key=$2 AND status='OPEN'`,
-          [command.taskId, answer.key, answer.answerHash, JSON.stringify(answer.value)],
+          [
+            command.taskId,
+            answer.key,
+            answer.answerHash,
+            JSON.stringify(answer.value),
+            JSON.stringify(answer.response),
+          ],
         );
         if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
       }
@@ -2983,12 +3006,7 @@ export class TaskRepository {
     taskId: string,
     adapterRevision: number,
     transition: SnapshotTransition,
-    inputRequests: {
-      key: string;
-      description: string;
-      schema: Record<string, unknown>;
-      required: boolean;
-    }[] = [],
+    inputRequests: NewInputRequest[] = [],
   ): Promise<TaskRecord> {
     const client = await this.pool.connect();
     try {
@@ -3512,24 +3530,35 @@ async function insertObservation(
 async function upsertInputRequests(
   client: PoolClient,
   taskId: string,
-  inputRequests: {
-    key: string;
-    description: string;
-    schema: Record<string, unknown>;
-    required: boolean;
-  }[],
+  inputRequests: NewInputRequest[],
 ): Promise<void> {
   for (const input of inputRequests) {
+    const requestJson = input.requestJson ?? {
+      method: "elicitation/create" as const,
+      params: {
+        mode: "form",
+        message: input.description,
+        requestedSchema: input.schema,
+      },
+    };
     const result = await client.query(
       `INSERT INTO task_input_request
-        (task_id, request_key, description, schema, required, status)
-       VALUES ($1,$2,$3,$4::jsonb,$5,'OPEN')
+        (task_id, request_key, description, schema, required, status, request_json)
+       VALUES ($1,$2,$3,$4::jsonb,$5,'OPEN',$6::jsonb)
        ON CONFLICT (task_id, request_key) DO UPDATE SET
          description=EXCLUDED.description
        WHERE task_input_request.schema=EXCLUDED.schema
          AND task_input_request.required=EXCLUDED.required
+         AND task_input_request.request_json=EXCLUDED.request_json
        RETURNING request_key`,
-      [taskId, input.key, input.description, JSON.stringify(input.schema), input.required],
+      [
+        taskId,
+        input.key,
+        input.description,
+        JSON.stringify(input.schema),
+        input.required,
+        JSON.stringify(requestJson),
+      ],
     );
     if (result.rowCount !== 1) throw new Error("STABLE_INPUT_REQUEST_CONFLICT");
   }
