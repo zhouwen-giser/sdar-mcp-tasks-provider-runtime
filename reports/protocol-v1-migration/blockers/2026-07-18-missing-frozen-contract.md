@@ -41,3 +41,11 @@ copying the original bytes, verifying the hash, and fetching only the pinned MCP
 schema blob.
 
 No Runtime or Provider Wire Contract implementation was changed while this artifact was missing.
+
+## Resolution
+
+Resolved on 2026-07-18. The user supplied
+`D:\downloads\SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0_FROZEN.md`; both the source and the
+byte-preserving repository copy hash to
+`d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845`. The committed checksum
+sidecar is validated by `pnpm protocol:check:frozen`.
