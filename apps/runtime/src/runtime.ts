@@ -287,27 +287,31 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       }
       const validated = new OperationRegistry().validate(manifest);
       if (telemetry === undefined) {
-        telemetry = new ProviderTelemetry({
-          enabled: config.OTEL_ENABLED,
-          otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
-          resource: {
-            serviceVersion: "1.1.0",
-            instanceId: telemetryInstanceId,
-            deploymentEnvironment: config.RUNTIME_ENV,
-            providerId: validated.providerId,
-            providerVersion: manifest.providerVersion,
-          },
-          onSelfMetric: (name, value, attributes, kind) => {
-            const labels = Object.fromEntries(
-              Object.entries(attributes).map(([key, label]) => [key, String(label)]),
-            );
-            const metricName = prometheusMetricKey(name, labels);
-            if (kind === "gauge") telemetrySelfGauges[metricName] = value;
-            else metrics.increment(name, labels, value);
-          },
-        });
         try {
-          telemetry.start();
+          const security = loadOtlpExporterSecurity(config);
+          const candidate = new ProviderTelemetry({
+            enabled: config.OTEL_ENABLED,
+            otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+            otlpTimeoutMillis: config.OTEL_EXPORTER_OTLP_TIMEOUT_MS,
+            ...security,
+            resource: {
+              serviceVersion: "1.1.0",
+              instanceId: telemetryInstanceId,
+              deploymentEnvironment: config.RUNTIME_ENV,
+              providerId: validated.providerId,
+              providerVersion: manifest.providerVersion,
+            },
+            onSelfMetric: (name, value, attributes, kind) => {
+              const labels = Object.fromEntries(
+                Object.entries(attributes).map(([key, label]) => [key, String(label)]),
+              );
+              const metricName = prometheusMetricKey(name, labels);
+              if (kind === "gauge") telemetrySelfGauges[metricName] = value;
+              else metrics.increment(name, labels, value);
+            },
+          });
+          candidate.start();
+          telemetry = candidate;
         } catch (error) {
           logger.warn({ err: error }, "Provider telemetry initialization failed");
         }
@@ -487,7 +491,12 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
       );
       const recoveryStartedAt = performance.now();
       const recovered = await recovery.scan();
-      telemetry.metric("recovery_duration", performance.now() - recoveryStartedAt, {}, "histogram");
+      telemetry?.metric(
+        "recovery_duration",
+        performance.now() - recoveryStartedAt,
+        {},
+        "histogram",
+      );
       metrics.increment("sdar_recovery_total", { outcome: "scan" });
       dependencies.recovery = "ready";
       logger.info(
@@ -782,4 +791,46 @@ function prometheusMetricKey(name: string, labels: Record<string, string>): stri
   return `${name}{${entries
     .map(([key, value]) => `${key}="${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`)
     .join(",")}}`;
+}
+
+export function loadOtlpExporterSecurity(config: RuntimeConfig): {
+  otlpHeaders?: Record<string, string>;
+  otlpTls?: { ca: Buffer; cert: Buffer; key: Buffer };
+} {
+  if (!config.OTEL_ENABLED) return {};
+  let otlpHeaders: Record<string, string> | undefined;
+  if (config.OTEL_EXPORTER_OTLP_HEADERS_FILE !== undefined) {
+    const content = readFileSync(config.OTEL_EXPORTER_OTLP_HEADERS_FILE, "utf8");
+    if (Buffer.byteLength(content, "utf8") > 65_536) throw new Error("OTLP_HEADERS_FILE_TOO_LARGE");
+    const parsed: unknown = JSON.parse(content);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("OTLP_HEADERS_FILE_INVALID");
+    }
+    otlpHeaders = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!/^[a-z0-9-]{1,128}$/i.test(key) || typeof value !== "string" || /[\r\n]/.test(value)) {
+        throw new Error("OTLP_HEADERS_FILE_INVALID");
+      }
+      otlpHeaders[key] = value;
+    }
+  }
+  let otlpTls: { ca: Buffer; cert: Buffer; key: Buffer } | undefined;
+  if (config.OTEL_EXPORTER_OTLP_TLS_MODE === "required") {
+    if (
+      config.OTEL_EXPORTER_OTLP_CA_PATH === undefined ||
+      config.OTEL_EXPORTER_OTLP_CERT_PATH === undefined ||
+      config.OTEL_EXPORTER_OTLP_KEY_PATH === undefined
+    ) {
+      throw new Error("OTLP_MTLS_FILES_REQUIRED");
+    }
+    otlpTls = {
+      ca: readFileSync(config.OTEL_EXPORTER_OTLP_CA_PATH),
+      cert: readFileSync(config.OTEL_EXPORTER_OTLP_CERT_PATH),
+      key: readFileSync(config.OTEL_EXPORTER_OTLP_KEY_PATH),
+    };
+  }
+  return {
+    ...(otlpHeaders === undefined ? {} : { otlpHeaders }),
+    ...(otlpTls === undefined ? {} : { otlpTls }),
+  };
 }

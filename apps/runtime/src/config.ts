@@ -13,6 +13,12 @@ const EnvironmentSchema = z
     PROVIDER_ID: z.string().min(1).max(128).default("mock-provider"),
     OTEL_ENABLED: BooleanEnvironmentSchema.default(false),
     OTEL_EXPORTER_OTLP_ENDPOINT: z.url().default("http://127.0.0.1:4318"),
+    OTEL_EXPORTER_OTLP_TLS_MODE: z.enum(["disabled", "required"]).default("disabled"),
+    OTEL_EXPORTER_OTLP_CA_PATH: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_CERT_PATH: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_KEY_PATH: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_HEADERS_FILE: z.string().min(1).optional(),
+    OTEL_EXPORTER_OTLP_TIMEOUT_MS: z.coerce.number().int().min(100).max(60_000).default(10_000),
     OTEL_SERVICE_INSTANCE_ID: z.string().min(1).max(256).optional(),
     PROVIDER_TELEMETRY_INGRESS_ENABLED: BooleanEnvironmentSchema.default(false),
     PROVIDER_TELEMETRY_HOST: z.string().min(1).max(255).default("127.0.0.1"),
@@ -130,6 +136,23 @@ const EnvironmentSchema = z
           message: "production forbids weak lease configuration",
         });
       }
+      if (
+        value.OTEL_ENABLED &&
+        !value.OTEL_EXPORTER_OTLP_ENDPOINT.toLowerCase().startsWith("https://")
+      ) {
+        context.addIssue({ code: "custom", message: "production OTLP requires HTTPS" });
+      }
+    }
+    if (
+      value.OTEL_EXPORTER_OTLP_TLS_MODE === "required" &&
+      (value.OTEL_EXPORTER_OTLP_CA_PATH === undefined ||
+        value.OTEL_EXPORTER_OTLP_CERT_PATH === undefined ||
+        value.OTEL_EXPORTER_OTLP_KEY_PATH === undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "OTLP mTLS requires CA, certificate, and key paths",
+      });
     }
     if (value.OUTBOX_SINK === "webhook" && value.OUTBOX_WEBHOOK_URL === undefined) {
       context.addIssue({ code: "custom", message: "webhook Outbox requires OUTBOX_WEBHOOK_URL" });

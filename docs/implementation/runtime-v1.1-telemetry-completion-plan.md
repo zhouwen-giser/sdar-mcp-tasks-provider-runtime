@@ -43,9 +43,9 @@ final-report repair are explicitly out of scope.
 | H5    | complete Task and command transition audit coverage       | lifecycle matrix tests              | complete    | `acd4850` |
 | H6    | scheduler/recovery/TTL per-Task envelopes                 | component envelope tests            | complete    | `5b911f0` |
 | H7    | sanitizer limits and trace failure isolation              | privacy/execute-once tests          | complete    | `e795267` |
-| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | complete    | pending   |
-| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | in progress | pending   |
-| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | pending     | pending   |
+| H8    | bounded metric values and drop/export/backlog accounting  | metric cardinality/failure tests    | complete    | `40e18d9` |
+| H9    | secure production OTLP configuration                      | HTTPS/header/mTLS tests             | complete    | pending   |
+| H10   | dual-language examples, docs, full gate, push and PR      | `pnpm verify:v1.1` and protected CI | in progress | pending   |
 
 ## Verification ledger
 
@@ -70,6 +70,8 @@ final-report repair are explicitly out of scope.
 | 2026-07-18 | H7 completion guard status                           | PASS for H7; only H8/H9 guards remain red                                        |
 | 2026-07-18 | H8 bounded labels, queue/export failure, audit retry | PASS, 10 focused tests                                                           |
 | 2026-07-18 | H8 completion guard status                           | PASS for H8; only H9 guard remains red                                           |
+| 2026-07-18 | H9 production HTTPS, header-file and mTLS security   | PASS, 31 focused tests plus typecheck and lint                                   |
+| 2026-07-18 | H9 Kubernetes secret-file deployment templates       | PASS, credentials absent from ConfigMap                                          |
 
 This file is updated with real phase SHAs and verification results as work progresses. A phase is
 complete only after its focused tests and static gates pass and its commit exists.

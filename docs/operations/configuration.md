@@ -50,6 +50,12 @@ authentication.
 | `OUTBOX_WEBHOOK_TIMEOUT_MS`          | `5000`                  | Webhook request timeout                                    |
 | `OTEL_ENABLED`                       | `false`                 | Enables best-effort OTLP traces, events, and metrics       |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`        | `http://127.0.0.1:4318` | OTLP/HTTP collector base URL                               |
+| `OTEL_EXPORTER_OTLP_TLS_MODE`        | `disabled`              | `required` enables collector mutual TLS                    |
+| `OTEL_EXPORTER_OTLP_CA_PATH`         | unset                   | PEM CA bundle for collector verification                   |
+| `OTEL_EXPORTER_OTLP_CERT_PATH`       | unset                   | PEM Runtime client certificate                             |
+| `OTEL_EXPORTER_OTLP_KEY_PATH`        | unset                   | PEM Runtime client private key                             |
+| `OTEL_EXPORTER_OTLP_HEADERS_FILE`    | unset                   | JSON file containing exporter-only HTTP headers            |
+| `OTEL_EXPORTER_OTLP_TIMEOUT_MS`      | `10000`                 | Per-export timeout, range 100-60,000 ms                    |
 | `OTEL_SERVICE_INSTANCE_ID`           | generated UUID          | Optional stable, replica-unique telemetry instance id      |
 | `PROVIDER_TELEMETRY_INGRESS_ENABLED` | `false`                 | Enables the Runtime-hosted Provider telemetry gRPC service |
 | `PROVIDER_TELEMETRY_HOST`            | `127.0.0.1`             | Provider telemetry listener host                           |
@@ -82,7 +88,12 @@ publication use short database transactions; no checked-out PoolClient may span 
 or be re-borrowed after commit. Command and scheduler claims are limited to their configured
 concurrency and renewed while an Adapter RPC is in flight.
 
-Telemetry is not a readiness dependency. Production should use a stable, unique
-`OTEL_SERVICE_INSTANCE_ID` per replica and route `OTEL_EXPORTER_OTLP_ENDPOINT` through the
-deployment network policy. See [Provider Ops Telemetry](provider-ops-telemetry.md) for the event,
-metric, privacy, and failure contracts.
+Telemetry is not a readiness dependency. When production enables telemetry, the OTLP endpoint
+must use HTTPS. Set `OTEL_EXPORTER_OTLP_TLS_MODE=required` only with all three CA, certificate, and
+key paths. Exporter headers are loaded from a JSON object in `OTEL_EXPORTER_OTLP_HEADERS_FILE` and
+are passed only to the exporters; keep this file in a Secret volume, never a ConfigMap or ordinary
+environment variable. Missing, malformed, oversized, or incomplete secret files disable telemetry
+with a warning while business startup and readiness continue. Production should use a stable,
+unique `OTEL_SERVICE_INSTANCE_ID` per replica and restrict collector access with deployment network
+policy. See [Provider Ops Telemetry](provider-ops-telemetry.md) for the event, metric, privacy, and
+failure contracts.

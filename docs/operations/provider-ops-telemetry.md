@@ -10,7 +10,11 @@ Runtime sends traces, logs/events, and metrics only to the configured OTLP endpo
 ClickHouse or SDAR Core client and does not query either system. Enable export with
 `OTEL_ENABLED=true`; set `OTEL_EXPORTER_OTLP_ENDPOINT` to the collector base URL and optionally
 set a stable replica-specific `OTEL_SERVICE_INSTANCE_ID`. The exporter appends `/v1/traces`,
-`/v1/logs`, and `/v1/metrics`.
+`/v1/logs`, and `/v1/metrics`. Production rejects plaintext OTLP when telemetry is enabled. Supply
+collector authentication through `OTEL_EXPORTER_OTLP_HEADERS_FILE`, and enable mutual TLS with
+`OTEL_EXPORTER_OTLP_TLS_MODE=required` plus complete CA, client certificate, and private-key files.
+Header values and TLS material are exporter-only secrets and are never copied into logs, events,
+spans, or ConfigMaps.
 
 Every signal carries the OTel resource attributes `service.name`, `service.version`,
 `service.instance.id`, `deployment.environment`, `sdar.provider.id`, and
@@ -105,8 +109,10 @@ persistence.
 Diagnostic processors use bounded queues, batches, and export timeouts. Audit facts use the durable
 delivery table, lease-safe claims, bounded backoff, and exporter acknowledgement before marking a
 record delivered. Collector outage never changes business processing or readiness; audit records
-remain retryable. On shutdown, Runtime stops both publisher loops, force-flushes telemetry providers,
-and closes the Provider ingress server.
+remain retryable. An exporter security-file or initialization failure produces a sanitized warning,
+leaves telemetry disabled, and does not make telemetry a readiness dependency. On shutdown, Runtime
+stops both publisher loops, force-flushes telemetry providers, and closes the Provider ingress
+server.
 
 No telemetry development stack is shipped in v1.1. CI uses in-memory, timeout, and queue-pressure
 exporters, keeping the default Compose stack and production image free of Collector/ClickHouse

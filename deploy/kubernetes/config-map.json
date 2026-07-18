@@ -36,6 +36,11 @@
     "RECOVERY_POLL_MS": "5000",
     "OUTBOX_PUBLISHED_RETENTION_MS": "86400000",
     "OTEL_ENABLED": "false",
-    "OTEL_EXPORTER_OTLP_ENDPOINT": "http://replace-otel-collector:4318"
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://replace-otel-collector:4318",
+    "OTEL_EXPORTER_OTLP_TLS_MODE": "required",
+    "OTEL_EXPORTER_OTLP_CA_PATH": "/var/run/secrets/sdar-otel-tls/ca.pem",
+    "OTEL_EXPORTER_OTLP_CERT_PATH": "/var/run/secrets/sdar-otel-tls/tls.crt",
+    "OTEL_EXPORTER_OTLP_KEY_PATH": "/var/run/secrets/sdar-otel-tls/tls.key",
+    "OTEL_EXPORTER_OTLP_HEADERS_FILE": "/var/run/secrets/sdar-otel-headers/headers.json"
   }
 }

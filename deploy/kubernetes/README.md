@@ -7,6 +7,12 @@ replace every `replace-*` value, create `sdar-adapter-mtls` with `ca.pem`,
 secret manager. `secret.example.json` is a shape example and must not be applied
 unchanged.
 
+Telemetry remains disabled in the ConfigMap by default. Before enabling it, create
+`sdar-otel-headers` from `otel-headers-secret.example.json` and `sdar-otel-mtls` from
+`otel-tls-secret.example.json` through the cluster secret manager. The Deployment mounts them as
+files at the paths named by the ConfigMap; collector credentials must not be copied into the
+ConfigMap or ordinary environment variables.
+
 Apply the namespace and service account first, then configuration/secrets, and
 finally the Deployment, Service, PodDisruptionBudget and NetworkPolicy. The
 Deployment runs two non-root replicas; PostgreSQL advisory locks and row claims

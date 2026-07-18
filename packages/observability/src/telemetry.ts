@@ -35,6 +35,9 @@ export interface ProviderTelemetryOptions {
   resource: ProviderResourceInput;
   enabled?: boolean;
   otlpEndpoint?: string;
+  otlpHeaders?: Record<string, string>;
+  otlpTls?: { ca: Buffer; cert: Buffer; key: Buffer };
+  otlpTimeoutMillis?: number;
   metricExportIntervalMillis?: number;
   batch?: ProviderTelemetryBatchOptions;
   spanExporter?: SpanExporter;
@@ -182,15 +185,38 @@ export class ProviderTelemetry {
   start(): void {
     if (this.#started || this.#shutdown || this.#options.enabled !== true) return;
     const resource = createProviderResource(this.#options.resource);
+    const exporterOptions = {
+      ...(this.#options.otlpHeaders === undefined ? {} : { headers: this.#options.otlpHeaders }),
+      timeoutMillis: this.#options.otlpTimeoutMillis ?? 10_000,
+      ...(this.#options.otlpTls === undefined
+        ? {}
+        : {
+            httpAgentOptions: {
+              ca: this.#options.otlpTls.ca,
+              cert: this.#options.otlpTls.cert,
+              key: this.#options.otlpTls.key,
+              rejectUnauthorized: true,
+            },
+          }),
+    };
     const rawSpanExporter =
       this.#options.spanExporter ??
-      new OTLPTraceExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "traces") });
+      new OTLPTraceExporter({
+        url: signalEndpoint(this.#options.otlpEndpoint, "traces"),
+        ...exporterOptions,
+      });
     const rawEventExporter =
       this.#options.eventExporter ??
-      new OTLPLogExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "logs") });
+      new OTLPLogExporter({
+        url: signalEndpoint(this.#options.otlpEndpoint, "logs"),
+        ...exporterOptions,
+      });
     const rawAuditExporter =
       this.#options.auditExporter ??
-      new OTLPLogExporter({ url: signalEndpoint(this.#options.otlpEndpoint, "logs") });
+      new OTLPLogExporter({
+        url: signalEndpoint(this.#options.otlpEndpoint, "logs"),
+        ...exporterOptions,
+      });
     const exportTimeoutMillis = this.#options.batch?.exportTimeoutMillis ?? 10_000;
     const spanExporter = observedSpanExporter(
       rawSpanExporter,
@@ -215,6 +241,7 @@ export class ProviderTelemetry {
       new PeriodicExportingMetricReader({
         exporter: new OTLPMetricExporter({
           url: signalEndpoint(this.#options.otlpEndpoint, "metrics"),
+          ...exporterOptions,
         }),
         exportIntervalMillis: this.#options.metricExportIntervalMillis ?? 60_000,
         exportTimeoutMillis: this.#options.batch?.exportTimeoutMillis ?? 10_000,

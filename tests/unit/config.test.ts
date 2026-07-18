@@ -37,6 +37,16 @@ describe("Runtime configuration", () => {
     expect(config.OTEL_SERVICE_INSTANCE_ID).toBe("runtime-a");
   });
 
+  it("development_can_explicitly_use_http", () => {
+    expect(
+      loadRuntimeConfig({
+        RUNTIME_ENV: "development",
+        OTEL_ENABLED: "true",
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://127.0.0.1:4318",
+      }).OTEL_EXPORTER_OTLP_ENDPOINT,
+    ).toBe("http://127.0.0.1:4318");
+  });
+
   it("rejects invalid ports and timeouts", () => {
     expect(() => loadRuntimeConfig({ PORT: "70000" })).toThrow();
     expect(() => loadRuntimeConfig({ ADAPTER_RPC_TIMEOUT_MS: "0" })).toThrow();
@@ -66,6 +76,13 @@ describe("Runtime configuration", () => {
         PROVIDER_TELEMETRY_TLS_MODE: "required",
       }),
     ).toThrow("Provider telemetry mTLS requires CA, certificate, and key paths");
+    expect(() =>
+      loadRuntimeConfig({
+        OTEL_ENABLED: "true",
+        OTEL_EXPORTER_OTLP_TLS_MODE: "required",
+        OTEL_EXPORTER_OTLP_CA_PATH: "/run/secrets/otel/ca.pem",
+      }),
+    ).toThrow("OTLP mTLS requires CA, certificate, and key paths");
   });
 
   it("validates outbox published retention bounds", () => {
