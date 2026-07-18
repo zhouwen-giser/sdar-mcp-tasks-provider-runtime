@@ -28,6 +28,12 @@ aliases exist only under `_meta["io.sdar/taskExecution"]` as `ttlMs` and `pollIn
 
 `tasks/get` binds taskId to the trusted authorization-context hash, execution mode, and simulation identity. Nonterminal reads perform the safe Adapter `GetExecution` RPC, apply only a greater observation revision, and atomically update task/outbox/observation data. Once a terminal state is stored, later Adapter observations cannot reverse it. Business failure and partial completion remain MCP `completed` with structured outcome data; only technical failure uses MCP `failed`.
 
+## 观测分页接口 `tasks/observations`
+
+`tasks/observations`（任务观测记录分页查询方法）向外部系统提供不可变的任务状态历史。输入包括 `taskId`（任务标识符）、可选的 `cursor`（分页游标）和 `limit`（单页条数，默认 `100`，范围 `1–100`）。输出中的 `observations`（观测记录数组）按 `revision`（观测修订号）从新到旧排列；`_meta.observationCursor`（下一页游标）可直接作为下一次请求的 `cursor`，`_meta.hasMore`（是否仍有下一页）用于决定是否继续读取。
+
+该方法沿用与 `tasks/get` 相同的授权上下文绑定，不能跨租户读取任务。完整字段、JSON-RPC 输入/输出样例和错误响应见 [Runtime API 参考](api-reference.md#任务观测分页接口-tasksobservations)。
+
 `io.sdar/taskExecution/checkAvailability` accepts 1–128 independent checks. Runtime validates operation support and known arguments, then performs one Adapter batch RPC with trusted execution context. Results must preserve request identity, use one of four Profile states, keep `validUntil` at or after `checkedAt`, and provide the required restricted-risk/effect fields and ordered valid windows. A transport failure yields explicit per-check `unknown`; it never claims `available` and never reserves a resource.
 
 When `tools/call.params._meta["io.sdar/taskExecution"].idempotencyKey` is present, Runtime binds the canonical deep argument hash to authorization, operation, mode, and simulation. Duplicate synchronous calls return the stored Tool result; duplicate task calls return the original immediately queryable taskId. A different argument hash is a conflict. Pending calls reuse the stable taskId and Reconcile before a safe retry.

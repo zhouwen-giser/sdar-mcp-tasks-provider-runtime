@@ -8,6 +8,16 @@ business semantics. Its live plan is
 Published `v1.0.0-rc.2` and `v1.0.0-rc.3` migrations, reports, tags, and release history remain
 immutable.
 
+## 中文接口文档导航
+
+面向外部系统的接口以中文说明为主，并保留协议中的英文标识符：
+
+- [Runtime API 参考](docs/protocol/api-reference.md)：说明 HTTP 健康/管理接口、MCP JSON-RPC 方法、`tasks/observations`（任务观测分页）和 Adapter gRPC 方法，包含输入输出样例。
+- [Provider 遥测入口](docs/protocol/provider-telemetry-ingress.md)：说明 `ProviderTelemetryIngress`（Provider 遥测入口）及 `EmitProviderEvents`（批量提交事件）的字段、mTLS 身份规则、错误码和 TypeScript/Python 客户端样例。
+- [Provider 运维遥测](docs/operations/provider-ops-telemetry.md)：说明 `ProviderOpsEnvelope`（Provider 运维事件信封）、外部 Collector 输出、指标、隐私和失败语义。
+- [Runtime 配置参考](docs/operations/configuration.md)：逐项解释环境变量、默认值和生产环境失败关闭要求。
+- [Adapter 快速开始](docs/adapter/quick-start.md)：说明 Provider/Adapter 对接方向和双语言示例客户端。
+
 ## Runtime quick start
 
 Prerequisites: Node.js 22, Corepack/pnpm 11, and Docker with Compose access.
