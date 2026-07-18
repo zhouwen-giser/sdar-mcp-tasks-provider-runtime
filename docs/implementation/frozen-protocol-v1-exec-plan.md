@@ -26,7 +26,7 @@ documentation are not substitute sources.
 | H0                  | exact frozen contract, pinned MCP schema, derived schemas and protocol lock                             | byte hash, Git blob and lock verification                       | complete    |
 | H1-H3               | isolated SEP-2663 handler, routing, request meta, headers, discovery, tool profile and availability     | focused protocol tests                                          | in progress |
 | H4-H7               | flat task results, detailed task mapping, runtime revision, true TTL, MRTR and cooperative cancellation | PostgreSQL integration and migration upgrade tests              | in progress |
-| H8-H10              | type-only evidence, durable SSE task notifications and non-standard method migration                    | evidence, multi-replica notification and legacy isolation tests | pending     |
+| H8-H10              | type-only evidence, durable SSE task notifications and non-standard method migration                    | evidence, multi-replica notification and legacy isolation tests | in progress |
 | H11-H13             | Adapter migration, 74-case conformance, CI, version and reports                                         | `verify:v2` and machine reports                                 | pending     |
 | Runtime publication | phased commits, Draft PR, protected CI, normal merge                                                    | merged Runtime PR with green required checks                    | pending     |
 | Provider migration  | merge new `origin/main` into every active Provider branch and update existing PRs                       | Provider conformance and Runtime E2E                            | pending     |
@@ -85,3 +85,9 @@ schema compilation, case cardinality and identity, and every locked SHA-256 with
   facts to `CallToolResult._meta["io.sdar/evidence"]`. The Proto and mapper contain no
   `requirementId`; synchronous, completed, business-failure and partial-completion results use the
   same result-contract path.
+- `TaskNotificationStream` implements POST SSE with the acknowledged notification as the first
+  frame, authorization-filtered and sorted Task IDs, an immediate complete snapshot, and polling
+  of the shared committed PostgreSQL projection. Each stream tracks monotonic Runtime revisions,
+  rechecks authorization, closes on backpressure, and releases its timer on disconnect. Tests run
+  two independent stream instances against the same authoritative reader and observe revisions
+  `1` then `2` on both.

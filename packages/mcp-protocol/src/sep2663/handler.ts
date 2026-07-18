@@ -10,6 +10,7 @@ import { validateFrozenHeaders } from "./headers.js";
 import { validateFrozenRequest } from "./request-validator.js";
 import { requireTasksCapability } from "./request-validator.js";
 import { parseTaskId, parseTaskInputResponses, parseTaskReference } from "./tasks.js";
+import { TaskNotificationStream } from "./notifications.js";
 
 const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
 
@@ -19,12 +20,19 @@ export interface FrozenDispatchResult {
 }
 
 export class Sep2663ProtocolHandler {
+  readonly notificationStream: TaskNotificationStream | undefined;
+
   constructor(
     readonly manifest: ValidatedManifest,
     readonly serverVersion = "2.0.0-rc.1",
     readonly taskEngine?: TaskEngine,
     readonly resolveAuthorization: AuthorizationResolver = developmentAuthorization,
-  ) {}
+    notificationStream?: TaskNotificationStream,
+  ) {
+    this.notificationStream =
+      notificationStream ??
+      (taskEngine === undefined ? undefined : new TaskNotificationStream(taskEngine));
+  }
 
   dispatch(body: unknown, headers: IncomingHttpHeaders): FrozenDispatchResult {
     const id = requestId(body);
@@ -108,8 +116,22 @@ export class Sep2663ProtocolHandler {
     let dispatched: FrozenDispatchResult;
     try {
       const authorization = this.resolveAuthorization(request);
+      const validated = validateFrozenRequest(body);
+      if (validated.method === "subscriptions/listen") {
+        validateFrozenHeaders(request.headers, validated);
+        requireTasksCapability(validated);
+        if (this.notificationStream === undefined) {
+          throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
+        }
+        await this.notificationStream.listen(validated, response, authorization);
+        return;
+      }
       dispatched = await this.dispatchAsync(body, request.headers, authorization);
     } catch (error) {
+      if (response.headersSent) {
+        response.end();
+        return;
+      }
       const mapped = mapFrozenError(error);
       dispatched = {
         httpStatus: mapped.httpStatus,
