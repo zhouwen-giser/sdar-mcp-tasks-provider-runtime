@@ -141,7 +141,7 @@ export interface InputRequestRecord {
   description: string;
   schema: Record<string, unknown>;
   required: boolean;
-  status: "OPEN" | "ANSWERED";
+  status: "OPEN" | "ANSWERED" | "SUPERSEDED";
   answerHash: string | null;
   requestJson: {
     method: "elicitation/create";
@@ -149,6 +149,19 @@ export interface InputRequestRecord {
   };
   responseHash: string | null;
   responseJson: Record<string, unknown> | null;
+}
+
+export interface McpInputResponse {
+  action: "accept" | "decline" | "cancel";
+  content?: unknown;
+}
+
+export interface InputResponseAcceptance {
+  acceptedKeys: string[];
+  ignoredUnknownKeys: string[];
+  ignoredAnsweredKeys: string[];
+  ignoredSupersededKeys: string[];
+  duplicatePendingKeys: string[];
 }
 
 export interface ObservationRecord {
@@ -1993,7 +2006,7 @@ export class TaskRepository {
       description: string;
       schema: Record<string, unknown>;
       required: boolean;
-      status: "OPEN" | "ANSWERED";
+      status: InputRequestRecord["status"];
       answer_hash: string | null;
       request_json: InputRequestRecord["requestJson"];
       response_hash: string | null;
@@ -2015,6 +2028,119 @@ export class TaskRepository {
       responseHash: row.response_hash,
       responseJson: row.response_json,
     }));
+  }
+
+  async acceptMcpInputResponses(
+    taskId: string,
+    authorization: AuthorizationContext,
+    inputResponses: Record<string, McpInputResponse>,
+  ): Promise<InputResponseAcceptance> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lockedTask = await client.query<TaskRow & { handle_expired: boolean }>(
+        `SELECT *,
+                (internal_state LIKE 'TERMINAL_%'
+                 AND handle_expires_at IS NOT NULL
+                 AND handle_expires_at <= clock_timestamp()) AS handle_expired
+         FROM provider_task
+         WHERE task_id=$1 AND authorization_context_hash=$2 AND execution_mode=$3
+           AND simulation_id IS NOT DISTINCT FROM $4
+         FOR UPDATE`,
+        [taskId, authorization.hash, authorization.executionMode, authorization.simulationId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new TaskNotFoundOrUnauthorizedError();
+      if (task.expired_at !== null || task.handle_expired) throw new TaskExpiredError();
+
+      const entries = Object.entries(inputResponses).sort(([left], [right]) =>
+        left.localeCompare(right),
+      );
+      const keys = entries.map(([key]) => key);
+      const requests =
+        keys.length === 0
+          ? []
+          : (
+              await client.query<{
+                request_key: string;
+                status: InputRequestRecord["status"];
+              }>(
+                `SELECT request_key, status FROM task_input_request
+                 WHERE task_id=$1 AND request_key=ANY($2::text[])
+                 ORDER BY request_key FOR UPDATE`,
+                [taskId, keys],
+              )
+            ).rows;
+      const requestByKey = new Map(requests.map((request) => [request.request_key, request]));
+      const result: InputResponseAcceptance = {
+        acceptedKeys: [],
+        ignoredUnknownKeys: [],
+        ignoredAnsweredKeys: [],
+        ignoredSupersededKeys: [],
+        duplicatePendingKeys: [],
+      };
+      const acceptedHashes: string[] = [];
+      for (const [key, response] of entries) {
+        const request = requestByKey.get(key);
+        if (request === undefined) {
+          result.ignoredUnknownKeys.push(key);
+          continue;
+        }
+        if (request.status === "ANSWERED") {
+          result.ignoredAnsweredKeys.push(key);
+          continue;
+        }
+        if (request.status === "SUPERSEDED") {
+          result.ignoredSupersededKeys.push(key);
+          continue;
+        }
+        const responseHash = createHash("sha256")
+          .update(canonicalizeResponse(response))
+          .digest("hex");
+        const inserted = await client.query<{ request_key: string }>(
+          `INSERT INTO task_input_response_inbox
+            (task_id, request_key, response_hash, response_json, state)
+           VALUES ($1,$2,$3,$4::jsonb,'PENDING')
+           ON CONFLICT (task_id, request_key) DO NOTHING
+           RETURNING request_key`,
+          [taskId, key, responseHash, JSON.stringify(response)],
+        );
+        if (inserted.rows[0] === undefined) {
+          result.duplicatePendingKeys.push(key);
+        } else {
+          result.acceptedKeys.push(key);
+          acceptedHashes.push(`${key}:${responseHash}`);
+        }
+      }
+
+      if (result.acceptedKeys.length > 0) {
+        const acceptanceHash = createHash("sha256").update(acceptedHashes.join("\n")).digest("hex");
+        await transitionTask(client, {
+          taskId,
+          expectedVersion: Number(task.version),
+          update: {},
+          observation: {
+            type: "task.input_response_accepted",
+            occurredAt: new Date(),
+            reasonCode: "INPUT_RESPONSE_ACCEPTED",
+            message: "Task input response accepted for durable delivery.",
+            substate: task.substate,
+            source: "runtime",
+            payload: { keys: result.acceptedKeys },
+          },
+          outboxType: "task.input_response_accepted",
+          eventKey: `${taskId}:input-response:${acceptanceHash}`,
+          outboxPayload: { keys: result.acceptedKeys },
+        });
+      }
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listObservations(
@@ -3606,6 +3732,16 @@ async function upsertInputRequests(
 
 function commandHash(reason: string): string {
   return createHash("sha256").update(`cancel:${reason.toLowerCase()}`).digest("hex");
+}
+
+function canonicalizeResponse(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalizeResponse).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalizeResponse(object[key])}`)
+    .join(",")}}`;
 }
 
 async function insertOutbox(

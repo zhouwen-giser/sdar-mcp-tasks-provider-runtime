@@ -846,30 +846,15 @@ export class TaskEngine {
     }
     const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
-    const pending: [string, { action: "accept" | "decline" | "cancel"; content?: unknown }][] = [];
     for (const [key, response] of Object.entries(inputResponses)) {
       const request = requests.find((candidate) => candidate.key === key);
       if (request === undefined) continue;
-      const hash = createHash("sha256").update(canonicalize(response)).digest("hex");
-      if (request.status === "ANSWERED") {
-        if (request.responseHash !== hash) {
-          throw new InvalidParamsError("INPUT_RESPONSE_CONFLICT");
-        }
-        continue;
-      }
+      if (request.status !== "OPEN") continue;
       if (response.action === "accept" && !ajv.compile(request.schema)(response.content)) {
         throw new InvalidParamsError("INVALID_INPUT_RESPONSE");
       }
-      pending.push([key, response]);
     }
-    if (pending.length === 0) return;
-    const normalized = Object.fromEntries(
-      pending.sort(([left], [right]) => left.localeCompare(right)),
-    );
-    const requestHash = createHash("sha256").update(canonicalize(normalized)).digest("hex");
-    await this.#repository.beginCommand(taskId, "UPDATE", requestHash, {
-      inputResponses: normalized,
-    });
+    await this.#repository.acceptMcpInputResponses(taskId, authorization, inputResponses);
   }
 
   async controlTask(
@@ -1181,7 +1166,7 @@ function detailedTask(
     description: string;
     schema: Record<string, unknown>;
     required: boolean;
-    status: "OPEN" | "ANSWERED";
+    status: "OPEN" | "ANSWERED" | "SUPERSEDED";
   }[] = [],
   observationPage: ObservationPage = { observations: [], nextCursor: null, hasMore: false },
   readStatus: {

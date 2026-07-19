@@ -20,3 +20,10 @@ This ledger is maintained from the execution-time base `c5594e4cb59f77421a8aa107
 - `tests/runtime-conformance-closure/notification-capacity.test.ts`
 - `tests/runtime-conformance-closure/notification-batch.test.ts`
 - `tests/runtime-conformance-closure/notification-equality.test.ts`
+
+## H1 durable MRTR acceptance
+
+- `migrations/022_mrtr_response_inbox.sql`
+- `packages/persistence-postgres/src/tasks.ts`
+- `packages/task-engine/src/engine.ts`
+- `tests/runtime-conformance-closure/mrtr-inbox.test.ts`

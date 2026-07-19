@@ -93,6 +93,13 @@ function testEngine(
     pool: {},
     getAuthorized: vi.fn().mockResolvedValue({ operationSnapshotId: "snapshot-1" }),
     listInputRequests: vi.fn().mockResolvedValue(requests),
+    acceptMcpInputResponses: vi.fn().mockResolvedValue({
+      acceptedKeys: [],
+      ignoredUnknownKeys: [],
+      ignoredAnsweredKeys: [],
+      ignoredSupersededKeys: [],
+      duplicatePendingKeys: [],
+    }),
     beginCommand: vi.fn().mockResolvedValue(command("UPDATE")),
     ...overrides,
   };
