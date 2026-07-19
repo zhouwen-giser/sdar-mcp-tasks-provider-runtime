@@ -14,6 +14,7 @@ This ledger is maintained from the execution-time base `c5594e4cb59f77421a8aa107
 
 - `package.json` (closure-only test scripts; existing Provider scripts retained)
 - `tests/runtime-conformance-closure/mrtr-inbox.test.ts`
+- `packages/task-engine/src/command-dispatcher.ts`
 - `tests/runtime-conformance-closure/mrtr-recovery.test.ts`
 - `tests/runtime-conformance-closure/error-mapping.test.ts`
 - `tests/runtime-conformance-closure/notification-identity.test.ts`

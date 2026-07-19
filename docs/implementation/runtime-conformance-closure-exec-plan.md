@@ -1,6 +1,6 @@
 # Runtime Frozen Conformance Closure ExecPlan
 
-Status: H0 committed and pushed; H1 durable acceptance implemented
+Status: H0 committed and pushed; H1 durable acceptance and promotion implemented
 
 Branch: `fix/frozen-runtime-conformance-closure`
 

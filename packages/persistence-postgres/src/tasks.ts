@@ -2143,6 +2143,122 @@ export class TaskRepository {
     }
   }
 
+  async promotePendingInputResponses(limit = 32): Promise<number> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1024) {
+      throw new RangeError("INPUT_RESPONSE_PROMOTION_LIMIT_INVALID");
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const pending = await client.query<{
+        task_id: string;
+        request_key: string;
+        response_hash: string;
+        response_json: McpInputResponse;
+      }>(
+        `WITH candidate_tasks AS (
+           SELECT task_id, min(accepted_at) AS first_accepted_at
+           FROM task_input_response_inbox
+           WHERE state='PENDING'
+           GROUP BY task_id
+           ORDER BY first_accepted_at, task_id
+           LIMIT $1
+         )
+         SELECT inbox.task_id, inbox.request_key, inbox.response_hash, inbox.response_json
+         FROM task_input_response_inbox inbox
+         JOIN candidate_tasks USING (task_id)
+         WHERE inbox.state='PENDING'
+         ORDER BY inbox.task_id, inbox.accepted_at, inbox.request_key
+         FOR UPDATE OF inbox SKIP LOCKED`,
+        [limit],
+      );
+      const byTask = new Map<string, typeof pending.rows>();
+      for (const row of pending.rows) {
+        const rows = byTask.get(row.task_id) ?? [];
+        rows.push(row);
+        byTask.set(row.task_id, rows);
+      }
+      let promoted = 0;
+      for (const [taskId, responses] of byTask) {
+        const lockedTask = await client.query<TaskRow>(
+          "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+          [taskId],
+        );
+        const task = lockedTask.rows[0];
+        if (task === undefined) throw new Error("TASK_NOT_FOUND");
+        const keys = responses.map((response) => response.request_key);
+        if (
+          task.cancel_requested ||
+          task.stop_reason !== null ||
+          task.internal_state === "STOPPING" ||
+          isTerminalState(task.internal_state)
+        ) {
+          await client.query(
+            `UPDATE task_input_response_inbox
+             SET state='IGNORED', updated_at=clock_timestamp(),
+                 last_error_code='TASK_NOT_ACCEPTING_INPUT',
+                 last_error_message='Task is stopping or terminal.'
+             WHERE task_id=$1 AND request_key=ANY($2::text[]) AND state='PENDING'`,
+            [taskId, keys],
+          );
+          continue;
+        }
+        const updated = await client.query<{ next_command_sequence: string }>(
+          `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
+           WHERE task_id=$1 RETURNING next_command_sequence`,
+          [taskId],
+        );
+        const sequence = updated.rows[0]?.next_command_sequence;
+        if (sequence === undefined) throw new Error("COMMAND_SEQUENCE_NOT_RETURNED");
+        const normalized = Object.fromEntries(
+          responses.map((response) => [response.request_key, response.response_json]),
+        );
+        const requestHash = createHash("sha256")
+          .update(
+            responses
+              .map((response) => `${response.request_key}:${response.response_hash}`)
+              .join("\n"),
+          )
+          .digest("hex");
+        await client.query(
+          `INSERT INTO task_command
+            (task_id, command_sequence, command_type, request_hash, state, payload)
+           VALUES ($1,$2,'UPDATE',$3,'PENDING',$4::jsonb)`,
+          [taskId, sequence, requestHash, JSON.stringify({ inputResponses: normalized })],
+        );
+        const assigned = await client.query(
+          `UPDATE task_input_response_inbox
+           SET state='ASSIGNED', command_sequence=$3, assigned_at=clock_timestamp(),
+               updated_at=clock_timestamp()
+           WHERE task_id=$1 AND request_key=ANY($2::text[]) AND state='PENDING'`,
+          [taskId, keys, sequence],
+        );
+        if (assigned.rowCount !== responses.length)
+          throw new Error("INPUT_RESPONSE_ASSIGNMENT_LOST");
+        await insertCommandFact(
+          client,
+          taskId,
+          {
+            sequence: Number(sequence),
+            commandType: "UPDATE",
+            state: "PENDING",
+            attemptCount: 0,
+          },
+          "task.command.created",
+          { reasonCode: "INPUT_RESPONSE_ACCEPTED", adapterRpcStatus: "not_started" },
+        );
+        promoted += 1;
+      }
+      await client.query("COMMIT");
+      return promoted;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async listObservations(
     taskId: string,
     beforeRevision?: number,
@@ -2899,6 +3015,14 @@ export class TaskRepository {
         );
         if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
       }
+
+      await client.query(
+        `UPDATE task_input_response_inbox
+         SET state='ACKNOWLEDGED', acknowledged_at=clock_timestamp(),
+             updated_at=clock_timestamp(), last_error_code=NULL, last_error_message=NULL
+         WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+        [command.taskId, command.commandSequence],
+      );
 
       const keys = answers.map((answer) => answer.key).sort();
       await transitionTask(client, {

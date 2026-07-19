@@ -50,6 +50,10 @@ export class DurableCommandDispatcher {
     const now = this.clock.now();
     const concurrency = this.options.concurrency ?? 8;
     const leaseMilliseconds = this.options.leaseMilliseconds ?? this.claimLeaseMs;
+    const promoter = (this.repository as Partial<TaskRepository>).promotePendingInputResponses;
+    if (typeof promoter === "function") {
+      await promoter.call(this.repository, concurrency);
+    }
     const commands = await this.repository.claimDueCommands(
       now,
       this.workerId,
