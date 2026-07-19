@@ -15,6 +15,7 @@ import { validatedSnapshotTransition } from "./result-contract.js";
 export interface CommandDispatcherOptions {
   concurrency?: number;
   leaseMilliseconds?: number;
+  maxInputResponseAttempts?: number;
   onMetric?: (durationMs: number) => void;
 }
 
@@ -139,6 +140,17 @@ export class DurableCommandDispatcher {
         await this.repository.failSafeStopUnconfirmed(
           command,
           error instanceof Error ? error.message : "Safe stop could not be confirmed.",
+        );
+        result.exhausted += 1;
+        return;
+      }
+      if (
+        command.commandType === "UPDATE" &&
+        command.attemptCount >= (this.options.maxInputResponseAttempts ?? 8)
+      ) {
+        await this.repository.failInputResponseDelivery(
+          command,
+          error instanceof Error ? error.message : "Input response delivery failed.",
         );
         result.exhausted += 1;
         return;

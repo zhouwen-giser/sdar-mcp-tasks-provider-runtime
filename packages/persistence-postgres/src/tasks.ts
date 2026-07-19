@@ -759,6 +759,13 @@ export class TaskRepository {
         [now],
       );
       for (const row of superseded.rows) {
+        if (row.command_type === "UPDATE") {
+          await markAssignedInputResponsesIgnored(
+            client,
+            row.task_id,
+            Number(row.command_sequence),
+          );
+        }
         await insertCommandFact(
           client,
           row.task_id,
@@ -1012,6 +1019,15 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner, errorCode, errorMessage],
       );
       if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      if (command.commandType === "UPDATE") {
+        await client.query(
+          `UPDATE task_input_response_inbox
+           SET state='FAILED', failed_at=clock_timestamp(), updated_at=clock_timestamp(),
+               last_error_code='INPUT_RESPONSE_REJECTED', last_error_message=$3
+           WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+          [command.taskId, command.commandSequence, errorMessage],
+        );
+      }
       await insertCommandFact(
         client,
         command.taskId,
@@ -1026,6 +1042,90 @@ export class TaskRepository {
           previousState: "CLAIMED",
           reasonCode: errorCode,
           adapterRpcStatus: "rejected",
+        },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async failInputResponseDelivery(command: PendingCommandRecord, message: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lockedTask = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new Error("TASK_NOT_FOUND");
+      const exhausted = await client.query(
+        `UPDATE task_command
+         SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+             last_error_code='INPUT_RESPONSE_DELIVERY_EXHAUSTED', last_error_message=$4,
+             updated_at=clock_timestamp()
+         WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+        [command.taskId, command.commandSequence, command.claimOwner, message],
+      );
+      if (exhausted.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await client.query(
+        `UPDATE task_input_response_inbox
+         SET state='FAILED', failed_at=clock_timestamp(), updated_at=clock_timestamp(),
+             last_error_code='INPUT_RESPONSE_DELIVERY_EXHAUSTED', last_error_message=$3
+         WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+        [command.taskId, command.commandSequence, message],
+      );
+      if (!isTerminalState(task.internal_state)) {
+        await transitionTask(client, {
+          taskId: command.taskId,
+          expectedVersion: Number(task.version),
+          update: {
+            internalState: "TERMINAL_FAILED",
+            mcpStatus: "failed",
+            substate: null,
+            statusMessage: "Input response delivery exhausted.",
+            result: null,
+            error: {
+              code: -32603,
+              message: "Input response delivery exhausted.",
+              data: { reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED" },
+            },
+          },
+          observation: {
+            type: "task.failed",
+            occurredAt: new Date(),
+            reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+            message: "Input response delivery exhausted.",
+            substate: null,
+            source: "runtime",
+            payload: { commandSequence: command.commandSequence },
+          },
+          outboxType: "task.failed",
+          eventKey: `${command.taskId}:command:${String(command.commandSequence)}:input-delivery-exhausted`,
+          outboxPayload: {
+            commandSequence: command.commandSequence,
+            reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+          },
+        });
+      }
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "EXHAUSTED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.exhausted",
+        {
+          previousState: "CLAIMED",
+          reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+          adapterRpcStatus: "error",
         },
       );
       await client.query("COMMIT");
@@ -2710,6 +2810,9 @@ export class TaskRepository {
         [taskId],
       );
       for (const row of result.rows) {
+        if (row.command_type === "UPDATE") {
+          await markAssignedInputResponsesIgnored(client, taskId, Number(row.command_sequence));
+        }
         await insertCommandFact(
           client,
           taskId,
@@ -2751,6 +2854,9 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner],
       );
       if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      if (command.commandType === "UPDATE") {
+        await markAssignedInputResponsesIgnored(client, command.taskId, command.commandSequence);
+      }
       await insertCommandFact(
         client,
         command.taskId,
@@ -2798,6 +2904,9 @@ export class TaskRepository {
         [taskId],
       );
       for (const row of result.rows) {
+        if (row.command_type === "UPDATE") {
+          await markAssignedInputResponsesIgnored(client, taskId, Number(row.command_sequence));
+        }
         await insertCommandFact(
           client,
           taskId,
@@ -3866,6 +3975,21 @@ function canonicalizeResponse(value: unknown): string {
     .sort()
     .map((key) => `${JSON.stringify(key)}:${canonicalizeResponse(object[key])}`)
     .join(",")}}`;
+}
+
+async function markAssignedInputResponsesIgnored(
+  client: PoolClient,
+  taskId: string,
+  commandSequence: number,
+): Promise<void> {
+  await client.query(
+    `UPDATE task_input_response_inbox
+     SET state='IGNORED', updated_at=clock_timestamp(),
+         last_error_code='SUPERSEDED_BY_SAFE_STOP',
+         last_error_message='Safe stop superseded input response delivery.'
+     WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+    [taskId, commandSequence],
+  );
 }
 
 async function insertOutbox(
