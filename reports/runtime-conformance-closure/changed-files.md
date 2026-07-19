@@ -15,6 +15,12 @@ This ledger is maintained from the execution-time base `c5594e4cb59f77421a8aa107
 - `package.json` (closure-only test scripts; existing Provider scripts retained)
 - `tests/runtime-conformance-closure/mrtr-inbox.test.ts`
 - `packages/task-engine/src/command-dispatcher.ts`
+
+## H2 frozen error mapping
+
+- `packages/mcp-protocol/src/sep2663/error-mapper.ts`
+- `packages/mcp-protocol/src/sep2663/handler.ts`
+- `packages/mcp-protocol/src/index.ts`
 - `tests/runtime-conformance-closure/mrtr-recovery.test.ts`
 - `tests/runtime-conformance-closure/error-mapping.test.ts`
 - `tests/runtime-conformance-closure/notification-identity.test.ts`

@@ -1,6 +1,6 @@
 # Runtime Frozen Conformance Closure ExecPlan
 
-Status: H0 committed and pushed; H1 durable MRTR lifecycle complete
+Status: H0 and H1 committed and pushed; H2 error classification implemented
 
 Branch: `fix/frozen-runtime-conformance-closure`
 
@@ -22,7 +22,7 @@ Initial base: `origin/main` at `c5594e4cb59f77421a8aa107defa6054ca61a768`
 | Baseline    | execution-time main identity and upstream merge ledger                         | required ancestor and clean worktree              | complete |
 | H0          | R-001 through R-018 regression tests                                           | failures reproduced before implementation changes | complete |
 | H1          | durable MRTR response inbox and atomic terminal transitions                    | real PostgreSQL recovery and idempotency tests    | complete |
-| H2          | frozen Runtime error mapper                                                    | safe `-32602`/`-32603` classification tests       | pending  |
+| H2          | frozen Runtime error mapper                                                    | safe `-32602`/`-32603` classification tests       | complete |
 | H3-H5       | transport-scoped typed subscriptions and authoritative notification projection | multi-client identity and strict equality tests   | pending  |
 | H6-H7       | Runtime poll manager, batched reads, bounded queues, backpressure, metrics     | capacity, SQL-count, and slow-stream tests        | pending  |
 | H8          | strengthened conformance and machine reports                                   | 74/74 plus closure suite                          | pending  |
