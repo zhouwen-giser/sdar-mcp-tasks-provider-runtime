@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import type { AuthorizationContext } from "../../../domain/src/index.js";
 import { isRuntimeError } from "../../../domain/src/index.js";
@@ -9,9 +10,43 @@ export interface TaskNotificationStreamOptions {
   pollIntervalMs?: number;
 }
 
-export class TaskNotificationStream {
+export interface SubscriptionIdentity {
+  internalId: string;
+  transportScopeId: string;
+  wireRequestId: string | number;
+  typedWireRequestKey: string;
+  authorizationScope: string;
+}
+
+export class TaskNotificationWriter {
+  constructor(readonly response: ServerResponse) {}
+
+  write(message: Record<string, unknown>): boolean {
+    const accepted = this.response.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+    if (!accepted) this.response.end();
+    return accepted;
+  }
+}
+
+export class TaskNotificationSubscription {
+  readonly cancellation = new AbortController();
+  readonly revisions = new Map<string, NotificationState>();
+  readonly writer: TaskNotificationWriter;
+  acceptedTaskIds: string[] = [];
+
+  constructor(
+    readonly identity: SubscriptionIdentity,
+    readonly authorization: AuthorizationContext,
+    readonly response: ServerResponse,
+  ) {
+    this.writer = new TaskNotificationWriter(response);
+  }
+}
+
+export class TaskNotificationManager {
   readonly #pollIntervalMs: number;
-  readonly #subscriptions = new Map<string, AbortController>();
+  readonly #subscriptions = new Map<string, TaskNotificationSubscription>();
+  readonly #transportWireIndex = new Map<string, Set<string>>();
 
   constructor(
     readonly taskEngine: Pick<TaskEngine, "getFrozenTask">,
@@ -24,94 +59,89 @@ export class TaskNotificationStream {
     request: FrozenJsonRpcRequest,
     response: ServerResponse,
     authorization: AuthorizationContext,
+    transportScopeId = "direct",
   ): Promise<void> {
-    const subscriptionId = String(request.id);
-    if (this.#subscriptions.has(subscriptionId)) throw invalidParams();
-    const cancellation = new AbortController();
-    this.#subscriptions.set(subscriptionId, cancellation);
-    const requestedTaskIds = parseTaskIds(request.params);
-    const current = new Map<string, Record<string, unknown>>();
-    for (const taskId of requestedTaskIds) {
-      const snapshot = await this.#authorizedSnapshot(taskId, authorization);
-      if (snapshot !== undefined) current.set(taskId, snapshot);
+    const identity = subscriptionIdentity(request.id, transportScopeId, authorization);
+    const transportKey = transportWireIndexKey(identity);
+    const existing = this.#transportWireIndex.get(transportKey);
+    if (
+      existing !== undefined &&
+      [...existing].some(
+        (internalId) =>
+          this.#subscriptions.get(internalId)?.identity.authorizationScope ===
+          identity.authorizationScope,
+      )
+    ) {
+      throw invalidParams();
     }
-    const acceptedTaskIds = [...current.keys()].sort();
+    const subscription = new TaskNotificationSubscription(identity, authorization, response);
+    this.#subscriptions.set(identity.internalId, subscription);
+    const indexed = existing ?? new Set<string>();
+    indexed.add(identity.internalId);
+    this.#transportWireIndex.set(transportKey, indexed);
+    try {
+      const requestedTaskIds = parseTaskIds(request.params);
+      const current = new Map<string, Record<string, unknown>>();
+      for (const taskId of requestedTaskIds) {
+        const snapshot = await this.#authorizedSnapshot(taskId, authorization);
+        if (snapshot !== undefined) current.set(taskId, snapshot);
+      }
+      subscription.acceptedTaskIds = [...current.keys()].sort();
 
-    response.statusCode = 200;
-    response.setHeader("content-type", "text/event-stream");
-    response.setHeader("cache-control", "no-cache, no-transform");
-    response.setHeader("connection", "keep-alive");
-    response.flushHeaders();
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/event-stream");
+      response.setHeader("cache-control", "no-cache, no-transform");
+      response.setHeader("connection", "keep-alive");
+      response.flushHeaders();
 
-    if (!writeFrame(response, acknowledged(request.id, acceptedTaskIds))) {
-      this.#subscriptions.delete(subscriptionId);
-      return;
-    }
-    const revisions = new Map<string, NotificationState>();
-    for (const taskId of acceptedTaskIds) {
-      const snapshot = current.get(taskId);
-      if (snapshot === undefined) continue;
-      const revision = runtimeRevision(snapshot);
-      revisions.set(taskId, notificationState(snapshot, revision));
-      if (!writeFrame(response, taskNotification(request.id, snapshot))) {
-        this.#subscriptions.delete(subscriptionId);
+      if (!subscription.writer.write(acknowledged(request.id, subscription.acceptedTaskIds))) {
         return;
       }
-    }
-    if (acceptedTaskIds.length === 0) {
-      this.#subscriptions.delete(subscriptionId);
-      response.end();
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      let polling = false;
-      let closed = false;
-      const close = (): void => {
-        if (closed) return;
-        closed = true;
-        clearInterval(timer);
-        cancellation.signal.removeEventListener("abort", cancel);
-        this.#subscriptions.delete(subscriptionId);
-        resolve();
-      };
-      const cancel = (): void => {
+      for (const taskId of subscription.acceptedTaskIds) {
+        const snapshot = current.get(taskId);
+        if (snapshot === undefined) continue;
+        const revision = runtimeRevision(snapshot);
+        subscription.revisions.set(taskId, notificationState(snapshot, revision));
+        if (!subscription.writer.write(taskNotification(request.id, snapshot))) return;
+      }
+      if (subscription.acceptedTaskIds.length === 0) {
         response.end();
-        close();
-      };
-      const timer = setInterval(() => {
-        if (polling || closed) return;
-        polling = true;
-        void this.#poll(request.id, acceptedTaskIds, revisions, response, authorization)
-          .then((keepOpen) => {
-            if (!keepOpen) {
-              response.end();
-              close();
-            }
-          })
-          .catch(() => {
-            response.end();
-            close();
-          })
-          .finally(() => {
-            polling = false;
-          });
-      }, this.#pollIntervalMs);
-      timer.unref();
-      response.once("close", close);
-      response.once("error", close);
-      cancellation.signal.addEventListener("abort", cancel, { once: true });
-    });
+        return;
+      }
+
+      await this.#waitForSubscription(subscription);
+    } finally {
+      this.#release(subscription);
+    }
   }
 
-  cancel(requestId: string | number): boolean {
-    const subscription = this.#subscriptions.get(String(requestId));
-    if (subscription === undefined) return false;
-    subscription.abort();
+  cancel(
+    requestId: string | number,
+    transportScopeId = "direct",
+    authorization?: AuthorizationContext,
+  ): boolean {
+    const key = transportWireIndexKey({
+      transportScopeId,
+      typedWireRequestKey: typedWireRequestKey(requestId),
+    });
+    const candidates = [...(this.#transportWireIndex.get(key) ?? [])]
+      .map((internalId) => this.#subscriptions.get(internalId))
+      .filter((candidate): candidate is TaskNotificationSubscription => candidate !== undefined)
+      .filter(
+        (candidate) =>
+          authorization === undefined ||
+          candidate.identity.authorizationScope === authorizationScope(authorization),
+      );
+    if (candidates.length !== 1) return false;
+    candidates[0]?.cancellation.abort();
     return true;
   }
 
-  handleCancelledNotification(value: unknown): boolean {
+  handleCancelledNotification(
+    value: unknown,
+    transportScopeId = "direct",
+    authorization?: AuthorizationContext,
+  ): boolean {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw invalidParams();
     }
@@ -130,21 +160,55 @@ export class TaskNotificationStream {
     ) {
       throw invalidParams();
     }
-    return this.cancel(record.requestId as string | number);
+    return this.cancel(record.requestId as string | number, transportScopeId, authorization);
   }
 
-  async #poll(
-    subscriptionId: string | number,
-    taskIds: readonly string[],
-    revisions: Map<string, NotificationState>,
-    response: ServerResponse,
-    authorization: AuthorizationContext,
-  ): Promise<boolean> {
-    for (const taskId of taskIds) {
-      const snapshot = await this.#authorizedSnapshot(taskId, authorization);
+  async #waitForSubscription(subscription: TaskNotificationSubscription): Promise<void> {
+    await new Promise<void>((resolve) => {
+      let polling = false;
+      let closed = false;
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        clearInterval(timer);
+        subscription.cancellation.signal.removeEventListener("abort", cancel);
+        resolve();
+      };
+      const cancel = (): void => {
+        subscription.response.end();
+        close();
+      };
+      const timer = setInterval(() => {
+        if (polling || closed) return;
+        polling = true;
+        void this.#poll(subscription)
+          .then((keepOpen) => {
+            if (!keepOpen) {
+              subscription.response.end();
+              close();
+            }
+          })
+          .catch(() => {
+            subscription.response.end();
+            close();
+          })
+          .finally(() => {
+            polling = false;
+          });
+      }, this.#pollIntervalMs);
+      timer.unref();
+      subscription.response.once("close", close);
+      subscription.response.once("error", close);
+      subscription.cancellation.signal.addEventListener("abort", cancel, { once: true });
+    });
+  }
+
+  async #poll(subscription: TaskNotificationSubscription): Promise<boolean> {
+    for (const taskId of subscription.acceptedTaskIds) {
+      const snapshot = await this.#authorizedSnapshot(taskId, subscription.authorization);
       if (snapshot === undefined) continue;
       const revision = runtimeRevision(snapshot);
-      const previous = revisions.get(taskId);
+      const previous = subscription.revisions.get(taskId);
       if (previous !== undefined && BigInt(revision) < BigInt(previous.revision)) {
         throw new Error("TASK_NOTIFICATION_REVISION_REGRESSION");
       }
@@ -158,8 +222,12 @@ export class TaskNotificationStream {
       if (previous?.terminal === true && !next.terminal) {
         throw new Error("TASK_NOTIFICATION_TERMINAL_REGRESSION");
       }
-      revisions.set(taskId, next);
-      if (!writeFrame(response, taskNotification(subscriptionId, snapshot))) return false;
+      subscription.revisions.set(taskId, next);
+      if (
+        !subscription.writer.write(taskNotification(subscription.identity.wireRequestId, snapshot))
+      ) {
+        return false;
+      }
     }
     return true;
   }
@@ -180,12 +248,52 @@ export class TaskNotificationStream {
       throw error;
     }
   }
+
+  #release(subscription: TaskNotificationSubscription): void {
+    this.#subscriptions.delete(subscription.identity.internalId);
+    const key = transportWireIndexKey(subscription.identity);
+    const indexed = this.#transportWireIndex.get(key);
+    indexed?.delete(subscription.identity.internalId);
+    if (indexed?.size === 0) this.#transportWireIndex.delete(key);
+  }
 }
+
+export class TaskNotificationStream extends TaskNotificationManager {}
 
 interface NotificationState {
   revision: string;
   signature: string;
   terminal: boolean;
+}
+
+function subscriptionIdentity(
+  wireRequestId: string | number,
+  transportScopeId: string,
+  authorization: AuthorizationContext,
+): SubscriptionIdentity {
+  return {
+    internalId: randomUUID(),
+    transportScopeId,
+    wireRequestId,
+    typedWireRequestKey: typedWireRequestKey(wireRequestId),
+    authorizationScope: authorizationScope(authorization),
+  };
+}
+
+function typedWireRequestKey(requestId: string | number): string {
+  return `${typeof requestId}:${String(requestId)}`;
+}
+
+function authorizationScope(authorization: AuthorizationContext): string {
+  return [authorization.hash, authorization.executionMode, authorization.simulationId ?? ""].join(
+    ":",
+  );
+}
+
+function transportWireIndexKey(
+  identity: Pick<SubscriptionIdentity, "transportScopeId" | "typedWireRequestKey">,
+): string {
+  return `${identity.transportScopeId}\u0000${identity.typedWireRequestKey}`;
 }
 
 function notificationState(snapshot: Record<string, unknown>, revision: string): NotificationState {
@@ -229,10 +337,10 @@ function taskNotification(
   subscriptionId: string | number,
   snapshot: Record<string, unknown>,
 ): Record<string, unknown> {
-  const meta = snapshot._meta as Record<string, Record<string, unknown>>;
-  const execution = meta["io.sdar/taskExecution"] ?? {};
-  const revision = String(execution.runtimeRevision);
-  const taskId = String(snapshot.taskId);
+  const meta =
+    typeof snapshot._meta === "object" && snapshot._meta !== null && !Array.isArray(snapshot._meta)
+      ? (snapshot._meta as Record<string, unknown>)
+      : {};
   return {
     jsonrpc: "2.0",
     method: "notifications/tasks",
@@ -241,11 +349,6 @@ function taskNotification(
       _meta: {
         ...meta,
         "io.modelcontextprotocol/subscriptionId": subscriptionId,
-        "io.sdar/taskExecution": {
-          ...execution,
-          eventId: `${taskId}:${revision}`,
-          observedAt: snapshot.lastUpdatedAt,
-        },
       },
     },
   };
@@ -258,10 +361,4 @@ function runtimeRevision(snapshot: Record<string, unknown>): string {
     throw new Error("TASK_NOTIFICATION_REVISION_INVALID");
   }
   return revision;
-}
-
-function writeFrame(response: ServerResponse, message: Record<string, unknown>): boolean {
-  const accepted = response.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
-  if (!accepted) response.end();
-  return accepted;
 }

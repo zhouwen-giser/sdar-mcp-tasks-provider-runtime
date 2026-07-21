@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { ValidatedManifest } from "../../../operation-registry/src/index.js";
 import type { AuthorizationContext } from "../../../domain/src/index.js";
@@ -29,6 +30,7 @@ export interface FrozenDispatchResult {
 
 export class Sep2663ProtocolHandler {
   readonly notificationStream: TaskNotificationStream | undefined;
+  readonly #transportScopes = new WeakMap<object, string>();
 
   constructor(
     readonly manifest: ValidatedManifest,
@@ -173,7 +175,12 @@ export class Sep2663ProtocolHandler {
         if (this.notificationStream === undefined) {
           throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
         }
-        await this.notificationStream.listen(validated, response, authorization);
+        await this.notificationStream.listen(
+          validated,
+          response,
+          authorization,
+          this.#transportScope(request),
+        );
         return;
       }
       dispatched = await this.dispatchAsync(body, request.headers, authorization);
@@ -193,6 +200,15 @@ export class Sep2663ProtocolHandler {
     response.setHeader("content-type", "application/json");
     response.setHeader("content-length", String(Buffer.byteLength(serialized)));
     response.end(serialized);
+  }
+
+  #transportScope(request: IncomingMessage): string {
+    const transport = request.socket;
+    const existing = this.#transportScopes.get(transport);
+    if (existing !== undefined) return existing;
+    const created = randomUUID();
+    this.#transportScopes.set(transport, created);
+    return created;
   }
 }
 
