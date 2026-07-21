@@ -33,6 +33,13 @@ Maximum claim: **Runtime Component Conformant**.
 
 No Runtime Profile-wide, Provider-specific safety, or release-tag claim is made. No tag was created.
 
-## Publication boundary
+## Publication evidence
 
-Local implementation and report evidence are complete. Remote push, Draft PR creation, and GitHub `runtime-ci` / `runtime-compose` evidence remain pending because the external remote trust/private status has not been explicitly approved in this session.
+- Branch: `fix/frozen-runtime-conformance-closure`
+- Draft PR: `#15` (`https://github.com/zhouwen-giser/sdar-mcp-tasks-provider-runtime/pull/15`)
+- Verified report head: `2ada42a030e038b6ec685e6528bc0ed044f35c81`
+- GitHub Actions run: `29858576497`
+- `runtime-ci`: passed in 5m29s
+- `runtime-compose`: passed in 57s
+- Protected Provider paths: zero diff
+- Tag: not created

@@ -26,7 +26,7 @@ Initial base: `origin/main` at `c5594e4cb59f77421a8aa107defa6054ca61a768`
 | H3-H5       | transport-scoped typed subscriptions and authoritative notification projection | multi-client identity and strict equality tests   | complete |
 | H6-H7       | Runtime poll manager, batched reads, bounded queues, backpressure, metrics     | capacity, SQL-count, and slow-stream tests        | complete |
 | H8          | strengthened conformance and machine reports                                   | 74/74 plus closure suite                          | complete |
-| Publication | final main merge, full gates, phased pushes, Draft PR                          | CI and protected zero-diff checks                 | pending  |
+| Publication | final main merge, full gates, phased pushes, Draft PR                          | CI and protected zero-diff checks                 | complete |
 
 ## Verification policy
 
