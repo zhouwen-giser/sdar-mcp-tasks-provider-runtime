@@ -288,7 +288,7 @@
       "evidence": [
         {
           "file": "tests/integration/task-lifecycle-postgres.test.ts",
-          "title": "durable task lifecycle C-021 detects reuse of an answered frozen input key with different content",
+          "title": "durable task lifecycle C-021 detects and ignores reuse of an answered frozen input key",
           "status": "passed"
         }
       ]
@@ -800,7 +800,7 @@
       "evidence": [
         {
           "file": "tests/protocol-conformance/notifications.test.ts",
-          "title": "frozen Task notification SSE C-060 closes a slow-consumer stream when backpressure rejects a frame",
+          "title": "frozen Task notification SSE C-060 waits for drain instead of treating backpressure as disconnect",
           "status": "passed"
         }
       ]

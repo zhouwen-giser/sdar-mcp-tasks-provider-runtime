@@ -12,6 +12,7 @@ import {
   LegacyMcpProtocolHandler,
   ProtocolRouter,
   Sep2663ProtocolHandler,
+  TaskNotificationStream,
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
 import {
@@ -374,6 +375,21 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         RUNTIME_VERSION,
         taskEngine,
         resolveAuthorization,
+        new TaskNotificationStream(taskEngine, {
+          pollIntervalMs: config.TASK_NOTIFICATION_POLL_INTERVAL_MS,
+          maxSubscriptions: config.TASK_NOTIFICATION_MAX_SUBSCRIPTIONS,
+          maxSubscriptionsPerAuth: config.TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH,
+          maxTaskBindings: config.TASK_NOTIFICATION_MAX_TASK_BINDINGS,
+          maxQueueMessages: config.TASK_NOTIFICATION_MAX_QUEUE_MESSAGES,
+          maxQueueBytes: config.TASK_NOTIFICATION_MAX_QUEUE_BYTES,
+          batchSize: config.TASK_NOTIFICATION_BATCH_SIZE,
+          metrics: {
+            increment: (name, amount = 1) => metrics.increment(name, {}, amount),
+            gauge: (name, value) => {
+              telemetrySelfGauges[name] = value;
+            },
+          },
+        }),
       );
       mcpRouter = new ProtocolRouter(
         frozenHandler,

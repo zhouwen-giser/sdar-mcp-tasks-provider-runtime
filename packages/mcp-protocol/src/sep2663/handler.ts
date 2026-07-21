@@ -1,7 +1,8 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import type { ValidatedManifest } from "../../../operation-registry/src/index.js";
 import type { AuthorizationContext } from "../../../domain/src/index.js";
-import { isRuntimeError, RUNTIME_VERSION } from "../../../domain/src/index.js";
+import { RUNTIME_VERSION } from "../../../domain/src/index.js";
 import type { TaskEngine } from "../../../task-engine/src/index.js";
 import { createAuthorizationResolver, type AuthorizationResolver } from "../security.js";
 import { frozenDiscoveryResult } from "./discovery.js";
@@ -18,6 +19,7 @@ import {
 import { TaskNotificationStream } from "./notifications.js";
 import { parseFrozenToolCall } from "./tools-call.js";
 import { parseFrozenAvailability } from "./availability.js";
+import { mapFrozenRuntimeError } from "./error-mapper.js";
 
 const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
 
@@ -28,6 +30,7 @@ export interface FrozenDispatchResult {
 
 export class Sep2663ProtocolHandler {
   readonly notificationStream: TaskNotificationStream | undefined;
+  readonly #transportScopes = new WeakMap<object, string>();
 
   constructor(
     readonly manifest: ValidatedManifest,
@@ -172,7 +175,12 @@ export class Sep2663ProtocolHandler {
         if (this.notificationStream === undefined) {
           throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
         }
-        await this.notificationStream.listen(validated, response, authorization);
+        await this.notificationStream.listen(
+          validated,
+          response,
+          authorization,
+          this.#transportScope(request),
+        );
         return;
       }
       dispatched = await this.dispatchAsync(body, request.headers, authorization);
@@ -193,16 +201,19 @@ export class Sep2663ProtocolHandler {
     response.setHeader("content-length", String(Buffer.byteLength(serialized)));
     response.end(serialized);
   }
+
+  #transportScope(request: IncomingMessage): string {
+    const transport = request.socket;
+    const existing = this.#transportScopes.get(transport);
+    if (existing !== undefined) return existing;
+    const created = randomUUID();
+    this.#transportScopes.set(transport, created);
+    return created;
+  }
 }
 
 function mapFrozenError(error: unknown): FrozenProtocolError {
-  if (error instanceof FrozenProtocolError) return error;
-  if (isRuntimeError(error)) {
-    return new FrozenProtocolError(FrozenErrorCode.InvalidParams, error.safeMessage, 400, {
-      reasonCode: error.reasonCode,
-    });
-  }
-  return new FrozenProtocolError(FrozenErrorCode.InternalError, "Internal error", 500);
+  return mapFrozenRuntimeError(error);
 }
 
 function requestId(value: unknown): string | number | null {

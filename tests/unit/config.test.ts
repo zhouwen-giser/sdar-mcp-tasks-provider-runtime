@@ -15,6 +15,13 @@ describe("Runtime configuration", () => {
     expect(config.ADAPTER_RPC_TIMEOUT_MS).toBe(5_000);
     expect(config.AUTH_MODE).toBe("development");
     expect(config.MCP_LEGACY_ENDPOINT_ENABLED).toBe(false);
+    expect(config.TASK_NOTIFICATION_POLL_INTERVAL_MS).toBe(500);
+    expect(config.TASK_NOTIFICATION_MAX_SUBSCRIPTIONS).toBe(256);
+    expect(config.TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH).toBe(32);
+    expect(config.TASK_NOTIFICATION_MAX_TASK_BINDINGS).toBe(4_096);
+    expect(config.TASK_NOTIFICATION_MAX_QUEUE_MESSAGES).toBe(64);
+    expect(config.TASK_NOTIFICATION_MAX_QUEUE_BYTES).toBe(1_048_576);
+    expect(config.TASK_NOTIFICATION_BATCH_SIZE).toBe(256);
     expect(config.HTTP_BODY_LIMIT_BYTES).toBe(1_048_576);
     expect(config.RATE_LIMIT_MAX_KEYS).toBe(10_000);
     expect(config.DATABASE_POOL_MAX).toBe(10);

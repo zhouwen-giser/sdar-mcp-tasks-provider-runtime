@@ -141,7 +141,7 @@ export interface InputRequestRecord {
   description: string;
   schema: Record<string, unknown>;
   required: boolean;
-  status: "OPEN" | "ANSWERED";
+  status: "OPEN" | "ANSWERED" | "SUPERSEDED";
   answerHash: string | null;
   requestJson: {
     method: "elicitation/create";
@@ -149,6 +149,19 @@ export interface InputRequestRecord {
   };
   responseHash: string | null;
   responseJson: Record<string, unknown> | null;
+}
+
+export interface McpInputResponse {
+  action: "accept" | "decline" | "cancel";
+  content?: unknown;
+}
+
+export interface InputResponseAcceptance {
+  acceptedKeys: string[];
+  ignoredUnknownKeys: string[];
+  ignoredAnsweredKeys: string[];
+  ignoredSupersededKeys: string[];
+  duplicatePendingKeys: string[];
 }
 
 export interface ObservationRecord {
@@ -660,6 +673,26 @@ export class TaskRepository {
     return task;
   }
 
+  async getAuthorizedTasksByIds(
+    taskIds: readonly string[],
+    authorization: AuthorizationContext,
+  ): Promise<TaskRecord[]> {
+    if (taskIds.length === 0) return [];
+    const result = await this.pool.query<TaskRow & { handle_expired: boolean }>(
+      `SELECT *,
+              (internal_state LIKE 'TERMINAL_%'
+               AND handle_expires_at IS NOT NULL
+               AND handle_expires_at <= clock_timestamp()) AS handle_expired
+       FROM provider_task
+       WHERE task_id::text = ANY($1::text[])
+         AND authorization_context_hash=$2 AND execution_mode=$3
+         AND simulation_id IS NOT DISTINCT FROM $4
+       ORDER BY task_id`,
+      [taskIds, authorization.hash, authorization.executionMode, authorization.simulationId],
+    );
+    return result.rows.filter((row) => row.expired_at === null && !row.handle_expired).map(fromRow);
+  }
+
   async getById(taskId: string): Promise<TaskRecord | null> {
     return selectTaskById(this.pool, taskId);
   }
@@ -746,6 +779,13 @@ export class TaskRepository {
         [now],
       );
       for (const row of superseded.rows) {
+        if (row.command_type === "UPDATE") {
+          await markAssignedInputResponsesIgnored(
+            client,
+            row.task_id,
+            Number(row.command_sequence),
+          );
+        }
         await insertCommandFact(
           client,
           row.task_id,
@@ -999,6 +1039,15 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner, errorCode, errorMessage],
       );
       if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      if (command.commandType === "UPDATE") {
+        await client.query(
+          `UPDATE task_input_response_inbox
+           SET state='FAILED', failed_at=clock_timestamp(), updated_at=clock_timestamp(),
+               last_error_code='INPUT_RESPONSE_REJECTED', last_error_message=$3
+           WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+          [command.taskId, command.commandSequence, errorMessage],
+        );
+      }
       await insertCommandFact(
         client,
         command.taskId,
@@ -1013,6 +1062,90 @@ export class TaskRepository {
           previousState: "CLAIMED",
           reasonCode: errorCode,
           adapterRpcStatus: "rejected",
+        },
+      );
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async failInputResponseDelivery(command: PendingCommandRecord, message: string): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lockedTask = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new Error("TASK_NOT_FOUND");
+      const exhausted = await client.query(
+        `UPDATE task_command
+         SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
+             last_error_code='INPUT_RESPONSE_DELIVERY_EXHAUSTED', last_error_message=$4,
+             updated_at=clock_timestamp()
+         WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+        [command.taskId, command.commandSequence, command.claimOwner, message],
+      );
+      if (exhausted.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      await client.query(
+        `UPDATE task_input_response_inbox
+         SET state='FAILED', failed_at=clock_timestamp(), updated_at=clock_timestamp(),
+             last_error_code='INPUT_RESPONSE_DELIVERY_EXHAUSTED', last_error_message=$3
+         WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+        [command.taskId, command.commandSequence, message],
+      );
+      if (!isTerminalState(task.internal_state)) {
+        await transitionTask(client, {
+          taskId: command.taskId,
+          expectedVersion: Number(task.version),
+          update: {
+            internalState: "TERMINAL_FAILED",
+            mcpStatus: "failed",
+            substate: null,
+            statusMessage: "Input response delivery exhausted.",
+            result: null,
+            error: {
+              code: -32603,
+              message: "Input response delivery exhausted.",
+              data: { reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED" },
+            },
+          },
+          observation: {
+            type: "task.failed",
+            occurredAt: new Date(),
+            reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+            message: "Input response delivery exhausted.",
+            substate: null,
+            source: "runtime",
+            payload: { commandSequence: command.commandSequence },
+          },
+          outboxType: "task.failed",
+          eventKey: `${command.taskId}:command:${String(command.commandSequence)}:input-delivery-exhausted`,
+          outboxPayload: {
+            commandSequence: command.commandSequence,
+            reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+          },
+        });
+      }
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: "EXHAUSTED",
+          attemptCount: command.attemptCount,
+        },
+        "task.command.exhausted",
+        {
+          previousState: "CLAIMED",
+          reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+          adapterRpcStatus: "error",
         },
       );
       await client.query("COMMIT");
@@ -1993,7 +2126,7 @@ export class TaskRepository {
       description: string;
       schema: Record<string, unknown>;
       required: boolean;
-      status: "OPEN" | "ANSWERED";
+      status: InputRequestRecord["status"];
       answer_hash: string | null;
       request_json: InputRequestRecord["requestJson"];
       response_hash: string | null;
@@ -2015,6 +2148,278 @@ export class TaskRepository {
       responseHash: row.response_hash,
       responseJson: row.response_json,
     }));
+  }
+
+  async listInputRequestsByTaskIds(
+    taskIds: readonly string[],
+  ): Promise<Map<string, InputRequestRecord[]>> {
+    const byTaskId = new Map<string, InputRequestRecord[]>();
+    for (const taskId of taskIds) byTaskId.set(taskId, []);
+    if (taskIds.length === 0) return byTaskId;
+    const result = await this.pool.query<{
+      task_id: string;
+      request_key: string;
+      description: string;
+      schema: Record<string, unknown>;
+      required: boolean;
+      status: InputRequestRecord["status"];
+      answer_hash: string | null;
+      request_json: InputRequestRecord["requestJson"];
+      response_hash: string | null;
+      response_json: Record<string, unknown> | null;
+    }>(
+      `SELECT task_id::text AS task_id, request_key, description, schema, required, status,
+              answer_hash, request_json, response_hash, response_json
+       FROM task_input_request
+       WHERE task_id::text = ANY($1::text[])
+       ORDER BY task_id, created_at, request_key`,
+      [taskIds],
+    );
+    for (const row of result.rows) {
+      const requests = byTaskId.get(row.task_id) ?? [];
+      requests.push({
+        key: row.request_key,
+        description: row.description,
+        schema: row.schema,
+        required: row.required,
+        status: row.status,
+        answerHash: row.answer_hash,
+        requestJson: row.request_json,
+        responseHash: row.response_hash,
+        responseJson: row.response_json,
+      });
+      byTaskId.set(row.task_id, requests);
+    }
+    return byTaskId;
+  }
+
+  async acceptMcpInputResponses(
+    taskId: string,
+    authorization: AuthorizationContext,
+    inputResponses: Record<string, McpInputResponse>,
+  ): Promise<InputResponseAcceptance> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lockedTask = await client.query<TaskRow & { handle_expired: boolean }>(
+        `SELECT *,
+                (internal_state LIKE 'TERMINAL_%'
+                 AND handle_expires_at IS NOT NULL
+                 AND handle_expires_at <= clock_timestamp()) AS handle_expired
+         FROM provider_task
+         WHERE task_id=$1 AND authorization_context_hash=$2 AND execution_mode=$3
+           AND simulation_id IS NOT DISTINCT FROM $4
+         FOR UPDATE`,
+        [taskId, authorization.hash, authorization.executionMode, authorization.simulationId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new TaskNotFoundOrUnauthorizedError();
+      if (task.expired_at !== null || task.handle_expired) throw new TaskExpiredError();
+
+      const entries = Object.entries(inputResponses).sort(([left], [right]) =>
+        left.localeCompare(right),
+      );
+      const keys = entries.map(([key]) => key);
+      const requests =
+        keys.length === 0
+          ? []
+          : (
+              await client.query<{
+                request_key: string;
+                status: InputRequestRecord["status"];
+              }>(
+                `SELECT request_key, status FROM task_input_request
+                 WHERE task_id=$1 AND request_key=ANY($2::text[])
+                 ORDER BY request_key FOR UPDATE`,
+                [taskId, keys],
+              )
+            ).rows;
+      const requestByKey = new Map(requests.map((request) => [request.request_key, request]));
+      const result: InputResponseAcceptance = {
+        acceptedKeys: [],
+        ignoredUnknownKeys: [],
+        ignoredAnsweredKeys: [],
+        ignoredSupersededKeys: [],
+        duplicatePendingKeys: [],
+      };
+      const acceptedHashes: string[] = [];
+      for (const [key, response] of entries) {
+        const request = requestByKey.get(key);
+        if (request === undefined) {
+          result.ignoredUnknownKeys.push(key);
+          continue;
+        }
+        if (request.status === "ANSWERED") {
+          result.ignoredAnsweredKeys.push(key);
+          continue;
+        }
+        if (request.status === "SUPERSEDED") {
+          result.ignoredSupersededKeys.push(key);
+          continue;
+        }
+        const responseHash = createHash("sha256")
+          .update(canonicalizeResponse(response))
+          .digest("hex");
+        const inserted = await client.query<{ request_key: string }>(
+          `INSERT INTO task_input_response_inbox
+            (task_id, request_key, response_hash, response_json, state)
+           VALUES ($1,$2,$3,$4::jsonb,'PENDING')
+           ON CONFLICT (task_id, request_key) DO NOTHING
+           RETURNING request_key`,
+          [taskId, key, responseHash, JSON.stringify(response)],
+        );
+        if (inserted.rows[0] === undefined) {
+          result.duplicatePendingKeys.push(key);
+        } else {
+          result.acceptedKeys.push(key);
+          acceptedHashes.push(`${key}:${responseHash}`);
+        }
+      }
+
+      if (result.acceptedKeys.length > 0) {
+        const acceptanceHash = createHash("sha256").update(acceptedHashes.join("\n")).digest("hex");
+        await transitionTask(client, {
+          taskId,
+          expectedVersion: Number(task.version),
+          update: {},
+          observation: {
+            type: "task.input_response_accepted",
+            occurredAt: new Date(),
+            reasonCode: "INPUT_RESPONSE_ACCEPTED",
+            message: "Task input response accepted for durable delivery.",
+            substate: task.substate,
+            source: "runtime",
+            payload: { keys: result.acceptedKeys },
+          },
+          outboxType: "task.input_response_accepted",
+          eventKey: `${taskId}:input-response:${acceptanceHash}`,
+          outboxPayload: { keys: result.acceptedKeys },
+        });
+      }
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async promotePendingInputResponses(limit = 32): Promise<number> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1024) {
+      throw new RangeError("INPUT_RESPONSE_PROMOTION_LIMIT_INVALID");
+    }
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const pending = await client.query<{
+        task_id: string;
+        request_key: string;
+        response_hash: string;
+        response_json: McpInputResponse;
+      }>(
+        `WITH candidate_tasks AS (
+           SELECT task_id, min(accepted_at) AS first_accepted_at
+           FROM task_input_response_inbox
+           WHERE state='PENDING'
+           GROUP BY task_id
+           ORDER BY first_accepted_at, task_id
+           LIMIT $1
+         )
+         SELECT inbox.task_id, inbox.request_key, inbox.response_hash, inbox.response_json
+         FROM task_input_response_inbox inbox
+         JOIN candidate_tasks USING (task_id)
+         WHERE inbox.state='PENDING'
+         ORDER BY inbox.task_id, inbox.accepted_at, inbox.request_key
+         FOR UPDATE OF inbox SKIP LOCKED`,
+        [limit],
+      );
+      const byTask = new Map<string, typeof pending.rows>();
+      for (const row of pending.rows) {
+        const rows = byTask.get(row.task_id) ?? [];
+        rows.push(row);
+        byTask.set(row.task_id, rows);
+      }
+      let promoted = 0;
+      for (const [taskId, responses] of byTask) {
+        const lockedTask = await client.query<TaskRow>(
+          "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+          [taskId],
+        );
+        const task = lockedTask.rows[0];
+        if (task === undefined) throw new Error("TASK_NOT_FOUND");
+        const keys = responses.map((response) => response.request_key);
+        if (
+          task.cancel_requested ||
+          task.stop_reason !== null ||
+          task.internal_state === "STOPPING" ||
+          isTerminalState(task.internal_state)
+        ) {
+          await client.query(
+            `UPDATE task_input_response_inbox
+             SET state='IGNORED', updated_at=clock_timestamp(),
+                 last_error_code='TASK_NOT_ACCEPTING_INPUT',
+                 last_error_message='Task is stopping or terminal.'
+             WHERE task_id=$1 AND request_key=ANY($2::text[]) AND state='PENDING'`,
+            [taskId, keys],
+          );
+          continue;
+        }
+        const updated = await client.query<{ next_command_sequence: string }>(
+          `UPDATE provider_task SET next_command_sequence=next_command_sequence+1
+           WHERE task_id=$1 RETURNING next_command_sequence`,
+          [taskId],
+        );
+        const sequence = updated.rows[0]?.next_command_sequence;
+        if (sequence === undefined) throw new Error("COMMAND_SEQUENCE_NOT_RETURNED");
+        const normalized = Object.fromEntries(
+          responses.map((response) => [response.request_key, response.response_json]),
+        );
+        const requestHash = createHash("sha256")
+          .update(
+            responses
+              .map((response) => `${response.request_key}:${response.response_hash}`)
+              .join("\n"),
+          )
+          .digest("hex");
+        await client.query(
+          `INSERT INTO task_command
+            (task_id, command_sequence, command_type, request_hash, state, payload)
+           VALUES ($1,$2,'UPDATE',$3,'PENDING',$4::jsonb)`,
+          [taskId, sequence, requestHash, JSON.stringify({ inputResponses: normalized })],
+        );
+        const assigned = await client.query(
+          `UPDATE task_input_response_inbox
+           SET state='ASSIGNED', command_sequence=$3, assigned_at=clock_timestamp(),
+               updated_at=clock_timestamp()
+           WHERE task_id=$1 AND request_key=ANY($2::text[]) AND state='PENDING'`,
+          [taskId, keys, sequence],
+        );
+        if (assigned.rowCount !== responses.length)
+          throw new Error("INPUT_RESPONSE_ASSIGNMENT_LOST");
+        await insertCommandFact(
+          client,
+          taskId,
+          {
+            sequence: Number(sequence),
+            commandType: "UPDATE",
+            state: "PENDING",
+            attemptCount: 0,
+          },
+          "task.command.created",
+          { reasonCode: "INPUT_RESPONSE_ACCEPTED", adapterRpcStatus: "not_started" },
+        );
+        promoted += 1;
+      }
+      await client.query("COMMIT");
+      return promoted;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async listObservations(
@@ -2468,6 +2873,9 @@ export class TaskRepository {
         [taskId],
       );
       for (const row of result.rows) {
+        if (row.command_type === "UPDATE") {
+          await markAssignedInputResponsesIgnored(client, taskId, Number(row.command_sequence));
+        }
         await insertCommandFact(
           client,
           taskId,
@@ -2509,6 +2917,9 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner],
       );
       if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      if (command.commandType === "UPDATE") {
+        await markAssignedInputResponsesIgnored(client, command.taskId, command.commandSequence);
+      }
       await insertCommandFact(
         client,
         command.taskId,
@@ -2556,6 +2967,9 @@ export class TaskRepository {
         [taskId],
       );
       for (const row of result.rows) {
+        if (row.command_type === "UPDATE") {
+          await markAssignedInputResponsesIgnored(client, taskId, Number(row.command_sequence));
+        }
         await insertCommandFact(
           client,
           taskId,
@@ -2773,6 +3187,14 @@ export class TaskRepository {
         );
         if (result.rowCount !== 1) throw new Error("INPUT_REQUEST_NOT_OPEN");
       }
+
+      await client.query(
+        `UPDATE task_input_response_inbox
+         SET state='ACKNOWLEDGED', acknowledged_at=clock_timestamp(),
+             updated_at=clock_timestamp(), last_error_code=NULL, last_error_message=NULL
+         WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+        [command.taskId, command.commandSequence],
+      );
 
       const keys = answers.map((answer) => answer.key).sort();
       await transitionTask(client, {
@@ -3606,6 +4028,31 @@ async function upsertInputRequests(
 
 function commandHash(reason: string): string {
   return createHash("sha256").update(`cancel:${reason.toLowerCase()}`).digest("hex");
+}
+
+function canonicalizeResponse(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalizeResponse).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalizeResponse(object[key])}`)
+    .join(",")}}`;
+}
+
+async function markAssignedInputResponsesIgnored(
+  client: PoolClient,
+  taskId: string,
+  commandSequence: number,
+): Promise<void> {
+  await client.query(
+    `UPDATE task_input_response_inbox
+     SET state='IGNORED', updated_at=clock_timestamp(),
+         last_error_code='SUPERSEDED_BY_SAFE_STOP',
+         last_error_message='Safe stop superseded input response delivery.'
+     WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+    [taskId, commandSequence],
+  );
 }
 
 async function insertOutbox(

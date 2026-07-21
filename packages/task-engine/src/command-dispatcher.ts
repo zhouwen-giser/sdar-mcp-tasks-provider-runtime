@@ -15,6 +15,7 @@ import { validatedSnapshotTransition } from "./result-contract.js";
 export interface CommandDispatcherOptions {
   concurrency?: number;
   leaseMilliseconds?: number;
+  maxInputResponseAttempts?: number;
   onMetric?: (durationMs: number) => void;
 }
 
@@ -50,6 +51,10 @@ export class DurableCommandDispatcher {
     const now = this.clock.now();
     const concurrency = this.options.concurrency ?? 8;
     const leaseMilliseconds = this.options.leaseMilliseconds ?? this.claimLeaseMs;
+    const promoter = (this.repository as Partial<TaskRepository>).promotePendingInputResponses;
+    if (typeof promoter === "function") {
+      await promoter.call(this.repository, concurrency);
+    }
     const commands = await this.repository.claimDueCommands(
       now,
       this.workerId,
@@ -135,6 +140,17 @@ export class DurableCommandDispatcher {
         await this.repository.failSafeStopUnconfirmed(
           command,
           error instanceof Error ? error.message : "Safe stop could not be confirmed.",
+        );
+        result.exhausted += 1;
+        return;
+      }
+      if (
+        command.commandType === "UPDATE" &&
+        command.attemptCount >= (this.options.maxInputResponseAttempts ?? 8)
+      ) {
+        await this.repository.failInputResponseDelivery(
+          command,
+          error instanceof Error ? error.message : "Input response delivery failed.",
         );
         result.exhausted += 1;
         return;

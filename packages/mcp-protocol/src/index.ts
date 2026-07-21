@@ -8,6 +8,7 @@ export * from "./sep2663/tasks.js";
 export * from "./sep2663/notifications.js";
 export * from "./sep2663/tools-call.js";
 export * from "./sep2663/errors.js";
+export * from "./sep2663/error-mapper.js";
 export * from "./sep2663/handler.js";
 export * from "./sep2663/headers.js";
 export * from "./sep2663/request-validator.js";

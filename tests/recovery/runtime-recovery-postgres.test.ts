@@ -43,7 +43,8 @@ let adapterEndpoint: string;
 
 beforeAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS
-    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_input_response_inbox, provider_ops_delivery, runtime_lease, outbox_event, idempotency_record,
+    task_command, task_input_request,
     task_observation, provider_task, admission_intent, operation_snapshot,
     runtime_schema_migration CASCADE`);
   await runMigrations(pool);
@@ -72,7 +73,8 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   await pool.query(`TRUNCATE TABLE
-    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_input_response_inbox, provider_ops_delivery, runtime_lease, outbox_event, idempotency_record,
+    task_command, task_input_request,
     task_observation, provider_task, admission_intent
     RESTART IDENTITY CASCADE`);
 });

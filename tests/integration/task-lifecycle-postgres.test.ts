@@ -68,7 +68,8 @@ class FakeClock implements Clock {
 
 beforeAll(async () => {
   await pool.query(`DROP TABLE IF EXISTS
-    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_input_response_inbox, provider_ops_delivery, runtime_lease, outbox_event, idempotency_record,
+    task_command, task_input_request,
     task_observation, provider_task, admission_intent, operation_snapshot,
     runtime_schema_migration CASCADE`);
   await runMigrations(pool);
@@ -101,7 +102,8 @@ beforeAll(async () => {
 beforeEach(async () => {
   lastReservationRef = undefined;
   await pool.query(`TRUNCATE TABLE
-    provider_ops_delivery, runtime_lease, outbox_event, idempotency_record, task_command, task_input_request,
+    task_input_response_inbox, provider_ops_delivery, runtime_lease, outbox_event, idempotency_record,
+    task_command, task_input_request,
     task_observation, provider_task, admission_intent
     RESTART IDENTITY CASCADE`);
 });
@@ -109,6 +111,7 @@ beforeEach(async () => {
 afterAll(async () => {
   gateway.close();
   await new Promise<void>((resolve) => adapter.tryShutdown(() => resolve()));
+  await pool.query("DROP TABLE IF EXISTS task_input_response_inbox CASCADE");
   await pool.end();
 });
 
@@ -376,7 +379,7 @@ describe("durable task lifecycle", () => {
     expect(commands.rows[0]?.count).toBe("1");
   });
 
-  it("C-021 detects reuse of an answered frozen input key with different content", async () => {
+  it("C-021 detects and ignores reuse of an answered frozen input key", async () => {
     const created = await engine.callFrozenOperation(
       requiredOperation("durable_task"),
       { resourceId: "frozen-input-conflict", scenario: "input_required_frozen" },
@@ -395,7 +398,12 @@ describe("durable task lifecycle", () => {
         { approval: { action: "accept", content: false } },
         authorization,
       ),
-    ).rejects.toMatchObject({ reasonCode: "INPUT_RESPONSE_CONFLICT" });
+    ).resolves.toBeUndefined();
+    const commands = await pool.query<{ count: string }>(
+      "SELECT count(*) FROM task_command WHERE task_id=$1 AND command_type='UPDATE'",
+      [taskId],
+    );
+    expect(commands.rows[0]?.count).toBe("1");
   });
 
   it("returns an inline result for terminal task-capable admission", async () => {
@@ -911,7 +919,7 @@ describe("durable task lifecycle", () => {
   });
 
   it("completes a missed start window without invoking the Adapter", async () => {
-    const clock = new FakeClock(new Date("2026-07-16T13:00:00Z"));
+    const clock = new FakeClock(new Date("2099-07-16T13:00:00Z"));
     const scheduledEngine = new TaskEngine(
       engine.manifest,
       engine.operationSnapshotIds,
@@ -937,7 +945,7 @@ describe("durable task lifecycle", () => {
       {
         start: {
           mode: "scheduled",
-          scheduledAt: "2026-07-16T13:00:01Z",
+          scheduledAt: "2099-07-16T13:00:01Z",
           startToleranceMs: 500,
         },
         maxElapsedMs: null,

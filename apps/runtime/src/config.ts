@@ -46,6 +46,28 @@ const EnvironmentSchema = z
     ADAPTER_RPC_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
     AUTH_MODE: z.enum(["development", "trusted_headers", "jwt_hs256"]).default("development"),
     MCP_LEGACY_ENDPOINT_ENABLED: BooleanEnvironmentSchema.default(false),
+    TASK_NOTIFICATION_POLL_INTERVAL_MS: z.coerce.number().int().min(10).max(60_000).default(500),
+    TASK_NOTIFICATION_MAX_SUBSCRIPTIONS: z.coerce.number().int().min(1).max(100_000).default(256),
+    TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(10_000)
+      .default(32),
+    TASK_NOTIFICATION_MAX_TASK_BINDINGS: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(1_000_000)
+      .default(4_096),
+    TASK_NOTIFICATION_MAX_QUEUE_MESSAGES: z.coerce.number().int().min(1).max(100_000).default(64),
+    TASK_NOTIFICATION_MAX_QUEUE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1_024)
+      .max(67_108_864)
+      .default(1_048_576),
+    TASK_NOTIFICATION_BATCH_SIZE: z.coerce.number().int().min(1).max(10_000).default(256),
     JWT_HS256_SECRET: z.string().min(32).optional(),
     JWT_ISSUER: z.string().min(1).optional(),
     JWT_AUDIENCE: z.string().min(1).optional(),
