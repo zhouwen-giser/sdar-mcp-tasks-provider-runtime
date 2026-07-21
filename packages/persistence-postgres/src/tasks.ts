@@ -673,6 +673,26 @@ export class TaskRepository {
     return task;
   }
 
+  async getAuthorizedTasksByIds(
+    taskIds: readonly string[],
+    authorization: AuthorizationContext,
+  ): Promise<TaskRecord[]> {
+    if (taskIds.length === 0) return [];
+    const result = await this.pool.query<TaskRow & { handle_expired: boolean }>(
+      `SELECT *,
+              (internal_state LIKE 'TERMINAL_%'
+               AND handle_expires_at IS NOT NULL
+               AND handle_expires_at <= clock_timestamp()) AS handle_expired
+       FROM provider_task
+       WHERE task_id::text = ANY($1::text[])
+         AND authorization_context_hash=$2 AND execution_mode=$3
+         AND simulation_id IS NOT DISTINCT FROM $4
+       ORDER BY task_id`,
+      [taskIds, authorization.hash, authorization.executionMode, authorization.simulationId],
+    );
+    return result.rows.filter((row) => row.expired_at === null && !row.handle_expired).map(fromRow);
+  }
+
   async getById(taskId: string): Promise<TaskRecord | null> {
     return selectTaskById(this.pool, taskId);
   }
@@ -2128,6 +2148,49 @@ export class TaskRepository {
       responseHash: row.response_hash,
       responseJson: row.response_json,
     }));
+  }
+
+  async listInputRequestsByTaskIds(
+    taskIds: readonly string[],
+  ): Promise<Map<string, InputRequestRecord[]>> {
+    const byTaskId = new Map<string, InputRequestRecord[]>();
+    for (const taskId of taskIds) byTaskId.set(taskId, []);
+    if (taskIds.length === 0) return byTaskId;
+    const result = await this.pool.query<{
+      task_id: string;
+      request_key: string;
+      description: string;
+      schema: Record<string, unknown>;
+      required: boolean;
+      status: InputRequestRecord["status"];
+      answer_hash: string | null;
+      request_json: InputRequestRecord["requestJson"];
+      response_hash: string | null;
+      response_json: Record<string, unknown> | null;
+    }>(
+      `SELECT task_id::text AS task_id, request_key, description, schema, required, status,
+              answer_hash, request_json, response_hash, response_json
+       FROM task_input_request
+       WHERE task_id::text = ANY($1::text[])
+       ORDER BY task_id, created_at, request_key`,
+      [taskIds],
+    );
+    for (const row of result.rows) {
+      const requests = byTaskId.get(row.task_id) ?? [];
+      requests.push({
+        key: row.request_key,
+        description: row.description,
+        schema: row.schema,
+        required: row.required,
+        status: row.status,
+        answerHash: row.answer_hash,
+        requestJson: row.request_json,
+        responseHash: row.response_hash,
+        responseJson: row.response_json,
+      });
+      byTaskId.set(row.task_id, requests);
+    }
+    return byTaskId;
   }
 
   async acceptMcpInputResponses(

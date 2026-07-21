@@ -612,6 +612,22 @@ export class TaskEngine {
     return mapTaskToDetailedTask(task, inputRequests, projection);
   }
 
+  async getFrozenTasks(
+    taskIds: readonly string[],
+    authorization: AuthorizationContext,
+  ): Promise<Map<string, Record<string, unknown>>> {
+    const tasks = await this.#repository.getAuthorizedTasksByIds(taskIds, authorization);
+    const inputRequests = await this.#repository.listInputRequestsByTaskIds(
+      tasks.map((task) => task.taskId),
+    );
+    return new Map(
+      tasks.map((task) => [
+        task.taskId,
+        mapTaskToDetailedTask(task, inputRequests.get(task.taskId) ?? [], "notification"),
+      ]),
+    );
+  }
+
   async cancelTaskCooperatively(
     taskId: string,
     authorization: AuthorizationContext,

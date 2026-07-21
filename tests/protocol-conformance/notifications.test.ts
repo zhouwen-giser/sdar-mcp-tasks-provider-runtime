@@ -145,7 +145,7 @@ describe("frozen Task notification SSE", () => {
     ).toHaveLength(1);
   });
 
-  it("C-060 closes a slow-consumer stream when backpressure rejects a frame", async () => {
+  it("C-060 waits for drain instead of treating backpressure as disconnect", async () => {
     const stream = new TaskNotificationStream({
       getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId, "1", "working")),
     });
@@ -299,7 +299,14 @@ class FakeSseResponse extends EventEmitter {
   write(frame: string): boolean {
     this.frames.push(frame);
     if (this.frames.length >= this.closeAfterFrames) setImmediate(() => this.emit("close"));
-    return this.frames.length <= this.acceptedFrames;
+    const accepted = this.frames.length <= this.acceptedFrames;
+    if (!accepted) {
+      setImmediate(() => {
+        this.emit("drain");
+        this.emit("close");
+      });
+    }
+    return accepted;
   }
 
   end(): void {

@@ -5,6 +5,7 @@ import {
   TaskNotificationStream,
   type FrozenJsonRpcRequest,
 } from "../../packages/mcp-protocol/src/index.js";
+import { TaskRepository } from "../../packages/persistence-postgres/src/index.js";
 
 const authorization: AuthorizationContext = {
   hash: "a".repeat(64),
@@ -13,28 +14,45 @@ const authorization: AuthorizationContext = {
 };
 
 describe("Runtime notification batch polling", () => {
+  it("executes exactly two bounded repository queries for 256 Task IDs", async () => {
+    const taskIds = Array.from(
+      { length: 256 },
+      (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    );
+    const query = vi.fn().mockResolvedValue({ rows: [] });
+    const repository = new TaskRepository({ query } as never);
+
+    await repository.getAuthorizedTasksByIds(taskIds, authorization);
+    await repository.listInputRequestsByTaskIds(taskIds);
+
+    expect(query).toHaveBeenCalledTimes(2);
+    const calls = query.mock.calls as [string, unknown[]][];
+    expect(calls.map(([, parameters]) => parameters[0])).toEqual([taskIds, taskIds]);
+  });
+
   it("R-018 loads 256 Tasks and their input requests through bounded batch queries", async () => {
     const taskIds = Array.from(
       { length: 256 },
       (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     );
-    const getAuthorizedTasksByIds = vi
+    const getFrozenTasks = vi
       .fn()
-      .mockResolvedValue(taskIds.map((taskId) => snapshot(taskId)));
-    const listInputRequestsByTaskIds = vi.fn().mockResolvedValue(new Map());
+      .mockResolvedValue(new Map(taskIds.map((taskId) => [taskId, snapshot(taskId)])));
     const getFrozenTask = vi
       .fn()
       .mockImplementation((taskId: string) => Promise.resolve(snapshot(taskId)));
     const stream = new TaskNotificationStream(
-      { getAuthorizedTasksByIds, listInputRequestsByTaskIds, getFrozenTask } as never,
-      { pollIntervalMs: 5, batchSize: 256 } as never,
+      { getFrozenTasks, getFrozenTask },
+      {
+        pollIntervalMs: 5,
+        batchSize: 256,
+      },
     );
     const response = new FakeResponse(257);
 
     await stream.listen(request(taskIds), response as never, authorization);
 
-    expect(getAuthorizedTasksByIds).toHaveBeenCalledOnce();
-    expect(listInputRequestsByTaskIds).toHaveBeenCalledOnce();
+    expect(getFrozenTasks).toHaveBeenCalledOnce();
     expect(getFrozenTask).not.toHaveBeenCalled();
   });
 });
