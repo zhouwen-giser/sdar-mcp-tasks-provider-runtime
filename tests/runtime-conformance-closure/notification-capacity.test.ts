@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AuthorizationContext } from "../../packages/domain/src/index.js";
 import {
   TaskNotificationStream,
@@ -16,7 +16,7 @@ describe("Runtime notification capacity", () => {
   it("R-016 enforces the configured global subscription limit", async () => {
     const stream = new TaskNotificationStream(
       { getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)) },
-      { pollIntervalMs: 5, maxSubscriptions: 1 } as never,
+      { pollIntervalMs: 5, maxSubscriptions: 1 },
     );
     const first = new FakeResponse(Number.POSITIVE_INFINITY);
     const listening = stream.listen(request("first", ["task-a"]), first as never, authorization);
@@ -38,7 +38,7 @@ describe("Runtime notification capacity", () => {
   it("R-017 enforces the configured global Task binding limit", async () => {
     const stream = new TaskNotificationStream(
       { getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)) },
-      { maxTaskBindings: 1 } as never,
+      { maxTaskBindings: 1 },
     );
     await expect(
       stream.listen(
@@ -62,11 +62,96 @@ describe("Runtime notification capacity", () => {
     expect(response.endedForBackpressure).toBe(false);
     expect(response.frames).toHaveLength(2);
   });
+
+  it("closes only the overflowing stream and keeps other subscriptions active", async () => {
+    const stream = new TaskNotificationStream(
+      { getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)) },
+      { pollIntervalMs: 5, maxQueueMessages: 1 },
+    );
+    const healthy = new FakeResponse(Number.POSITIVE_INFINITY);
+    const healthyListening = stream.listen(
+      request("healthy", ["task-a"]),
+      healthy as never,
+      authorization,
+    );
+    await healthy.waitForFrames(2);
+
+    const slow = new NeverDrainResponse();
+    await stream.listen(
+      request("slow-overflow", ["task-b", "task-c"]),
+      slow as never,
+      authorization,
+    );
+
+    expect(slow.endedForOverflow).toBe(true);
+    expect(healthy.ended).toBe(false);
+    stream.cancel("healthy");
+    await healthyListening;
+  });
+
+  it("uses one Runtime poll interval for concurrent subscriptions", async () => {
+    const interval = vi.spyOn(globalThis, "setInterval");
+    const stream = new TaskNotificationStream(
+      { getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)) },
+      { pollIntervalMs: 50 },
+    );
+    const first = new FakeResponse(Number.POSITIVE_INFINITY);
+    const second = new FakeResponse(Number.POSITIVE_INFINITY);
+    const firstListening = stream.listen(request("one", ["task-a"]), first as never, authorization);
+    const secondListening = stream.listen(
+      request("two", ["task-b"]),
+      second as never,
+      authorization,
+    );
+    await Promise.all([first.waitForFrames(2), second.waitForFrames(2)]);
+    expect(interval).toHaveBeenCalledTimes(1);
+    stream.cancel("one");
+    stream.cancel("two");
+    await Promise.all([firstListening, secondListening]);
+    interval.mockRestore();
+  });
+
+  it("reports the required notification metrics without identity labels", async () => {
+    const increments: string[] = [];
+    const gauges: string[] = [];
+    const stream = new TaskNotificationStream(
+      { getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)) },
+      {
+        metrics: {
+          increment: (name) => increments.push(name),
+          gauge: (name) => gauges.push(name),
+        },
+      },
+    );
+    await stream.listen(
+      request("metrics", ["task-a"]),
+      new FakeResponse(2) as never,
+      authorization,
+    );
+
+    expect(new Set(increments)).toEqual(
+      new Set([
+        "sdar_task_notification_events_total",
+        "sdar_task_notification_poll_batches_total",
+        "sdar_task_notification_poll_tasks_total",
+        "sdar_task_notification_stream_duration_seconds",
+      ]),
+    );
+    expect(new Set(gauges)).toEqual(
+      new Set([
+        "sdar_task_notification_active_subscriptions",
+        "sdar_task_notification_active_bindings",
+        "sdar_task_notification_queue_messages",
+        "sdar_task_notification_queue_bytes",
+      ]),
+    );
+  });
 });
 
 class FakeResponse extends EventEmitter {
   readonly frames: string[] = [];
   statusCode = 0;
+  ended = false;
   constructor(readonly closeAfterFrames: number) {
     super();
   }
@@ -82,10 +167,26 @@ class FakeResponse extends EventEmitter {
     return true;
   }
   end(): void {
+    this.ended = true;
     setImmediate(() => this.emit("close"));
   }
   async waitForFrames(count: number): Promise<void> {
     while (this.frames.length < count) await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+class NeverDrainResponse extends FakeResponse {
+  endedForOverflow = false;
+  constructor() {
+    super(Number.POSITIVE_INFINITY);
+  }
+  override write(frame: string): boolean {
+    this.frames.push(frame);
+    return false;
+  }
+  override end(): void {
+    this.endedForOverflow = true;
+    super.end();
   }
 }
 
