@@ -66,12 +66,8 @@ describe("transport-scoped typed notification identity", () => {
     const response = new FakeResponse(Number.POSITIVE_INFINITY);
     const listening = listen(stream, request(1), response, authorization, "transport-a");
     await response.waitForFrames(2);
-    const cancel = stream.cancel.bind(stream) as unknown as (
-      requestId: string | number,
-      transportScopeId: string,
-    ) => boolean;
-    expect(cancel("1", "transport-a")).toBe(false);
-    expect(cancel(1, "transport-a")).toBe(true);
+    expect(stream.cancel("1", "transport-a")).toBe(false);
+    expect(stream.cancel(1, "transport-a")).toBe(true);
     await listening;
   });
 });
@@ -90,13 +86,7 @@ function listen(
   auth: AuthorizationContext,
   transportScopeId: string,
 ): Promise<void> {
-  const scopedListen = stream.listen.bind(stream) as unknown as (
-    requestValue: FrozenJsonRpcRequest,
-    responseValue: ServerResponse,
-    authorizationValue: AuthorizationContext,
-    transportScope: string,
-  ) => Promise<void>;
-  return scopedListen(value, response as unknown as ServerResponse, auth, transportScopeId);
+  return stream.listen(value, response as unknown as ServerResponse, auth, transportScopeId);
 }
 
 class FakeResponse extends EventEmitter {
