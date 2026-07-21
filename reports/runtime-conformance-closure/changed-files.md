@@ -43,3 +43,27 @@ This ledger is maintained from the execution-time base `c5594e4cb59f77421a8aa107
 - `packages/persistence-postgres/src/tasks.ts`
 - `packages/task-engine/src/engine.ts`
 - `tests/runtime-conformance-closure/mrtr-inbox.test.ts`
+
+## H6-H7 notification capacity and observability
+
+- `.env.example`
+- `apps/runtime/src/config.ts`
+- `apps/runtime/src/runtime.ts`
+- `deploy/kubernetes/config-map.json`
+- `docs/operations/configuration.md`
+- `packages/mcp-protocol/src/sep2663/notifications.ts`
+- `packages/persistence-postgres/src/tasks.ts`
+- `packages/task-engine/src/engine.ts`
+- `tests/runtime-conformance-closure/notification-batch.test.ts`
+- `tests/runtime-conformance-closure/notification-capacity.test.ts`
+- `tests/unit/config.test.ts`
+
+## H8 conformance evidence
+
+- `packages/conformance-testkit/src/runner.ts`
+- `tests/e2e/runtime-stack.test.ts`
+- Runtime PostgreSQL test cleanup and migration-count assertions under `tests/integration/**`
+- `tests/recovery/runtime-recovery-postgres.test.ts`
+- Runtime and frozen reports listed in the final delivery report
+
+Protected Home Assistant Climate Provider application, tests, deployment, report, and report-generator paths remain zero-diff from `origin/main`.

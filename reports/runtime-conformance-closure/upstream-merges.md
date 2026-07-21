@@ -12,3 +12,13 @@
 - Resolution strategy: fast-forward-only update before creating the work branch
 
 No task-period upstream merge has occurred yet.
+
+## Final pre-publication refresh
+
+- Fetch date: 2026-07-22 (Asia/Shanghai)
+- Refetched `origin/main`: `c5594e4cb59f77421a8aa107defa6054ca61a768`
+- Final main ancestor: `c5594e4cb59f77421a8aa107defa6054ca61a768`
+- Branch merge base: `c5594e4cb59f77421a8aa107defa6054ca61a768`
+- Upstream changes since task start: none
+- Merge required: no
+- Rebase/force push: not used
