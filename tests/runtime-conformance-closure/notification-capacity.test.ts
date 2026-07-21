@@ -53,6 +53,32 @@ describe("Runtime notification capacity", () => {
     });
   });
 
+  it("enforces the configured subscription limit per authorization scope", async () => {
+    const stream = new TaskNotificationStream(
+      { getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)) },
+      { pollIntervalMs: 5, maxSubscriptionsPerAuth: 1 },
+    );
+    const first = new FakeResponse(Number.POSITIVE_INFINITY);
+    const listening = stream.listen(
+      request("first-auth", ["task-a"]),
+      first as never,
+      authorization,
+    );
+    await first.waitForFrames(2);
+    await expect(
+      stream.listen(request("same-auth", ["task-b"]), new FakeResponse(2) as never, authorization),
+    ).rejects.toMatchObject({
+      code: -32603,
+      httpStatus: 503,
+      data: { reasonCode: "TASK_NOTIFICATION_CAPACITY_EXCEEDED", retryable: true },
+    });
+    const otherAuthorization = { ...authorization, hash: "b".repeat(64) };
+    const other = new FakeResponse(2);
+    await stream.listen(request("other-auth", ["task-c"]), other as never, otherAuthorization);
+    stream.cancel("first-auth");
+    await listening;
+  });
+
   it("waits for drain instead of closing a stream on Node backpressure", async () => {
     const stream = new TaskNotificationStream({
       getFrozenTask: (taskId) => Promise.resolve(snapshot(taskId)),
