@@ -5,7 +5,7 @@
 - Initial base SHA: `c5594e4cb59f77421a8aa107defa6054ca61a768`
 - Final main ancestor: `c5594e4cb59f77421a8aa107defa6054ca61a768`
 - Implementation commit: `7d2ee42f4aed0493c0adfd4ca439b3cfc0d32324`
-- Report commit: pending local report commit
+- Report commit: `fc742c629495190be4194407d31f7fccdf0e92d9`
 - Actual migration: `migrations/022_mrtr_response_inbox.sql`
 - Frozen contract SHA-256: `d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845`
 
