@@ -41,7 +41,7 @@ describe("frozen Task notification SSE", () => {
         taskId: "task-a",
         _meta: {
           "io.modelcontextprotocol/subscriptionId": "subscription-1",
-          "io.sdar/taskExecution": { runtimeRevision: "1", eventId: "task-a:1" },
+          "io.sdar/taskExecution": { runtimeRevision: "1" },
         },
       },
     });

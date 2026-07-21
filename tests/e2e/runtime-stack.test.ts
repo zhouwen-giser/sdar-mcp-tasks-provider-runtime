@@ -385,11 +385,6 @@ function normalizeNotificationTask(task: Record<string, unknown>): Record<string
   const value = structuredClone(task);
   const meta = value._meta as Record<string, Record<string, unknown>>;
   delete meta["io.modelcontextprotocol/subscriptionId"];
-  const execution = meta["io.sdar/taskExecution"];
-  if (execution !== undefined) {
-    delete execution.eventId;
-    delete execution.observedAt;
-  }
   return value;
 }
 

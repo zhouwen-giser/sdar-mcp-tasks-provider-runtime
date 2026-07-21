@@ -21,6 +21,15 @@ This ledger is maintained from the execution-time base `c5594e4cb59f77421a8aa107
 - `packages/mcp-protocol/src/sep2663/error-mapper.ts`
 - `packages/mcp-protocol/src/sep2663/handler.ts`
 - `packages/mcp-protocol/src/index.ts`
+
+## H3-H5 notification identity and projection
+
+- `packages/mcp-protocol/src/sep2663/notifications.ts`
+- `packages/mcp-protocol/src/sep2663/handler.ts`
+- `packages/task-engine/src/detailed-task.ts`
+- `tests/runtime-conformance-closure/notification-identity.test.ts`
+- `tests/protocol-conformance/notifications.test.ts`
+- `tests/e2e/runtime-stack.test.ts`
 - `tests/runtime-conformance-closure/mrtr-recovery.test.ts`
 - `tests/runtime-conformance-closure/error-mapping.test.ts`
 - `tests/runtime-conformance-closure/notification-identity.test.ts`

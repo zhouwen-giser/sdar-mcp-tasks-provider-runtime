@@ -40,7 +40,7 @@ export function mapTaskToDetailedTask(
       "io.sdar/taskExecution": {
         profileVersion: "1.0",
         runtimeRevision: task.runtimeRevision,
-        providerRevision: String(task.adapterRevision),
+        ...(task.adapterRevision > 0 ? { providerRevision: String(task.adapterRevision) } : {}),
         ...(task.substate === null ? {} : { substate: task.substate }),
         ...(task.cancelRequested ? { cancellationRequested: true } : {}),
       },
