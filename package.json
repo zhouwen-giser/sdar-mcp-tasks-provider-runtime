@@ -58,7 +58,7 @@
     "verify:rc3": "pnpm verify && pnpm test:rc2:red",
     "verify:v1.1": "pnpm verify && pnpm test:rc2:red",
     "verify:protocol-v1": "pnpm protocol:check && pnpm test:protocol:frozen && pnpm verify:v1.1",
-    "verify:v2": "pnpm verify:frozen-protocol && pnpm test:frozen-74 && pnpm verify && pnpm protocol:reports:check && pnpm test:rc2:red",
+    "verify:v2": "pnpm verify:frozen-protocol && pnpm test:frozen-74 && pnpm test:runtime:closure && pnpm verify && pnpm protocol:reports:check && pnpm test:rc2:red",
     "dev:runtime": "tsx apps/runtime/src/main.ts",
     "dev:adapter:ts": "tsx examples/mock-adapter-typescript/src/main.ts",
     "dev:ha-climate": "tsx apps/home-assistant-climate-provider/src/main.ts"
