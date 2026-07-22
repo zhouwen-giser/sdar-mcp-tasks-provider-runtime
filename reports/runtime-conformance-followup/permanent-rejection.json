@@ -11,10 +11,10 @@
       "testFile": "tests/runtime-conformance-followup/permanent-update-rejection.test.ts",
       "testTitle": "permanent UPDATE rejection contract atomically fails Task, Command and MRTR rows and prevents replay",
       "status": "passed",
-      "durationMs": 162.282108,
+      "durationMs": 158.84926700000005,
       "databaseMode": "real-postgresql-integration",
-      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
-      "reportCommit": "8ef06ade2d6712d8946f814f508ea3c8c9ccb489",
+      "implementationCommit": "44eaab3c2e768c7acb789aad3eea7c429d7b35fa",
+      "reportCommit": null,
       "ciRun": null
     }
   ]

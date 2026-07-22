@@ -8,8 +8,8 @@
 - Runtime version: `2.0.0-rc.1`
 - Protocol version: `2026-07-28`
 - Frozen contract SHA-256: `d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845`
-- Implementation commit: `428bab6dc02f811c1a3e079b8c94f3da206ccca0`
-- Report commit: `8ef06ade2d6712d8946f814f508ea3c8c9ccb489`
+- Implementation commit: `44eaab3c2e768c7acb789aad3eea7c429d7b35fa`
+- Report commit: pending final evidence commit
 - CI run: pending Draft PR publication
 
 ## Machine-executed evidence
@@ -32,9 +32,17 @@ with a correction pointer.
 
 ## Verification status
 
-The focused follow-up suite and TypeScript gate are green. The complete V1.1 verification matrix,
-latest-main merge check, remote CI, Draft PR, Climate Provider read-only regression, and final
-governance audit remain required before this report can make the final conformance claim.
+The local V1.1 matrix passed: format, lint, typecheck, build, Proto drift, protocol lock, Frozen
+74/74, Runtime Closure 29/29, Follow-up 29/29, PR #16 interop 19/19, unit 86/86, contract 9/9,
+integration 199/199, recovery 9/9, security 29/29, E2E 6/6, Expanded Adapter Conformance,
+Climate business 7/7, Climate Runtime E2E 1/1, component reports, capacity baseline, container
+reproducibility, and `verify:v2`.
+
+One inherited baseline gate remains unresolved: `protocol:ha-climate:check` reports the existing
+`reports/home-assistant-climate/provider-conformance.json` as stale. The Provider source, tests,
+report, and report generator are all zero diff from the required base, while the committed evidence
+hashes do not match those base files. Updating either side is forbidden by this task's protected-path
+policy. Remote CI and Draft PR publication are also pending.
 
 Maximum permitted final claim after all remaining gates pass: **Runtime Component Conformant**.
 No Interop Certified claim is made. No tag is created and no PR is automatically merged.

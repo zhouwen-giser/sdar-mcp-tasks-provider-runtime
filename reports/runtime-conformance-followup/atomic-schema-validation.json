@@ -11,40 +11,40 @@
       "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
       "testTitle": "MRTR atomic locked-schema validation maps invalid client content to invalid_params using the locked schema",
       "status": "passed",
-      "durationMs": 43.82099499999998,
+      "durationMs": 44.470639000000006,
       "databaseMode": "unit-mock",
-      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
-      "reportCommit": "8ef06ade2d6712d8946f814f508ea3c8c9ccb489",
+      "implementationCommit": "44eaab3c2e768c7acb789aad3eea7c429d7b35fa",
+      "reportCommit": null,
       "ciRun": null
     },
     {
       "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
       "testTitle": "MRTR atomic locked-schema validation maps an invalid Provider schema to adapter_contract",
       "status": "passed",
-      "durationMs": 18.818420000000003,
+      "durationMs": 18.850078000000053,
       "databaseMode": "unit-mock",
-      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
-      "reportCommit": "8ef06ade2d6712d8946f814f508ea3c8c9ccb489",
+      "implementationCommit": "44eaab3c2e768c7acb789aad3eea7c429d7b35fa",
+      "reportCommit": null,
       "ciRun": null
     },
     {
       "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
       "testTitle": "MRTR atomic locked-schema validation does not invoke the validator for ANSWERED requests",
       "status": "passed",
-      "durationMs": 1.7228510000000483,
+      "durationMs": 1.6533170000000155,
       "databaseMode": "unit-mock",
-      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
-      "reportCommit": "8ef06ade2d6712d8946f814f508ea3c8c9ccb489",
+      "implementationCommit": "44eaab3c2e768c7acb789aad3eea7c429d7b35fa",
+      "reportCommit": null,
       "ciRun": null
     },
     {
       "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
       "testTitle": "MRTR atomic locked-schema validation does not invoke the validator for SUPERSEDED requests",
       "status": "passed",
-      "durationMs": 0.9278090000000248,
+      "durationMs": 1.0413149999999973,
       "databaseMode": "unit-mock",
-      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
-      "reportCommit": "8ef06ade2d6712d8946f814f508ea3c8c9ccb489",
+      "implementationCommit": "44eaab3c2e768c7acb789aad3eea7c429d7b35fa",
+      "reportCommit": null,
       "ciRun": null
     }
   ]
