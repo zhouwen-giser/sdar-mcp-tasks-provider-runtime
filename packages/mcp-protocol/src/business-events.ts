@@ -55,6 +55,14 @@ export interface BusinessEventNotificationOptions {
   maxQueueMessages?: number;
   maxQueueBytes?: number;
   maxStreamDurationMs?: number;
+  maxSubscriptions?: number;
+  maxSubscriptionsPerAuth?: number;
+  metrics?: BusinessEventMetrics;
+}
+
+export interface BusinessEventMetrics {
+  increment(name: string, labels?: Record<string, string>, amount?: number): void;
+  gauge(name: string, value: number, labels?: Record<string, string>): void;
 }
 
 export interface BusinessEventRelationReader extends BusinessEventReader {
@@ -80,6 +88,7 @@ export class BusinessEventRelationManager {
     readonly providerId: string,
     readonly reader: BusinessEventRelationReader,
     readonly projectionTtlMs = 300_000,
+    readonly metrics?: BusinessEventMetrics,
   ) {}
 
   async list(
@@ -129,6 +138,7 @@ export class BusinessEventRelationManager {
         parsed.afterTaskId,
         parsed.limit,
       );
+      this.#increment("sdar_business_event_relation_pages_total", { outcome: "complete" });
       return {
         resultType: "complete",
         streamId: parsed.streamId,
@@ -140,7 +150,18 @@ export class BusinessEventRelationManager {
       };
     } catch (error) {
       if (error instanceof FrozenProtocolError) throw error;
+      if (error instanceof Error && error.message === "BUSINESS_EVENT_RELATION_CURSOR_EXPIRED") {
+        this.#increment("sdar_business_event_relation_token_expired_total");
+      }
       throw mapRelationError(error);
+    }
+  }
+
+  #increment(name: string, labels: Record<string, string> = {}): void {
+    try {
+      this.metrics?.increment(name, labels);
+    } catch {
+      // Telemetry is best effort and cannot affect protocol behavior.
     }
   }
 }
@@ -162,6 +183,8 @@ export interface BusinessEventDiscovery {
 
 export class BusinessEventNotificationManager {
   readonly #options: Required<BusinessEventNotificationOptions>;
+  #activeSubscriptions = 0;
+  readonly #activeSubscriptionsByAuth = new Map<string, number>();
 
   constructor(
     readonly providerId: string,
@@ -174,6 +197,9 @@ export class BusinessEventNotificationManager {
       maxQueueMessages: options.maxQueueMessages ?? 64,
       maxQueueBytes: options.maxQueueBytes ?? 1_048_576,
       maxStreamDurationMs: options.maxStreamDurationMs ?? 86_400_000,
+      maxSubscriptions: options.maxSubscriptions ?? 256,
+      maxSubscriptionsPerAuth: options.maxSubscriptionsPerAuth ?? 32,
+      metrics: options.metrics ?? { increment: () => undefined, gauge: () => undefined },
     };
   }
 
@@ -206,77 +232,66 @@ export class BusinessEventNotificationManager {
     authorization: AuthorizationContext,
   ): Promise<void> {
     requireBusinessEventsCapability(request);
-    const selection = parseListenSelection(request.params);
-    const current = await this.reader.currentGeneration(this.providerId);
-    if (current === undefined) throw businessEventError("BUSINESS_EVENT_STREAM_RESET", 409);
-    const generation =
-      selection.kind === "cursor"
-        ? await this.reader.generation(this.providerId, selection.streamId)
-        : current;
-    if (generation === undefined || generation.status === "retired") {
-      throw businessEventError("BUSINESS_EVENT_STREAM_RESET", 409, {
-        currentStreamId: current.streamId,
+    const authorizationKey = `${authorization.hash}\0${authorization.executionMode}\0${authorization.simulationId ?? ""}`;
+    const activeForAuthorization = this.#activeSubscriptionsByAuth.get(authorizationKey) ?? 0;
+    if (
+      this.#activeSubscriptions >= this.#options.maxSubscriptions ||
+      activeForAuthorization >= this.#options.maxSubscriptionsPerAuth
+    ) {
+      this.#increment("sdar_business_event_live_events_total", {
+        outcome: "subscription_capacity",
       });
+      throw businessEventError("BUSINESS_EVENT_SUBSCRIPTION_CAPACITY_EXCEEDED", 429);
     }
-    const afterSequence = acceptedAfterSequence(selection, generation);
-    validateCursor(afterSequence, generation, current.streamId);
-    const highWatermark =
-      generation.status === "replayable_closed"
-        ? generation.lastReplayableSequence
-        : generation.currentSequence;
-    const state = { closed: false };
-    const writer = new TaskNotificationWriter(response, {
-      maxMessages: this.#options.maxQueueMessages,
-      maxBytes: this.#options.maxQueueBytes,
-      onQueueDelta: () => undefined,
-      onRejected: () => undefined,
-      onSent: () => undefined,
-    });
-    const close = (): void => {
-      state.closed = true;
-      writer.dispose();
-    };
-    response.once("close", close);
-    response.once("error", close);
-    response.statusCode = 200;
-    response.setHeader("content-type", "text/event-stream");
-    response.setHeader("cache-control", "no-cache, no-transform");
-    response.setHeader("connection", "keep-alive");
-    response.flushHeaders();
+    this.#activeSubscriptions += 1;
+    this.#activeSubscriptionsByAuth.set(authorizationKey, activeForAuthorization + 1);
+    this.#gauge("sdar_business_event_active_subscriptions", this.#activeSubscriptions);
     try {
-      if (!writer.enqueue(await this.#ack(request.id, generation, afterSequence))) return;
-      let lastScannedSequence = afterSequence;
-      let lastDeliveredSequence = afterSequence;
-      ({ lastScannedSequence, lastDeliveredSequence } = await this.#replay(
-        writer,
-        request.id,
-        authorization,
-        generation.streamId,
-        lastScannedSequence,
-        lastDeliveredSequence,
-        highWatermark,
-        () => state.closed,
-      ));
-      if (state.closed) return;
-      if (generation.status === "replayable_closed") {
-        await this.#sendContinuity(writer, request.id, generation.streamId);
-        writer.close();
-        return;
+      const selection = parseListenSelection(request.params);
+      const current = await this.reader.currentGeneration(this.providerId);
+      if (current === undefined) throw businessEventError("BUSINESS_EVENT_STREAM_RESET", 409);
+      const generation =
+        selection.kind === "cursor"
+          ? await this.reader.generation(this.providerId, selection.streamId)
+          : current;
+      if (generation === undefined || generation.status === "retired") {
+        throw businessEventError("BUSINESS_EVENT_STREAM_RESET", 409, {
+          currentStreamId: current.streamId,
+        });
       }
-      const startedAt = Date.now();
-      // The response callbacks mutate this state asynchronously; static control-flow analysis
-      // cannot observe that mutation across the awaited poll boundary.
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      while (!state.closed && Date.now() - startedAt < this.#options.maxStreamDurationMs) {
-        await delay(this.#options.pollIntervalMs, () => state.closed);
-        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-        if (state.closed) break;
-        const observed = await this.reader.generation(this.providerId, generation.streamId);
-        if (observed?.status !== "current") {
-          await this.#sendContinuity(writer, request.id, generation.streamId);
-          writer.close();
-          return;
-        }
+      const afterSequence = acceptedAfterSequence(selection, generation);
+      validateCursor(afterSequence, generation, current.streamId);
+      const highWatermark =
+        generation.status === "replayable_closed"
+          ? generation.lastReplayableSequence
+          : generation.currentSequence;
+      const state = { closed: false };
+      const writer = new TaskNotificationWriter(response, {
+        maxMessages: this.#options.maxQueueMessages,
+        maxBytes: this.#options.maxQueueBytes,
+        onQueueDelta: () => undefined,
+        onRejected: (reason) =>
+          this.#increment("sdar_business_event_live_events_total", {
+            outcome:
+              reason === "queue_byte_limit" ? "queue_byte_overflow" : "queue_message_overflow",
+          }),
+        onSent: () => undefined,
+      });
+      const close = (): void => {
+        state.closed = true;
+        writer.dispose();
+      };
+      response.once("close", close);
+      response.once("error", close);
+      response.statusCode = 200;
+      response.setHeader("content-type", "text/event-stream");
+      response.setHeader("cache-control", "no-cache, no-transform");
+      response.setHeader("connection", "keep-alive");
+      response.flushHeaders();
+      try {
+        if (!writer.enqueue(await this.#ack(request.id, generation, afterSequence))) return;
+        let lastScannedSequence = afterSequence;
+        let lastDeliveredSequence = afterSequence;
         ({ lastScannedSequence, lastDeliveredSequence } = await this.#replay(
           writer,
           request.id,
@@ -284,16 +299,55 @@ export class BusinessEventNotificationManager {
           generation.streamId,
           lastScannedSequence,
           lastDeliveredSequence,
-          observed.currentSequence,
+          highWatermark,
+          "replay",
           () => state.closed,
         ));
+        if (state.closed) return;
+        if (generation.status === "replayable_closed") {
+          await this.#sendContinuity(writer, request.id, generation.streamId);
+          writer.close();
+          return;
+        }
+        const startedAt = Date.now();
+        // The response callbacks mutate this state asynchronously; static control-flow analysis
+        // cannot observe that mutation across the awaited poll boundary.
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        while (!state.closed && Date.now() - startedAt < this.#options.maxStreamDurationMs) {
+          await delay(this.#options.pollIntervalMs, () => state.closed);
+          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+          if (state.closed) break;
+          const observed = await this.reader.generation(this.providerId, generation.streamId);
+          if (observed?.status !== "current") {
+            await this.#sendContinuity(writer, request.id, generation.streamId);
+            writer.close();
+            return;
+          }
+          ({ lastScannedSequence, lastDeliveredSequence } = await this.#replay(
+            writer,
+            request.id,
+            authorization,
+            generation.streamId,
+            lastScannedSequence,
+            lastDeliveredSequence,
+            observed.currentSequence,
+            "live",
+            () => state.closed,
+          ));
+        }
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+        if (!state.closed) writer.close();
+      } finally {
+        response.removeListener("close", close);
+        response.removeListener("error", close);
+        writer.dispose();
       }
-      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-      if (!state.closed) writer.close();
     } finally {
-      response.removeListener("close", close);
-      response.removeListener("error", close);
-      writer.dispose();
+      const remaining = (this.#activeSubscriptionsByAuth.get(authorizationKey) ?? 1) - 1;
+      if (remaining === 0) this.#activeSubscriptionsByAuth.delete(authorizationKey);
+      else this.#activeSubscriptionsByAuth.set(authorizationKey, remaining);
+      this.#activeSubscriptions -= 1;
+      this.#gauge("sdar_business_event_active_subscriptions", this.#activeSubscriptions);
     }
   }
 
@@ -339,6 +393,7 @@ export class BusinessEventNotificationManager {
     initialScanned: string,
     initialDelivered: string,
     throughSequence: string,
+    deliveryPhase: "replay" | "live",
     isClosed: () => boolean,
   ): Promise<{ lastScannedSequence: string; lastDeliveredSequence: string }> {
     let lastScannedSequence = initialScanned;
@@ -366,11 +421,22 @@ export class BusinessEventNotificationManager {
             simulationId: authorization.simulationId,
           },
         );
-        if (projection === undefined) continue;
+        if (projection === undefined) {
+          this.#increment("sdar_business_event_projection_filtered_total", {
+            reason: "authorization",
+          });
+          continue;
+        }
         if (!writer.enqueue(eventNotification(subscriptionId, projection))) {
           return { lastScannedSequence, lastDeliveredSequence };
         }
         lastDeliveredSequence = event.sequence;
+        this.#increment(
+          deliveryPhase === "replay"
+            ? "sdar_business_event_replay_events_total"
+            : "sdar_business_event_live_events_total",
+          { outcome: "delivered" },
+        );
       }
     }
     return { lastScannedSequence, lastDeliveredSequence };
@@ -386,6 +452,7 @@ export class BusinessEventNotificationManager {
       previousStreamId,
     );
     if (continuity === undefined) return;
+    this.#increment("sdar_business_event_continuity_notifications_total");
     writer.enqueue({
       jsonrpc: "2.0",
       method: "notifications/io.sdar/businessEvents/continuity",
@@ -403,6 +470,22 @@ export class BusinessEventNotificationManager {
         _meta: subscriptionMeta(subscriptionId),
       },
     });
+  }
+
+  #increment(name: string, labels: Record<string, string> = {}, amount = 1): void {
+    try {
+      this.#options.metrics.increment(name, labels, amount);
+    } catch {
+      // Telemetry is best effort and cannot affect protocol behavior.
+    }
+  }
+
+  #gauge(name: string, value: number): void {
+    try {
+      this.#options.metrics.gauge(name, value);
+    } catch {
+      // Telemetry is best effort and cannot affect protocol behavior.
+    }
   }
 }
 

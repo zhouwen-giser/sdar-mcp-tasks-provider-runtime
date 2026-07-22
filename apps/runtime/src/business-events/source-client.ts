@@ -23,6 +23,10 @@ export interface AdapterBusinessEventSourceClientOptions {
   eventRetentionMs?: number;
   mappingDeadlineMs?: number;
   generationRetentionMs?: number;
+  metrics?: {
+    increment(name: string, labels?: Record<string, string>, amount?: number): void;
+    gauge(name: string, value: number, labels?: Record<string, string>): void;
+  };
 }
 
 export class AdapterBusinessEventSourceClient {
@@ -83,9 +87,15 @@ export class AdapterBusinessEventSourceClient {
             `${this.options.sourceStreamId}:${reason}:${lease.lastPersistedSourceSequence}`,
             this.#generationRetentionMs,
           );
+          this.#increment("sdar_business_event_stream_rotations_total", { reason });
+          this.#increment("sdar_business_event_continuity_loss_total", { reason });
           return "rotated";
         }
         await this.repository.markSourceUnavailable(lease, reason);
+        this.#increment("sdar_business_event_source_blocked_total", {
+          sourceId: this.options.sourceId,
+          reason,
+        });
         return "degraded";
       }
       throw error;
@@ -100,7 +110,22 @@ export class AdapterBusinessEventSourceClient {
       this.#inboxRetentionMs,
       this.#mappingDeadlineMs,
     );
-    if (intake.disposition === "duplicate") return;
+    this.#increment("sdar_business_event_source_received_total", {
+      sourceId: this.options.sourceId,
+      outcome: intake.disposition,
+    });
+    if (intake.disposition === "duplicate") {
+      this.#increment("sdar_business_event_source_duplicate_total", {
+        sourceId: this.options.sourceId,
+      });
+      return;
+    }
+    if (intake.disposition === "rejected") {
+      this.#increment("sdar_business_event_source_rejected_total", {
+        sourceId: this.options.sourceId,
+        reason: "poison_event",
+      });
+    }
     if (
       intake.disposition === "rejected" &&
       this.options.deliverySemantics === "durable_at_least_once"
@@ -112,6 +137,12 @@ export class AdapterBusinessEventSourceClient {
         `${this.options.sourceStreamId}:poison:${fact.sourceSequence}`,
         this.#generationRetentionMs,
       );
+      this.#increment("sdar_business_event_stream_rotations_total", {
+        reason: "SOURCE_POISON_EVENT",
+      });
+      this.#increment("sdar_business_event_continuity_loss_total", {
+        reason: "SOURCE_POISON_EVENT",
+      });
       return;
     }
     const prepared = await this.repository.prepareNextSourceEvent(
@@ -124,10 +155,17 @@ export class AdapterBusinessEventSourceClient {
         this.options.sourceId,
         this.#eventRetentionMs,
       );
+      this.#increment("sdar_business_event_finalized_total", {
+        sourceId: this.options.sourceId,
+        outcome: "finalized",
+      });
     } else if (
       prepared === "terminal" &&
       this.options.deliverySemantics === "durable_at_least_once"
     ) {
+      this.#increment("sdar_business_event_source_mapping_failed_total", {
+        sourceId: this.options.sourceId,
+      });
       await this.repository.rotateStream(
         this.options.providerId,
         "SOURCE_MAPPING_FAILED",
@@ -135,6 +173,32 @@ export class AdapterBusinessEventSourceClient {
         `${this.options.sourceStreamId}:mapping:${fact.sourceSequence}`,
         this.#generationRetentionMs,
       );
+      this.#increment("sdar_business_event_stream_rotations_total", {
+        reason: "SOURCE_MAPPING_FAILED",
+      });
+      this.#increment("sdar_business_event_continuity_loss_total", {
+        reason: "SOURCE_MAPPING_FAILED",
+      });
+    } else if (prepared === "pending") {
+      this.#gauge("sdar_business_event_publication_barrier_waiting", 1, {
+        sourceId: this.options.sourceId,
+      });
+    }
+  }
+
+  #increment(name: string, labels: Record<string, string> = {}): void {
+    try {
+      this.options.metrics?.increment(name, labels);
+    } catch {
+      // Telemetry is best effort and cannot alter source processing.
+    }
+  }
+
+  #gauge(name: string, value: number, labels: Record<string, string> = {}): void {
+    try {
+      this.options.metrics?.gauge(name, value, labels);
+    } catch {
+      // Telemetry is best effort and cannot alter source processing.
     }
   }
 }

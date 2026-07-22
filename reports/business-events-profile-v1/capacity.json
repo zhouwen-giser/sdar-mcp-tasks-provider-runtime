@@ -1,0 +1,22 @@
+{
+  "profile": "SDAR Business Events Profile V1",
+  "status": "passed",
+  "limits": {
+    "sources": 16,
+    "runtimeReplicas": 2,
+    "storedEvents": 10000,
+    "activeSubscriptions": 256,
+    "totalTaskRelations": 4096,
+    "replayBatchSize": 256,
+    "relationPages": 1000
+  },
+  "scenarios": {
+    "slowConsumers": "bounded by message and byte queues",
+    "queueMessageOverflow": "rejected and metered",
+    "queueByteOverflow": "rejected and metered",
+    "leaseTakeover": "covered by fencing suite",
+    "rotationUnderLoad": "covered by rotation concurrency suite",
+    "retentionCleanup": "covered by durable retention suite"
+  },
+  "command": "pnpm test:business-events:capacity"
+}

@@ -40,6 +40,8 @@
     "test:business-events:replay": "vitest run tests/business-events/replay",
     "test:business-events:continuity": "vitest run tests/business-events/continuity",
     "test:business-events:relation": "node scripts/require-env.mjs TEST_DATABASE_URL && vitest run tests/business-events/relation",
+    "test:business-events:security": "node scripts/require-env.mjs TEST_DATABASE_URL && vitest run tests/business-events/security",
+    "test:business-events:capacity": "node scripts/require-env.mjs TEST_DATABASE_URL && vitest run tests/business-events/capacity",
     "test:frozen-74": "node scripts/require-env.mjs TEST_DATABASE_URL && node scripts/protocol/run-frozen-conformance.mjs",
     "test:protocol:frozen": "vitest run tests/protocol-conformance",
     "test:notifications": "node scripts/require-env.mjs TEST_DATABASE_URL && vitest run tests/protocol-conformance/notifications.test.ts tests/e2e/runtime-stack.test.ts",

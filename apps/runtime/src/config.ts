@@ -90,6 +90,24 @@ const EnvironmentSchema = z
       .min(64)
       .max(1_048_576)
       .default(16_384),
+    BUSINESS_EVENT_MAPPING_DEADLINE_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(300_000)
+      .default(60_000),
+    BUSINESS_EVENT_MAX_FUTURE_SKEW_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3_600_000)
+      .default(300_000),
+    BUSINESS_EVENT_CLOCK_SKEW_SAFETY_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3_600_000)
+      .default(300_000),
     TASK_NOTIFICATION_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(10_000).default(500),
     TASK_NOTIFICATION_MAX_SUBSCRIPTIONS: z.coerce.number().int().min(1).max(10_000).default(256),
     TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH: z.coerce
