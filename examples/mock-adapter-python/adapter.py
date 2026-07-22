@@ -127,6 +127,7 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
                     operation_name=check.operation_name,
                     availability=availability,
                     risk_level=risk,
+                    reservation_mode=adapter_pb2.NONE,
                     reason_code=reason,
                     description=description,
                     possible_effects=effects,

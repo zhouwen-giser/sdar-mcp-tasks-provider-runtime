@@ -56,6 +56,13 @@ enum RiskLevel {
   CRITICAL = 4;
 }
 
+enum ReservationMode {
+  RESERVATION_MODE_UNSPECIFIED = 0;
+  NONE = 1;
+  BEST_EFFORT = 2;
+  GUARANTEED = 3;
+}
+
 enum AdapterExecutionState {
   ADAPTER_EXECUTION_STATE_UNSPECIFIED = 0;
   ACCEPTED = 1;
@@ -200,6 +207,8 @@ message AvailabilityResult {
   repeated AvailableWindow next_available_windows = 9;
   uint64 estimated_delay_ms = 10;
   repeated string possible_effects = 11;
+  ReservationMode reservation_mode = 12;
+  optional string reservation_ref = 13;
 }
 
 message CheckAvailabilityResponse {

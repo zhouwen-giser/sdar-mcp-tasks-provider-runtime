@@ -12,7 +12,7 @@
     "properties": [
       {
         "name": "sdar:pnpm-lock-sha256",
-        "value": "aaf56702575496c5f71c8acdbe32ce4707e7c9075c24b0bea089f77411eda010"
+        "value": "c31b75d67f13ef4b0c2094d601054e4cf679afdbe1e2609a7485938e412393ef"
       }
     ]
   },
@@ -614,14 +614,14 @@
     {
       "type": "library",
       "name": "fast-uri",
-      "version": "3.1.3",
-      "purl": "pkg:npm/fast-uri@3.1.3"
+      "version": "3.1.4",
+      "purl": "pkg:npm/fast-uri@3.1.4"
     },
     {
       "type": "library",
       "name": "fast-uri",
-      "version": "4.1.0",
-      "purl": "pkg:npm/fast-uri@4.1.0"
+      "version": "4.1.1",
+      "purl": "pkg:npm/fast-uri@4.1.1"
     },
     {
       "type": "library",

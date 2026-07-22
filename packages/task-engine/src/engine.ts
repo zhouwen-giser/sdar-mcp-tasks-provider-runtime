@@ -1536,8 +1536,13 @@ function fromAdapterAvailability(result: {
   earliestStartTime?: unknown;
   nextAvailableWindows: { startTime?: unknown; endTime?: unknown }[];
   estimatedDelayMs: string | number;
+  reservationMode: string;
+  reservationRef?: string;
   possibleEffects: string[];
 }) {
+  if (result.reservationMode === "UNSPECIFIED") {
+    throw new Error("AVAILABILITY_RESERVATION_MODE_MISSING");
+  }
   return {
     requestId: result.requestId,
     operationName: result.operationName,
@@ -1562,6 +1567,8 @@ function fromAdapterAvailability(result: {
         endTime: protoTimestampToDate(window.endTime).toISOString(),
       })),
     estimatedDelayMs: Number(result.estimatedDelayMs),
+    reservationMode: result.reservationMode.toLowerCase() as "none" | "best_effort" | "guaranteed",
+    ...(result.reservationRef ? { reservationRef: result.reservationRef } : {}),
     possibleEffects: result.possibleEffects,
   };
 }

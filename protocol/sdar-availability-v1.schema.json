@@ -194,7 +194,8 @@
         "requestId",
         "operationName",
         "availability",
-        "riskLevel"
+        "riskLevel",
+        "reservationMode"
       ],
       "properties": {
         "requestId": {

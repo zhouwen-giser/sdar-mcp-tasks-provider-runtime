@@ -483,6 +483,13 @@ export class AvailabilityResult extends jspb.Message {
     getPossibleEffectsList(): Array<string>;
     setPossibleEffectsList(value: Array<string>): AvailabilityResult;
     addPossibleEffects(value: string, index?: number): string;
+    getReservationMode(): ReservationMode;
+    setReservationMode(value: ReservationMode): AvailabilityResult;
+
+    hasReservationRef(): boolean;
+    clearReservationRef(): void;
+    getReservationRef(): string | undefined;
+    setReservationRef(value: string): AvailabilityResult;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): AvailabilityResult.AsObject;
@@ -507,6 +514,8 @@ export namespace AvailabilityResult {
         nextAvailableWindowsList: Array<AvailableWindow.AsObject>,
         estimatedDelayMs: number,
         possibleEffectsList: Array<string>,
+        reservationMode: ReservationMode,
+        reservationRef?: string,
     }
 }
 
@@ -1597,6 +1606,13 @@ export enum RiskLevel {
     MEDIUM = 2,
     HIGH = 3,
     CRITICAL = 4,
+}
+
+export enum ReservationMode {
+    RESERVATION_MODE_UNSPECIFIED = 0,
+    NONE = 1,
+    BEST_EFFORT = 2,
+    GUARANTEED = 3,
 }
 
 export enum AdapterExecutionState {

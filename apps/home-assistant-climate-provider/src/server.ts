@@ -140,6 +140,7 @@ export class ClimateProviderServer {
       requestId: check.requestId ?? "",
       operationName: check.operationName ?? "",
       riskLevel: "LOW",
+      reservationMode: "NONE",
     };
     try {
       const args = protoStructToJson(check.arguments);

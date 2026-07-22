@@ -23,12 +23,14 @@ describe("availability contract", () => {
           requestId: "one",
           operationName: "op",
           availability: "available",
+          reservationMode: "none",
           validUntil: "2026-07-16T00:00:10Z",
         },
         {
           requestId: "two",
           operationName: "op",
           availability: "restricted",
+          reservationMode: "none",
           reasonCode: "BUSY",
           riskLevel: "high",
           validUntil: "2026-07-16T00:00:10Z",
@@ -51,6 +53,7 @@ describe("availability contract", () => {
             requestId: "one",
             operationName: "op",
             availability: "restricted",
+            reservationMode: "none",
             riskLevel: "high",
             validUntil: new Date(Date.now() + 60_000).toISOString(),
           },
@@ -66,6 +69,7 @@ describe("availability contract", () => {
             requestId: "one",
             operationName: "op",
             availability: "restricted",
+            reservationMode: "none",
             reasonCode: "BUSY",
             riskLevel: "high",
             validUntil: "2026-01-02T00:00:00Z",
@@ -105,10 +109,27 @@ describe("availability contract", () => {
     ).toThrow("AVAILABILITY_RESERVATION_INVALID");
   });
 
+  it("requires an explicit reservation mode", () => {
+    expect(() =>
+      validateAvailabilityResponse(
+        new Date(),
+        [firstCheck],
+        [
+          {
+            requestId: "one",
+            operationName: "op",
+            availability: "available",
+          } as never,
+        ],
+      ),
+    ).toThrow("AVAILABILITY_RESERVATION_MODE_MISSING");
+  });
+
   it("uses explicit unknown fallback without claiming availability", () => {
     const fallback = unknownAvailability(checks);
     expect(fallback.results.map((check) => check.requestId)).toEqual(["one", "two"]);
     expect(fallback.results.map((check) => check.availability)).toEqual(["unknown", "unknown"]);
+    expect(fallback.results.map((check) => check.reservationMode)).toEqual(["none", "none"]);
     expect(fallback.results.map((check) => check.reasonCode)).toEqual([
       "ADAPTER_TRANSIENT_UNAVAILABLE",
       "ADAPTER_TRANSIENT_UNAVAILABLE",
