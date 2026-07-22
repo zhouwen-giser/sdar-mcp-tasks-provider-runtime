@@ -3,7 +3,13 @@ import { FrozenErrorCode, FrozenProtocolError } from "./errors.js";
 import type { FrozenJsonRpcRequest } from "./request-validator.js";
 import { FROZEN_PROTOCOL_VERSION } from "./request-validator.js";
 
-const namedMethods = new Set(["tools/call", "tasks/get", "tasks/update", "tasks/cancel"]);
+const namedMethods = new Set([
+  "tools/call",
+  "tasks/get",
+  "tasks/update",
+  "tasks/cancel",
+  "io.sdar/businessEvents/relatedTasks/list",
+]);
 
 export function validateFrozenHeaders(
   headers: IncomingHttpHeaders,
@@ -37,9 +43,18 @@ export function validateFrozenHeaders(
   if (requiredHeader(headers, "mcp-method") !== request.method) throw headerMismatch();
   const name = header(headers, "mcp-name");
   if (namedMethods.has(request.method)) {
-    const expected = request.method === "tools/call" ? request.params.name : request.params.taskId;
+    const expected =
+      request.method === "tools/call"
+        ? request.params.name
+        : request.method === "io.sdar/businessEvents/relatedTasks/list"
+          ? request.params.eventId
+          : request.params.taskId;
     if (typeof expected !== "string" || name !== expected) throw headerMismatch();
-  } else if (request.method === "subscriptions/listen" && name !== undefined) {
+  } else if (
+    (request.method === "subscriptions/listen" ||
+      request.method === "io.sdar/businessEvents/listen") &&
+    name !== undefined
+  ) {
     throw headerMismatch();
   }
 }

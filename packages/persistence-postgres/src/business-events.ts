@@ -103,6 +103,20 @@ export interface RotationResult {
   affectedSourceIds: string[];
   lastReplayableSequence: string;
   lastContinuousSequence: string | null;
+  gapDetectedAt: Date;
+}
+
+export interface BusinessEventAuthorizationSnapshot {
+  authorizationScopeHash: string;
+  executionMode: "live" | "simulation" | "historical-replay";
+  simulationId: string | null;
+}
+
+export interface AuthorizedBusinessEventProjection {
+  event: FinalizedBusinessEvent;
+  relatedTaskIds: string[];
+  candidateRelationHash: string;
+  projectionRelationHash: string;
 }
 
 export class BusinessEventRepository {
@@ -857,13 +871,14 @@ export class BusinessEventRepository {
         [providerId, newStreamId],
       );
       const continuityId = randomUUID();
-      await client.query(
+      const continuity = await client.query<ContinuityRow>(
         `INSERT INTO provider_business_event_continuity_record
            (continuity_record_id,provider_id,previous_stream_id,new_stream_id,reason_code,
             affected_source_ids,gap_detected_at,last_replayable_sequence,
             last_continuous_sequence,continuity_reason_identity,retain_until)
          VALUES ($1,$2,$3,$4,$5,$6,clock_timestamp(),$7,$8,$9,
-                 clock_timestamp() + ($10 * interval '1 millisecond'))`,
+                 clock_timestamp() + ($10 * interval '1 millisecond'))
+         RETURNING *`,
         [
           continuityId,
           providerId,
@@ -887,14 +902,9 @@ export class BusinessEventRepository {
         [providerId, normalizedAffectedSourceIds],
       );
       await client.query("COMMIT");
-      return {
-        previousStreamId: previous.stream_id,
-        newStreamId,
-        reasonCode,
-        affectedSourceIds: normalizedAffectedSourceIds,
-        lastReplayableSequence: lastReplayable,
-        lastContinuousSequence: lastContinuous,
-      };
+      const continuityRow = continuity.rows[0];
+      if (continuityRow === undefined) throw new Error("BUSINESS_EVENT_CONTINUITY_NOT_RETURNED");
+      return mapRotation(continuityRow);
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;
@@ -917,6 +927,90 @@ export class BusinessEventRepository {
       [providerId, streamId, afterSequence, throughSequence, limit],
     );
     return result.rows.map(mapStoredEvent);
+  }
+
+  async authorizedEventProjection(
+    providerId: string,
+    streamId: string,
+    eventId: string,
+    authorization: BusinessEventAuthorizationSnapshot,
+  ): Promise<AuthorizedBusinessEventProjection | undefined> {
+    const eventResult = await this.pool.query<StoredEventRow>(
+      `SELECT * FROM provider_business_event
+       WHERE provider_id=$1 AND stream_id=$2 AND event_id=$3`,
+      [providerId, streamId, eventId],
+    );
+    const event = eventResult.rows[0];
+    if (event === undefined) return undefined;
+    if (event.expires_at <= new Date()) return undefined;
+    const candidateIds =
+      event.scope === "task"
+        ? event.task_id === null
+          ? []
+          : [event.task_id]
+        : (
+            await this.pool.query<{ task_id: string }>(
+              `SELECT task_id::text FROM provider_business_event_relation
+               WHERE provider_id=$1 AND stream_id=$2 AND event_id=$3 ORDER BY task_id`,
+              [providerId, streamId, eventId],
+            )
+          ).rows.map((row) => row.task_id);
+    if (event.scope === "resource" && candidateIds.length !== event.candidate_related_task_count) {
+      throw new Error("BUSINESS_EVENT_RETENTION_AUTHORITY_INVALID");
+    }
+    const visibleRows =
+      candidateIds.length === 0
+        ? []
+        : (
+            await this.pool.query<{ task_id: string }>(
+              `WITH authority AS (
+               SELECT task_id,authorization_context_hash,execution_mode,simulation_id
+               FROM provider_task WHERE provider_id=$1 AND task_id=ANY($2::uuid[])
+               UNION ALL
+               SELECT task_id,authorization_context_hash,execution_mode,simulation_id
+               FROM provider_task_visibility_tombstone
+               WHERE provider_id=$1 AND task_id=ANY($2::uuid[])
+             ), resolved AS (
+               SELECT task_id,
+                      count(*)::text AS authority_count,
+                      bool_or(authorization_context_hash=$3 AND execution_mode=$4 AND
+                        simulation_id IS NOT DISTINCT FROM $5::text) AS visible
+               FROM authority GROUP BY task_id
+             )
+             SELECT candidate.task_id::text
+             FROM unnest($2::uuid[]) candidate(task_id)
+             LEFT JOIN resolved USING (task_id)
+             WHERE COALESCE(resolved.visible,false)
+             ORDER BY candidate.task_id`,
+              [
+                providerId,
+                candidateIds,
+                authorization.authorizationScopeHash,
+                authorization.executionMode,
+                authorization.simulationId,
+              ],
+            )
+          ).rows;
+    const authorityCount = await this.pool.query<{ count: string }>(
+      `SELECT count(DISTINCT task_id)::text AS count FROM (
+         SELECT task_id FROM provider_task WHERE provider_id=$1 AND task_id=ANY($2::uuid[])
+         UNION ALL
+         SELECT task_id FROM provider_task_visibility_tombstone
+         WHERE provider_id=$1 AND task_id=ANY($2::uuid[])
+       ) authority`,
+      [providerId, candidateIds],
+    );
+    if (Number(authorityCount.rows[0]?.count ?? "0") !== candidateIds.length) {
+      throw new Error("BUSINESS_EVENT_RETENTION_AUTHORITY_INVALID");
+    }
+    const relatedTaskIds = visibleRows.map((row) => row.task_id);
+    if (relatedTaskIds.length === 0) return undefined;
+    return {
+      event: mapStoredEvent(event),
+      relatedTaskIds,
+      candidateRelationHash: canonicalSha256(candidateIds),
+      projectionRelationHash: canonicalSha256(relatedTaskIds),
+    };
   }
 
   async continuityForPreviousStream(
@@ -1033,6 +1127,7 @@ export class BusinessEventRepository {
 
   async relationProjectionPage(
     token: string,
+    expected: Pick<ProjectionIdentity, "providerId" | "streamId" | "eventId">,
     authorization: Pick<
       ProjectionIdentity,
       "authorizationScopeHash" | "executionMode" | "simulationId"
@@ -1044,28 +1139,62 @@ export class BusinessEventRepository {
     const tokenHash = hashToken(token);
     const projection = await this.pool.query<{
       authorization_scope_hash: string;
+      provider_id: string;
+      stream_id: string;
+      event_id: string;
       execution_mode: string;
       simulation_id: string | null;
       expires_at: Date;
       total: string;
+      candidate_relation_hash: string;
+      projection_relation_hash: string;
+      event_expires_at: Date;
     }>(
-      `SELECT p.authorization_scope_hash, p.execution_mode, p.simulation_id, p.expires_at,
+      `SELECT p.authorization_scope_hash,p.provider_id,p.stream_id::text,p.event_id,
+              p.execution_mode,p.simulation_id,p.expires_at,p.candidate_relation_hash,
+              p.projection_relation_hash,event.expires_at AS event_expires_at,
               count(i.task_id)::text AS total
        FROM provider_business_event_relation_projection p
+       JOIN provider_business_event event
+         ON event.provider_id=p.provider_id AND event.stream_id=p.stream_id AND event.event_id=p.event_id
        LEFT JOIN provider_business_event_relation_projection_item i ON i.token_hash=p.token_hash
        WHERE p.token_hash=$1
-       GROUP BY p.token_hash`,
+       GROUP BY p.token_hash,event.expires_at`,
       [tokenHash],
     );
     const row = projection.rows[0];
     if (row === undefined) throw new Error("BUSINESS_EVENT_RELATION_CURSOR_INVALID");
     if (row.expires_at <= new Date()) throw new Error("BUSINESS_EVENT_RELATION_CURSOR_EXPIRED");
+    if (row.event_expires_at <= new Date()) throw new Error("BUSINESS_EVENT_NOT_FOUND");
+    if (
+      row.provider_id !== expected.providerId ||
+      row.stream_id !== expected.streamId ||
+      row.event_id !== expected.eventId
+    ) {
+      throw new Error("BUSINESS_EVENT_RELATION_CURSOR_INVALID");
+    }
     if (
       row.authorization_scope_hash !== authorization.authorizationScopeHash ||
       row.execution_mode !== authorization.executionMode ||
       row.simulation_id !== authorization.simulationId
     ) {
       throw new Error("BUSINESS_EVENT_AUTHORIZATION_MISMATCH");
+    }
+    const candidate = await this.pool.query<{ task_id: string }>(
+      `SELECT task_id::text FROM provider_business_event_relation
+       WHERE provider_id=$1 AND stream_id=$2 AND event_id=$3 ORDER BY task_id`,
+      [expected.providerId, expected.streamId, expected.eventId],
+    );
+    const projected = await this.pool.query<{ task_id: string }>(
+      `SELECT task_id::text FROM provider_business_event_relation_projection_item
+       WHERE token_hash=$1 ORDER BY task_id`,
+      [tokenHash],
+    );
+    if (
+      canonicalSha256(candidate.rows.map((item) => item.task_id)) !== row.candidate_relation_hash ||
+      canonicalSha256(projected.rows.map((item) => item.task_id)) !== row.projection_relation_hash
+    ) {
+      throw new Error("BUSINESS_EVENT_RELATION_PROJECTION_STALE");
     }
     if (afterTaskId !== undefined) {
       const anchor = await this.pool.query(
@@ -1083,10 +1212,19 @@ export class BusinessEventRepository {
     );
     const taskIds = items.rows.map((item) => item.task_id);
     const lastTaskId = taskIds.at(-1);
+    const hasMore =
+      lastTaskId !== undefined &&
+      (
+        await this.pool.query(
+          `SELECT 1 FROM provider_business_event_relation_projection_item
+           WHERE token_hash=$1 AND task_id>$2::uuid LIMIT 1`,
+          [tokenHash, lastTaskId],
+        )
+      ).rowCount === 1;
     return {
       items: taskIds,
       total: Number(row.total),
-      ...(lastTaskId === undefined ? {} : { nextAfterTaskId: lastTaskId }),
+      ...(hasMore ? { nextAfterTaskId: lastTaskId } : {}),
     };
   }
 }
@@ -1147,6 +1285,7 @@ interface StoredEventRow {
   severity_hint: "info" | "warning" | "critical" | null;
   reason_code: string | null;
   raw_payload: unknown;
+  expires_at: Date;
 }
 
 interface ContinuityRow {
@@ -1156,6 +1295,7 @@ interface ContinuityRow {
   affected_source_ids: string[];
   last_replayable_sequence: string;
   last_continuous_sequence: string | null;
+  gap_detected_at: Date;
 }
 
 function mapGeneration(row: GenerationRow): BusinessEventGeneration {
@@ -1215,6 +1355,7 @@ function mapRotation(row: ContinuityRow): RotationResult {
     affectedSourceIds: row.affected_source_ids,
     lastReplayableSequence: row.last_replayable_sequence,
     lastContinuousSequence: row.last_continuous_sequence,
+    gapDetectedAt: row.gap_detected_at,
   };
 }
 

@@ -20,6 +20,10 @@ import { TaskNotificationStream } from "./notifications.js";
 import { parseFrozenToolCall } from "./tools-call.js";
 import { parseFrozenAvailability } from "./availability.js";
 import { mapFrozenRuntimeError } from "./error-mapper.js";
+import type {
+  BusinessEventNotificationManager,
+  BusinessEventRelationManager,
+} from "../business-events.js";
 
 const developmentAuthorization = createAuthorizationResolver({ mode: "development" });
 
@@ -38,6 +42,9 @@ export class Sep2663ProtocolHandler {
     readonly taskEngine?: TaskEngine,
     readonly resolveAuthorization: AuthorizationResolver = developmentAuthorization,
     notificationStream?: TaskNotificationStream,
+    readonly businessEventManager?: BusinessEventNotificationManager,
+    readonly businessEventDiscovery?: Record<string, unknown>,
+    readonly businessEventRelationManager?: BusinessEventRelationManager,
   ) {
     this.notificationStream =
       notificationStream ??
@@ -52,7 +59,7 @@ export class Sep2663ProtocolHandler {
       let result: Record<string, unknown>;
       switch (request.method) {
         case "server/discover":
-          result = frozenDiscoveryResult(this.serverVersion);
+          result = frozenDiscoveryResult(this.serverVersion, this.businessEventDiscovery);
           break;
         case "tools/list":
           result = {
@@ -86,6 +93,13 @@ export class Sep2663ProtocolHandler {
       validateFrozenHeaders(headers, request);
       if (request.method === "server/discover" || request.method === "tools/list") {
         return this.dispatch(body, headers);
+      }
+      if (request.method === "io.sdar/businessEvents/relatedTasks/list") {
+        if (this.businessEventRelationManager === undefined) {
+          throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
+        }
+        const relation = await this.businessEventRelationManager.list(request, authorization);
+        return { httpStatus: 200, body: { jsonrpc: "2.0", id: request.id, result: relation } };
       }
       if (this.taskEngine === undefined) {
         throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
@@ -168,6 +182,14 @@ export class Sep2663ProtocolHandler {
     try {
       const authorization = this.resolveAuthorization(request);
       const validated = validateFrozenRequest(body);
+      if (validated.method === "io.sdar/businessEvents/listen") {
+        validateFrozenHeaders(request.headers, validated);
+        if (this.businessEventManager === undefined) {
+          throw new FrozenProtocolError(FrozenErrorCode.MethodNotFound, "Method not found", 404);
+        }
+        await this.businessEventManager.listen(validated, response, authorization);
+        return;
+      }
       if (validated.method === "subscriptions/listen") {
         validateFrozenHeaders(request.headers, validated);
         requireTasksCapability(validated);

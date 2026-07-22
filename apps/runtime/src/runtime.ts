@@ -13,6 +13,8 @@ import {
   ProtocolRouter,
   Sep2663ProtocolHandler,
   TaskNotificationStream,
+  BusinessEventNotificationManager,
+  BusinessEventRelationManager,
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
 import {
@@ -31,6 +33,7 @@ import {
   IdempotencyRepository,
   OutboxRepository,
   ProviderOpsDeliveryRepository,
+  BusinessEventRepository,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
@@ -306,6 +309,37 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         );
       }
       const validated = new OperationRegistry().validate(manifest);
+      if (config.BUSINESS_EVENTS_ENABLED && validated.businessEventSources.length === 0) {
+        throw new Error("BUSINESS_EVENTS_ENABLED_REQUIRES_SOURCE");
+      }
+      const businessEventRepository = new BusinessEventRepository(pool);
+      const businessEventManager = config.BUSINESS_EVENTS_ENABLED
+        ? new BusinessEventNotificationManager(validated.providerId, businessEventRepository, {
+            pollIntervalMs: config.BUSINESS_EVENTS_POLL_INTERVAL_MS,
+            replayBatchSize: config.BUSINESS_EVENTS_REPLAY_BATCH_SIZE,
+            maxQueueMessages: config.BUSINESS_EVENTS_MAX_QUEUE_MESSAGES,
+            maxQueueBytes: config.BUSINESS_EVENTS_MAX_QUEUE_BYTES,
+            maxStreamDurationMs: config.BUSINESS_EVENTS_MAX_STREAM_DURATION_MS,
+          })
+        : undefined;
+      const businessEventDiscovery =
+        businessEventManager === undefined
+          ? undefined
+          : await (async () => {
+              await businessEventRepository.initializeProvider(
+                validated.providerId,
+                validated.businessEventSources.map((source) => ({
+                  sourceId: source.sourceId,
+                  sourceStreamId: source.sourceStreamId,
+                  deliverySemantics: source.deliverySemantics,
+                })),
+                config.BUSINESS_EVENTS_RETENTION_MS,
+              );
+              return businessEventManager.discovery(config.BUSINESS_EVENTS_RETENTION_MS);
+            })();
+      const businessEventRelationManager = config.BUSINESS_EVENTS_ENABLED
+        ? new BusinessEventRelationManager(validated.providerId, businessEventRepository)
+        : undefined;
       if (telemetry === undefined) {
         try {
           const security = loadOtlpExporterSecurity(config);
@@ -390,6 +424,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             },
           },
         }),
+        businessEventManager,
+        businessEventDiscovery,
+        businessEventRelationManager,
       );
       mcpRouter = new ProtocolRouter(
         frozenHandler,
