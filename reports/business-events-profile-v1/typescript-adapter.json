@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "component": "adapter-typescript",
+  "claim": "Business Events Adapter Component Conformant",
+  "capabilities": {
+    "durableAtLeastOnce": "passed",
+    "bestEffortLive": "passed"
+  },
+  "evidence": {
+    "name": "source-conformance",
+    "testName": "pnpm exec vitest run tests/business-events/adapter-contract tests/business-events/source tests/business-events/fencing tests/business-events/poison",
+    "status": "pass",
+    "durationMs": 5270,
+    "databaseMode": "local-postgresql",
+    "replicaCount": 2,
+    "sourceDeliveryMode": "durable_and_best_effort",
+    "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
+    "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",
+    "ciRun": "local",
+    "exitCode": 0
+  }
+}

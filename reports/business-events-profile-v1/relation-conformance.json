@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "component": "capacity",
+  "component": "relation-conformance",
   "evidence": [
     {
-      "name": "capacity",
-      "testName": "pnpm exec vitest run tests/business-events/capacity",
+      "name": "relation-conformance",
+      "testName": "pnpm exec vitest run tests/business-events/relation",
       "status": "pass",
-      "durationMs": 1857,
+      "durationMs": 2699,
       "databaseMode": "local-postgresql",
       "replicaCount": 2,
       "sourceDeliveryMode": "mixed",

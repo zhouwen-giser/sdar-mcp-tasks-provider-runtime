@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "component": "capacity",
+  "component": "security",
   "evidence": [
     {
-      "name": "capacity",
-      "testName": "pnpm exec vitest run tests/business-events/capacity",
+      "name": "security",
+      "testName": "pnpm exec vitest run tests/business-events/security",
       "status": "pass",
-      "durationMs": 1857,
+      "durationMs": 2003,
       "databaseMode": "local-postgresql",
       "replicaCount": 2,
       "sourceDeliveryMode": "mixed",

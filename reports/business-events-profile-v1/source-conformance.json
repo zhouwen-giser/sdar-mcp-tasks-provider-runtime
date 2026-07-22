@@ -1,15 +1,15 @@
 {
   "schemaVersion": 1,
-  "component": "capacity",
+  "component": "source-conformance",
   "evidence": [
     {
-      "name": "capacity",
-      "testName": "pnpm exec vitest run tests/business-events/capacity",
+      "name": "source-conformance",
+      "testName": "pnpm exec vitest run tests/business-events/adapter-contract tests/business-events/source tests/business-events/fencing tests/business-events/poison",
       "status": "pass",
-      "durationMs": 1857,
+      "durationMs": 5270,
       "databaseMode": "local-postgresql",
       "replicaCount": 2,
-      "sourceDeliveryMode": "mixed",
+      "sourceDeliveryMode": "durable_and_best_effort",
       "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
       "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",
       "ciRun": "local",

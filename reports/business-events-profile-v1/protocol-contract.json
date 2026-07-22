@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "component": "capacity",
+  "component": "protocol-contract",
   "evidence": [
     {
-      "name": "capacity",
-      "testName": "pnpm exec vitest run tests/business-events/capacity",
+      "name": "protocol-contract",
+      "testName": "node scripts/protocol/run-business-events-contract-catalog.mjs",
       "status": "pass",
-      "durationMs": 1857,
+      "durationMs": 1750,
       "databaseMode": "local-postgresql",
-      "replicaCount": 2,
+      "replicaCount": 1,
       "sourceDeliveryMode": "mixed",
       "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
       "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",

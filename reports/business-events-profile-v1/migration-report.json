@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "component": "capacity",
+  "component": "migration-report",
   "evidence": [
     {
-      "name": "capacity",
-      "testName": "pnpm exec vitest run tests/business-events/capacity",
+      "name": "migration-report",
+      "testName": "pnpm exec vitest run tests/business-events/migration",
       "status": "pass",
-      "durationMs": 1857,
+      "durationMs": 2622,
       "databaseMode": "local-postgresql",
-      "replicaCount": 2,
+      "replicaCount": 1,
       "sourceDeliveryMode": "mixed",
       "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
       "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",

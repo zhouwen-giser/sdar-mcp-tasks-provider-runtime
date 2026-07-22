@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "component": "capacity",
+  "component": "persistence-report",
   "evidence": [
     {
-      "name": "capacity",
-      "testName": "pnpm exec vitest run tests/business-events/capacity",
+      "name": "persistence-report",
+      "testName": "pnpm exec vitest run tests/business-events/persistence tests/business-events/retention",
       "status": "pass",
-      "durationMs": 1857,
+      "durationMs": 3180,
       "databaseMode": "local-postgresql",
       "replicaCount": 2,
       "sourceDeliveryMode": "mixed",
