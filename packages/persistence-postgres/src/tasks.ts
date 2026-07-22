@@ -2881,7 +2881,6 @@ export class TaskRepository {
       );
       const task = locked.rows[0];
       if (task === undefined) throw new Error("TASK_NOT_FOUND");
-      if (isTerminalState(task.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
       const existing = await client.query<PendingCommandRecordRow>(
         `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
@@ -2902,6 +2901,8 @@ export class TaskRepository {
         await recordCommandResolutionFact(this.pool, taskId, duplicate, "task.command.duplicate");
         return duplicate;
       }
+
+      if (isTerminalState(task.internal_state)) throw new Error("TASK_ALREADY_TERMINAL");
 
       if (
         task.cancel_requested ||
