@@ -1125,6 +1125,24 @@ export class BusinessEventRepository {
     }
   }
 
+  async cleanupExpiredRelationProjections(limit = 256): Promise<number> {
+    if (limit < 1 || limit > 10_000) throw new Error("BUSINESS_EVENT_CLEANUP_LIMIT_INVALID");
+    const result = await this.pool.query(
+      `WITH expired AS (
+         SELECT token_hash FROM provider_business_event_relation_projection
+         WHERE expires_at <= clock_timestamp()
+         ORDER BY expires_at,token_hash
+         LIMIT $1 FOR UPDATE SKIP LOCKED
+       )
+       DELETE FROM provider_business_event_relation_projection projection
+       USING expired
+       WHERE projection.token_hash=expired.token_hash
+       RETURNING projection.token_hash`,
+      [limit],
+    );
+    return result.rowCount ?? 0;
+  }
+
   async relationProjectionPage(
     token: string,
     expected: Pick<ProjectionIdentity, "providerId" | "streamId" | "eventId">,

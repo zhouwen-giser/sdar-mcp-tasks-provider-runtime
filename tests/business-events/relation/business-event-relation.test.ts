@@ -203,6 +203,30 @@ describe("Business Event relation projection", () => {
       ),
     ).rejects.toMatchObject({ data: { reasonCode: "BUSINESS_EVENT_NOT_FOUND" } });
   });
+
+  it("cleans expired tokens and their projection items", async () => {
+    const token = await repository.createRelationProjection(
+      {
+        providerId,
+        streamId,
+        eventId,
+        authorizationScopeHash: authorization.hash,
+        executionMode: authorization.executionMode,
+        simulationId: authorization.simulationId,
+        candidateRelationHash: `sha256:${"a".repeat(64)}`,
+        projectionRelationHash: `sha256:${"b".repeat(64)}`,
+      },
+      taskIds.slice(0, 4),
+      1,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await repository.cleanupExpiredRelationProjections()).toBeGreaterThan(0);
+    const remaining = await harness.pool.query<{ count: string }>(
+      "SELECT count(*) FROM provider_business_event_relation_projection_item WHERE token_hash=$1",
+      [createHash("sha256").update(token).digest("hex")],
+    );
+    expect(remaining.rows[0]?.count).toBe("0");
+  });
 });
 
 function request(page: {
