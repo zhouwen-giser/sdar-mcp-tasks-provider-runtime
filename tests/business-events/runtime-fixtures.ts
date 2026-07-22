@@ -28,6 +28,18 @@ export function sourceFact(
   };
 }
 
+export function taskSourceFact(
+  sourceStreamId: string,
+  sourceSequence: string,
+  externalExecutionId: string,
+): BusinessEventSourceFact {
+  const fact = sourceFact(sourceStreamId, sourceSequence);
+  delete fact.resourceRef;
+  fact.scope = "task";
+  fact.externalExecutionId = externalExecutionId;
+  return fact;
+}
+
 export async function requireLease(
   repository: BusinessEventRepository,
   providerId: string,

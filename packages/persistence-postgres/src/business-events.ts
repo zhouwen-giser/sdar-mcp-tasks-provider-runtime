@@ -718,6 +718,15 @@ export class BusinessEventRepository {
       );
       const current = runtime.rows[0];
       if (current === undefined) throw new Error("BUSINESS_EVENT_NOT_FOUND");
+      const serializedRetry = await client.query<ContinuityRow>(
+        `SELECT * FROM provider_business_event_continuity_record
+         WHERE provider_id=$1 AND continuity_reason_identity=$2 ORDER BY created_at LIMIT 1`,
+        [providerId, continuityReasonIdentity],
+      );
+      if (serializedRetry.rows[0] !== undefined) {
+        await client.query("COMMIT");
+        return mapRotation(serializedRetry.rows[0]);
+      }
       const generation = await client.query<GenerationRow>(
         `SELECT * FROM provider_business_event_stream_generation
          WHERE provider_id=$1 AND stream_id=$2 FOR UPDATE`,
@@ -731,6 +740,13 @@ export class BusinessEventRepository {
         previous.stream_id,
       );
       const roster = replacementRoster ?? currentRoster;
+      if (
+        roster.length < 1 ||
+        roster.length > 16 ||
+        new Set(roster.map((source) => source.sourceId)).size !== roster.length
+      ) {
+        throw new Error("BUSINESS_EVENT_SOURCE_COUNT_INVALID");
+      }
       const normalizedAffectedSourceIds = [
         ...new Set(
           affectedSourceIds.length === 0
@@ -741,6 +757,19 @@ export class BusinessEventRepository {
       if (normalizedAffectedSourceIds.length === 0) {
         throw new Error("BUSINESS_EVENT_ROTATION_SOURCE_REQUIRED");
       }
+      await client.query(
+        `SELECT source_id FROM adapter_business_event_source_state
+         WHERE provider_id=$1 AND source_id=ANY($2::text[])
+         ORDER BY source_id FOR UPDATE`,
+        [providerId, normalizedAffectedSourceIds],
+      );
+      await client.query(
+        `SELECT inbox_id FROM adapter_business_event_inbox
+         WHERE provider_id=$1 AND source_id=ANY($2::text[])
+           AND status IN ('continuity_loss_pending','rejected','mapping_failed')
+         ORDER BY source_id,normalized_source_sequence NULLS FIRST,inbox_id FOR UPDATE`,
+        [providerId, normalizedAffectedSourceIds],
+      );
       const newStreamId = randomUUID();
       await client.query(
         `INSERT INTO provider_business_event_stream_generation
@@ -751,6 +780,12 @@ export class BusinessEventRepository {
       const lastReplayable = previous.current_sequence;
       const lastContinuous =
         previous.continuity_class === "all_durable" ? previous.current_sequence : null;
+      await client.query(
+        `UPDATE provider_business_event_generation_source
+         SET left_at_runtime_sequence=$3
+         WHERE provider_id=$1 AND runtime_stream_id=$2 AND left_at_runtime_sequence IS NULL`,
+        [providerId, previous.stream_id, lastReplayable],
+      );
       await client.query(
         `UPDATE provider_business_event_stream_generation
          SET status='replayable_closed',closed_at=clock_timestamp(),rotated_to_stream_id=$3,
@@ -772,6 +807,13 @@ export class BusinessEventRepository {
         `UPDATE provider_business_event_stream_generation SET status='current'
          WHERE provider_id=$1 AND stream_id=$2`,
         [providerId, newStreamId],
+      );
+      const rosterSourceIds = roster.map((source) => source.sourceId);
+      await client.query(
+        `UPDATE adapter_business_event_source_state
+         SET status='disabled',lease_owner=NULL,lease_until=NULL,updated_at=clock_timestamp()
+         WHERE provider_id=$1 AND NOT (source_id=ANY($2::text[]))`,
+        [providerId, rosterSourceIds],
       );
       for (const source of [...roster].sort((left, right) =>
         compareText(left.sourceId, right.sourceId),
@@ -796,9 +838,7 @@ export class BusinessEventRepository {
            ON CONFLICT (provider_id,source_id) DO UPDATE
              SET source_stream_id=EXCLUDED.source_stream_id,
                  delivery_semantics=EXCLUDED.delivery_semantics,
-                 status=CASE
-                   WHEN adapter_business_event_source_state.source_stream_id=EXCLUDED.source_stream_id
-                   THEN adapter_business_event_source_state.status ELSE 'active' END,
+                 status='active',
                  lease_owner=NULL,lease_until=NULL,
                  last_persisted_source_sequence=CASE
                    WHEN adapter_business_event_source_state.source_stream_id=EXCLUDED.source_stream_id

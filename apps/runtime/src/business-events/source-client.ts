@@ -124,6 +124,17 @@ export class AdapterBusinessEventSourceClient {
         this.options.sourceId,
         this.#eventRetentionMs,
       );
+    } else if (
+      prepared === "terminal" &&
+      this.options.deliverySemantics === "durable_at_least_once"
+    ) {
+      await this.repository.rotateStream(
+        this.options.providerId,
+        "SOURCE_MAPPING_FAILED",
+        [this.options.sourceId],
+        `${this.options.sourceStreamId}:mapping:${fact.sourceSequence}`,
+        this.#generationRetentionMs,
+      );
     }
   }
 }
