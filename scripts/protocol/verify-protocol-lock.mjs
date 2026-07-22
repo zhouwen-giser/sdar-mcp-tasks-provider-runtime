@@ -6,12 +6,24 @@ import process from "node:process";
 const protocolRoot = resolve("protocol");
 const lockPath = resolve(protocolRoot, "protocol-baseline.lock.json");
 const write = process.argv.includes("--write");
-const files = collect(protocolRoot)
-  .filter((path) => path !== lockPath)
-  .map((path) => {
-    const bytes = readFileSync(path);
+const externalFiles = [
+  "proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto",
+  "packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_pb.js",
+  "packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_pb.d.ts",
+  "packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_grpc_pb.js",
+  "packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_grpc_pb.d.ts",
+];
+const tracked = [
+  ...collect(protocolRoot)
+    .filter((path) => path !== lockPath)
+    .map((source) => ({ source, path: relative(protocolRoot, source).split(sep).join("/") })),
+  ...externalFiles.map((path) => ({ source: resolve(path), path: `../${path}` })),
+];
+const files = tracked
+  .map(({ source, path }) => {
+    const bytes = readFileSync(source);
     return {
-      path: relative(protocolRoot, path).split(sep).join("/"),
+      path,
       sha256: createHash("sha256").update(bytes).digest("hex"),
       sizeBytes: bytes.length,
     };

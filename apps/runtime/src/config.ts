@@ -46,6 +46,68 @@ const EnvironmentSchema = z
     ADAPTER_RPC_TIMEOUT_MS: z.coerce.number().int().positive().max(60_000).default(5_000),
     AUTH_MODE: z.enum(["development", "trusted_headers", "jwt_hs256"]).default("development"),
     MCP_LEGACY_ENDPOINT_ENABLED: BooleanEnvironmentSchema.default(false),
+    BUSINESS_EVENTS_ENABLED: BooleanEnvironmentSchema.default(false),
+    BUSINESS_EVENTS_REQUIRED_FOR_RUNTIME_READY: BooleanEnvironmentSchema.default(false),
+    BUSINESS_EVENTS_RETENTION_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(7_776_000_000)
+      .default(604_800_000),
+    BUSINESS_EVENTS_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(10_000).default(500),
+    BUSINESS_EVENTS_MAX_SUBSCRIPTIONS: z.coerce.number().int().min(1).max(10_000).default(256),
+    BUSINESS_EVENTS_MAX_SUBSCRIPTIONS_PER_AUTH: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(1_000)
+      .default(32),
+    BUSINESS_EVENTS_MAX_QUEUE_MESSAGES: z.coerce.number().int().min(1).max(1_024).default(64),
+    BUSINESS_EVENTS_MAX_QUEUE_BYTES: z.coerce
+      .number()
+      .int()
+      .min(4_096)
+      .max(16_777_216)
+      .default(1_048_576),
+    BUSINESS_EVENTS_REPLAY_BATCH_SIZE: z.coerce.number().int().min(1).max(1_000).default(256),
+    BUSINESS_EVENTS_MAX_STREAM_DURATION_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(86_400_000)
+      .default(3_600_000),
+    BUSINESS_EVENTS_MAX_EVENT_BYTES: z.coerce
+      .number()
+      .int()
+      .min(1_024)
+      .max(1_048_576)
+      .default(65_536),
+    BUSINESS_EVENTS_MAX_PAYLOAD_DEPTH: z.coerce.number().int().min(1).max(64).default(16),
+    BUSINESS_EVENTS_MAX_PAYLOAD_NODES: z.coerce.number().int().min(16).max(100_000).default(4_096),
+    BUSINESS_EVENTS_MAX_PAYLOAD_STRING_BYTES: z.coerce
+      .number()
+      .int()
+      .min(64)
+      .max(1_048_576)
+      .default(16_384),
+    BUSINESS_EVENT_MAPPING_DEADLINE_MS: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(300_000)
+      .default(60_000),
+    BUSINESS_EVENT_MAX_FUTURE_SKEW_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3_600_000)
+      .default(300_000),
+    BUSINESS_EVENT_CLOCK_SKEW_SAFETY_MS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(3_600_000)
+      .default(300_000),
     TASK_NOTIFICATION_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(10_000).default(500),
     TASK_NOTIFICATION_MAX_SUBSCRIPTIONS: z.coerce.number().int().min(1).max(10_000).default(256),
     TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH: z.coerce

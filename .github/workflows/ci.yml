@@ -65,6 +65,7 @@ jobs:
             reports/protocol-v1-conformance/*
             reports/protocol-v1-migration/*.json
             reports/sbom/*.json
+            reports/business-events-profile-v1/**
           if-no-files-found: warn
 
   runtime-compose:
@@ -78,5 +79,8 @@ jobs:
       - run: docker compose --profile python-adapter build adapter-python
       - run: docker compose up --detach --wait --wait-timeout 120
       - run: curl --fail --silent --show-error http://127.0.0.1:8080/health/ready
+      - run: docker compose down --volumes
+      - run: docker compose --profile business-events up --detach --wait --wait-timeout 120 runtime-business-events
+      - run: curl --fail --silent --show-error http://127.0.0.1:8081/health/ready
       - if: always()
         run: docker compose down --volumes

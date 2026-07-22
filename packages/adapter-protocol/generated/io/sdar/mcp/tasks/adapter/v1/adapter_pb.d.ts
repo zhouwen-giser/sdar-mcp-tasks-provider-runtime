@@ -222,6 +222,10 @@ export class ProviderManifest extends jspb.Message {
     getOperationsList(): Array<OperationDefinition>;
     setOperationsList(value: Array<OperationDefinition>): ProviderManifest;
     addOperations(value?: OperationDefinition, index?: number): OperationDefinition;
+    clearBusinessEventSourcesList(): void;
+    getBusinessEventSourcesList(): Array<BusinessEventSourceCapability>;
+    setBusinessEventSourcesList(value: Array<BusinessEventSourceCapability>): ProviderManifest;
+    addBusinessEventSources(value?: BusinessEventSourceCapability, index?: number): BusinessEventSourceCapability;
 
     serializeBinary(): Uint8Array;
     toObject(includeInstance?: boolean): ProviderManifest.AsObject;
@@ -241,6 +245,151 @@ export namespace ProviderManifest {
         providerVersion: string,
         inventoryMode: InventoryMode,
         operationsList: Array<OperationDefinition.AsObject>,
+        businessEventSourcesList: Array<BusinessEventSourceCapability.AsObject>,
+    }
+}
+
+export class BusinessEventSourceCapability extends jspb.Message {
+    getSourceId(): string;
+    setSourceId(value: string): BusinessEventSourceCapability;
+    getSourceStreamId(): string;
+    setSourceStreamId(value: string): BusinessEventSourceCapability;
+    getDeliverySemantics(): string;
+    setDeliverySemantics(value: string): BusinessEventSourceCapability;
+    getReplaySupported(): boolean;
+    setReplaySupported(value: boolean): BusinessEventSourceCapability;
+    getSourceRetentionMs(): number;
+    setSourceRetentionMs(value: number): BusinessEventSourceCapability;
+    getMaxEventBytes(): number;
+    setMaxEventBytes(value: number): BusinessEventSourceCapability;
+    getMaxPayloadDepth(): number;
+    setMaxPayloadDepth(value: number): BusinessEventSourceCapability;
+    getMaxPayloadNodes(): number;
+    setMaxPayloadNodes(value: number): BusinessEventSourceCapability;
+    getMaxPayloadStringBytes(): number;
+    setMaxPayloadStringBytes(value: number): BusinessEventSourceCapability;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): BusinessEventSourceCapability.AsObject;
+    static toObject(includeInstance: boolean, msg: BusinessEventSourceCapability): BusinessEventSourceCapability.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: BusinessEventSourceCapability, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): BusinessEventSourceCapability;
+    static deserializeBinaryFromReader(message: BusinessEventSourceCapability, reader: jspb.BinaryReader): BusinessEventSourceCapability;
+}
+
+export namespace BusinessEventSourceCapability {
+    export type AsObject = {
+        sourceId: string,
+        sourceStreamId: string,
+        deliverySemantics: string,
+        replaySupported: boolean,
+        sourceRetentionMs: number,
+        maxEventBytes: number,
+        maxPayloadDepth: number,
+        maxPayloadNodes: number,
+        maxPayloadStringBytes: number,
+    }
+}
+
+export class StreamBusinessEventsRequest extends jspb.Message {
+
+    hasMetadata(): boolean;
+    clearMetadata(): void;
+    getMetadata(): RequestMetadata | undefined;
+    setMetadata(value?: RequestMetadata): StreamBusinessEventsRequest;
+    getSourceId(): string;
+    setSourceId(value: string): StreamBusinessEventsRequest;
+    getSourceStreamId(): string;
+    setSourceStreamId(value: string): StreamBusinessEventsRequest;
+
+    hasAfterSourceSequence(): boolean;
+    clearAfterSourceSequence(): void;
+    getAfterSourceSequence(): number | undefined;
+    setAfterSourceSequence(value: number): StreamBusinessEventsRequest;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): StreamBusinessEventsRequest.AsObject;
+    static toObject(includeInstance: boolean, msg: StreamBusinessEventsRequest): StreamBusinessEventsRequest.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: StreamBusinessEventsRequest, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): StreamBusinessEventsRequest;
+    static deserializeBinaryFromReader(message: StreamBusinessEventsRequest, reader: jspb.BinaryReader): StreamBusinessEventsRequest;
+}
+
+export namespace StreamBusinessEventsRequest {
+    export type AsObject = {
+        metadata?: RequestMetadata.AsObject,
+        sourceId: string,
+        sourceStreamId: string,
+        afterSourceSequence?: number,
+    }
+}
+
+export class AdapterBusinessEvent extends jspb.Message {
+    getSourceEventId(): string;
+    setSourceEventId(value: string): AdapterBusinessEvent;
+    getSourceSequence(): number;
+    setSourceSequence(value: number): AdapterBusinessEvent;
+    getSourceStreamId(): string;
+    setSourceStreamId(value: string): AdapterBusinessEvent;
+    getScope(): string;
+    setScope(value: string): AdapterBusinessEvent;
+
+    hasOccurredAt(): boolean;
+    clearOccurredAt(): void;
+    getOccurredAt(): google_protobuf_timestamp_pb.Timestamp | undefined;
+    setOccurredAt(value?: google_protobuf_timestamp_pb.Timestamp): AdapterBusinessEvent;
+    getEventType(): string;
+    setEventType(value: string): AdapterBusinessEvent;
+    getDescription(): string;
+    setDescription(value: string): AdapterBusinessEvent;
+
+    hasExternalExecutionId(): boolean;
+    clearExternalExecutionId(): void;
+    getExternalExecutionId(): string | undefined;
+    setExternalExecutionId(value: string): AdapterBusinessEvent;
+
+    hasResourceRef(): boolean;
+    clearResourceRef(): void;
+    getResourceRef(): string | undefined;
+    setResourceRef(value: string): AdapterBusinessEvent;
+    getSeverityHint(): string;
+    setSeverityHint(value: string): AdapterBusinessEvent;
+    getReasonCode(): string;
+    setReasonCode(value: string): AdapterBusinessEvent;
+
+    hasRawPayload(): boolean;
+    clearRawPayload(): void;
+    getRawPayload(): google_protobuf_struct_pb.Struct | undefined;
+    setRawPayload(value?: google_protobuf_struct_pb.Struct): AdapterBusinessEvent;
+
+    serializeBinary(): Uint8Array;
+    toObject(includeInstance?: boolean): AdapterBusinessEvent.AsObject;
+    static toObject(includeInstance: boolean, msg: AdapterBusinessEvent): AdapterBusinessEvent.AsObject;
+    static extensions: {[key: number]: jspb.ExtensionFieldInfo<jspb.Message>};
+    static extensionsBinary: {[key: number]: jspb.ExtensionFieldBinaryInfo<jspb.Message>};
+    static serializeBinaryToWriter(message: AdapterBusinessEvent, writer: jspb.BinaryWriter): void;
+    static deserializeBinary(bytes: Uint8Array): AdapterBusinessEvent;
+    static deserializeBinaryFromReader(message: AdapterBusinessEvent, reader: jspb.BinaryReader): AdapterBusinessEvent;
+}
+
+export namespace AdapterBusinessEvent {
+    export type AsObject = {
+        sourceEventId: string,
+        sourceSequence: number,
+        sourceStreamId: string,
+        scope: string,
+        occurredAt?: google_protobuf_timestamp_pb.Timestamp.AsObject,
+        eventType: string,
+        description: string,
+        externalExecutionId?: string,
+        resourceRef?: string,
+        severityHint: string,
+        reasonCode: string,
+        rawPayload?: google_protobuf_struct_pb.Struct.AsObject,
     }
 }
 

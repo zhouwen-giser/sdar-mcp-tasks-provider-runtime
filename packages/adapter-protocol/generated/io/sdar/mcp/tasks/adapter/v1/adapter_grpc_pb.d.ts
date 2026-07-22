@@ -20,6 +20,7 @@ interface IResourceProviderAdapterService extends grpc.ServiceDefinition<grpc.Un
     pauseExecution: IResourceProviderAdapterService_IPauseExecution;
     resumeExecution: IResourceProviderAdapterService_IResumeExecution;
     streamExecutionEvents: IResourceProviderAdapterService_IStreamExecutionEvents;
+    streamBusinessEvents: IResourceProviderAdapterService_IStreamBusinessEvents;
     listResources: IResourceProviderAdapterService_IListResources;
 }
 
@@ -113,6 +114,15 @@ interface IResourceProviderAdapterService_IStreamExecutionEvents extends grpc.Me
     responseSerialize: grpc.serialize<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
     responseDeserialize: grpc.deserialize<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
 }
+interface IResourceProviderAdapterService_IStreamBusinessEvents extends grpc.MethodDefinition<io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent> {
+    path: "/io.sdar.mcp.tasks.adapter.v1.ResourceProviderAdapter/StreamBusinessEvents";
+    requestStream: false;
+    responseStream: true;
+    requestSerialize: grpc.serialize<io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest>;
+    requestDeserialize: grpc.deserialize<io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest>;
+    responseSerialize: grpc.serialize<io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
+    responseDeserialize: grpc.deserialize<io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
+}
 interface IResourceProviderAdapterService_IListResources extends grpc.MethodDefinition<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse> {
     path: "/io.sdar.mcp.tasks.adapter.v1.ResourceProviderAdapter/ListResources";
     requestStream: false;
@@ -136,6 +146,7 @@ export interface IResourceProviderAdapterServer extends grpc.UntypedServiceImple
     pauseExecution: grpc.handleUnaryCall<io_sdar_mcp_tasks_adapter_v1_adapter_pb.PauseExecutionRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.CommandAck>;
     resumeExecution: grpc.handleUnaryCall<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ResumeExecutionRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.CommandAck>;
     streamExecutionEvents: grpc.handleServerStreamingCall<io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamExecutionEventsRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
+    streamBusinessEvents: grpc.handleServerStreamingCall<io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
     listResources: grpc.handleUnaryCall<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse>;
 }
 
@@ -169,6 +180,8 @@ export interface IResourceProviderAdapterClient {
     resumeExecution(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ResumeExecutionRequest, metadata: grpc.Metadata, options: Partial<grpc.CallOptions>, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.CommandAck) => void): grpc.ClientUnaryCall;
     streamExecutionEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamExecutionEventsRequest, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
     streamExecutionEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamExecutionEventsRequest, metadata?: grpc.Metadata, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
+    streamBusinessEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
+    streamBusinessEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest, metadata?: grpc.Metadata, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
     listResources(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse) => void): grpc.ClientUnaryCall;
     listResources(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, metadata: grpc.Metadata, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse) => void): grpc.ClientUnaryCall;
     listResources(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, metadata: grpc.Metadata, options: Partial<grpc.CallOptions>, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse) => void): grpc.ClientUnaryCall;
@@ -205,6 +218,8 @@ export class ResourceProviderAdapterClient extends grpc.Client implements IResou
     public resumeExecution(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ResumeExecutionRequest, metadata: grpc.Metadata, options: Partial<grpc.CallOptions>, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.CommandAck) => void): grpc.ClientUnaryCall;
     public streamExecutionEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamExecutionEventsRequest, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
     public streamExecutionEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamExecutionEventsRequest, metadata?: grpc.Metadata, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.ExecutionEvent>;
+    public streamBusinessEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
+    public streamBusinessEvents(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest, metadata?: grpc.Metadata, options?: Partial<grpc.CallOptions>): grpc.ClientReadableStream<io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent>;
     public listResources(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse) => void): grpc.ClientUnaryCall;
     public listResources(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, metadata: grpc.Metadata, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse) => void): grpc.ClientUnaryCall;
     public listResources(request: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesRequest, metadata: grpc.Metadata, options: Partial<grpc.CallOptions>, callback: (error: grpc.ServiceError | null, response: io_sdar_mcp_tasks_adapter_v1_adapter_pb.ListResourcesResponse) => void): grpc.ClientUnaryCall;

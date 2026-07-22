@@ -38,6 +38,7 @@ services:
       ADAPTER_ENDPOINT: adapter-typescript:7001
       ADAPTER_TLS_MODE: disabled
       MCP_LEGACY_ENDPOINT_ENABLED: "false"
+      BUSINESS_EVENTS_ENABLED: "false"
       OUTBOX_PUBLISHED_RETENTION_MS: 86400000
       OTEL_ENABLED: "false"
       PORT: 8080
@@ -70,6 +71,51 @@ services:
       ADAPTER_PORT: 7001
     ports:
       - "7002:7001"
+
+  adapter-business-events:
+    profiles: ["business-events"]
+    build:
+      context: .
+      target: adapter-ts
+    environment:
+      PROVIDER_ID: mock-provider-business-events
+      ADAPTER_PORT: 7001
+      BUSINESS_EVENT_SOURCE_ID: mock.durable
+      BUSINESS_EVENT_SOURCE_STREAM_ID: 018f0d4e-7b3a-7cc1-8d57-2f4d9e2a0001
+    expose:
+      - "7001"
+
+  runtime-business-events:
+    profiles: ["business-events"]
+    build:
+      context: .
+      target: runtime
+    environment:
+      PROVIDER_ID: mock-provider-business-events
+      DATABASE_URL: postgresql://sdar:sdar@postgres:5432/sdar_runtime
+      ADAPTER_ENDPOINT: adapter-business-events:7001
+      ADAPTER_TLS_MODE: disabled
+      BUSINESS_EVENTS_ENABLED: "true"
+      BUSINESS_EVENTS_REQUIRED_FOR_RUNTIME_READY: "false"
+      PORT: 8080
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      adapter-business-events:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health/ready').then(r=>{if(!r.ok)process.exit(1)})",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
 volumes:
   runtime-postgres:

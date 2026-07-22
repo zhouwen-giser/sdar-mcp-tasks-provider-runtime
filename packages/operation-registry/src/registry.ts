@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { Ajv2020 } from "ajv/dist/2020.js";
-import { jsonToProtoStruct, protoStructToJson } from "../../adapter-protocol/src/index.js";
-import type { OperationDefinition, ProviderManifest } from "../../adapter-protocol/src/index.js";
+import {
+  jsonToProtoStruct,
+  protoStructToJson,
+  validateBusinessEventSourceCapability,
+} from "../../adapter-protocol/src/index.js";
+import type {
+  BusinessEventSourceCapability,
+  OperationDefinition,
+  ProviderManifest,
+} from "../../adapter-protocol/src/index.js";
 import { AdapterContractError, InvalidParamsError } from "../../domain/src/index.js";
 
 const OPERATION_NAME = /^[A-Za-z0-9][A-Za-z0-9_./-]{0,63}$/;
@@ -44,6 +52,7 @@ export interface ValidatedManifest {
   providerType: string;
   manifestHash: string;
   operations: ValidatedOperation[];
+  businessEventSources: BusinessEventSourceCapability[];
 }
 
 function canonicalize(value: unknown): string {
@@ -113,6 +122,18 @@ export class OperationRegistry {
     }
 
     const names = new Set<string>();
+    const sourceIds = new Set<string>();
+    const businessEventSources = [...(manifest.businessEventSources ?? [])]
+      .sort((left, right) =>
+        left.sourceId < right.sourceId ? -1 : left.sourceId > right.sourceId ? 1 : 0,
+      )
+      .map((source) => {
+        validateBusinessEventSourceCapability(source);
+        if (sourceIds.has(source.sourceId)) throw new Error("DUPLICATE_BUSINESS_EVENT_SOURCE_ID");
+        sourceIds.add(source.sourceId);
+        return source;
+      });
+    if (businessEventSources.length > 16) throw new Error("INVALID_BUSINESS_EVENT_SOURCE_COUNT");
     const normalized = manifest.operations.map((operation) => {
       if (!OPERATION_NAME.test(operation.name)) throw new Error("INVALID_OPERATION_NAME");
       if (names.has(operation.name)) throw new Error("DUPLICATE_OPERATION_NAME");
@@ -143,6 +164,7 @@ export class OperationRegistry {
         void validateOutput;
         return operation;
       }),
+      ...(businessEventSources.length === 0 ? {} : { businessEventSources }),
     };
     const manifestHash = createHash("sha256")
       .update(canonicalize(manifestDefinition))
@@ -193,6 +215,7 @@ export class OperationRegistry {
       providerVersion: manifest.providerVersion,
       manifestHash,
       operations,
+      businessEventSources,
     };
   }
 

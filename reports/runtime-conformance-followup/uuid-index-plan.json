@@ -15,7 +15,7 @@
   "taskInputRequest": {
     "planNode": "Bitmap Heap Scan",
     "indexName": "task_input_request_pkey",
-    "executionTimeMs": 0.193,
+    "executionTimeMs": 0.209,
     "sharedHitBlocks": 9,
     "sharedReadBlocks": 0
   }

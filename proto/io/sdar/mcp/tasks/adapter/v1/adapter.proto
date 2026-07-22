@@ -17,6 +17,7 @@ service ResourceProviderAdapter {
   rpc PauseExecution(PauseExecutionRequest) returns (CommandAck);
   rpc ResumeExecution(ResumeExecutionRequest) returns (CommandAck);
   rpc StreamExecutionEvents(StreamExecutionEventsRequest) returns (stream ExecutionEvent);
+  rpc StreamBusinessEvents(StreamBusinessEventsRequest) returns (stream AdapterBusinessEvent);
   rpc ListResources(ListResourcesRequest) returns (ListResourcesResponse);
 }
 
@@ -151,6 +152,41 @@ message ProviderManifest {
   string provider_version = 4;
   InventoryMode inventory_mode = 5;
   repeated OperationDefinition operations = 6;
+  repeated BusinessEventSourceCapability business_event_sources = 7;
+}
+
+message BusinessEventSourceCapability {
+  string source_id = 1;
+  string source_stream_id = 2;
+  string delivery_semantics = 3;
+  bool replay_supported = 4;
+  uint64 source_retention_ms = 5;
+  uint64 max_event_bytes = 6;
+  uint32 max_payload_depth = 7;
+  uint32 max_payload_nodes = 8;
+  uint64 max_payload_string_bytes = 9;
+}
+
+message StreamBusinessEventsRequest {
+  RequestMetadata metadata = 1;
+  string source_id = 2;
+  string source_stream_id = 3;
+  optional uint64 after_source_sequence = 4;
+}
+
+message AdapterBusinessEvent {
+  string source_event_id = 1;
+  uint64 source_sequence = 2;
+  string source_stream_id = 3;
+  string scope = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+  string event_type = 6;
+  string description = 7;
+  optional string external_execution_id = 8;
+  optional string resource_ref = 9;
+  string severity_hint = 10;
+  string reason_code = 11;
+  google.protobuf.Struct raw_payload = 12;
 }
 
 message TaskStart {

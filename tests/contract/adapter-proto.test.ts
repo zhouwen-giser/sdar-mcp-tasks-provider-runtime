@@ -20,6 +20,7 @@ describe("Adapter Protocol v1", () => {
         "RequestCancel",
         "ResumeExecution",
         "StartOperation",
+        "StreamBusinessEvents",
         "StreamExecutionEvents",
         "UpdateExecution",
       ].sort(),

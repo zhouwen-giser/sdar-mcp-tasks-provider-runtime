@@ -13,6 +13,8 @@ import {
   ProtocolRouter,
   Sep2663ProtocolHandler,
   TaskNotificationStream,
+  BusinessEventNotificationManager,
+  BusinessEventRelationManager,
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
 import {
@@ -31,6 +33,7 @@ import {
   IdempotencyRepository,
   OutboxRepository,
   ProviderOpsDeliveryRepository,
+  BusinessEventRepository,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
@@ -49,6 +52,7 @@ import {
 import type { RuntimeConfig } from "./config.js";
 import { BoundedRateLimiter } from "./rate-limiter.js";
 import { AdapterManifestWatcher } from "./manifest-watcher.js";
+import { AdapterBusinessEventSourceClient } from "./business-events/source-client.js";
 
 function createHttpServer(logger: RuntimeLogger, bodyLimit: number) {
   return Fastify({ loggerInstance: logger, bodyLimit });
@@ -67,7 +71,17 @@ export interface RuntimeDependencies {
   outboxPublisher: "starting" | "ready" | "failed";
   outboxCleaner: "starting" | "ready" | "failed";
   providerTelemetryIngress: "starting" | "ready" | "failed";
+  businessEventPersistence: BusinessEventReadinessStatus;
+  businessEventReplay: BusinessEventReadinessStatus;
+  businessEventIngest: BusinessEventReadinessStatus;
+  businessEventFinalizer: BusinessEventReadinessStatus;
+  businessEventAdapterSources: Record<string, BusinessEventReadinessStatus>;
+  businessEventRetention: BusinessEventReadinessStatus;
+  businessEventProjection: BusinessEventReadinessStatus;
 }
+
+export type BusinessEventReadinessStatus =
+  "disabled" | "starting" | "ready" | "degraded" | "failed";
 
 export interface RuntimeApplication {
   app: RuntimeHttpServer;
@@ -138,6 +152,13 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     outboxPublisher: "starting",
     outboxCleaner: "starting",
     providerTelemetryIngress: config.PROVIDER_TELEMETRY_INGRESS_ENABLED ? "starting" : "ready",
+    businessEventPersistence: config.BUSINESS_EVENTS_ENABLED ? "starting" : "disabled",
+    businessEventReplay: config.BUSINESS_EVENTS_ENABLED ? "starting" : "disabled",
+    businessEventIngest: config.BUSINESS_EVENTS_ENABLED ? "starting" : "disabled",
+    businessEventFinalizer: config.BUSINESS_EVENTS_ENABLED ? "starting" : "disabled",
+    businessEventAdapterSources: {},
+    businessEventRetention: config.BUSINESS_EVENTS_ENABLED ? "starting" : "disabled",
+    businessEventProjection: config.BUSINESS_EVENTS_ENABLED ? "starting" : "disabled",
   };
   let manifest: ProviderManifest | undefined;
   let mcpRouter: ProtocolRouter | undefined;
@@ -150,6 +171,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   let adapterManifestTimer: NodeJS.Timeout | undefined;
   let outboxPublisherTimer: NodeJS.Timeout | undefined;
   let providerOpsPublisherTimer: NodeJS.Timeout | undefined;
+  const businessEventRetryTimers = new Set<NodeJS.Timeout>();
+  let businessEventWorkersStopping = false;
   let schedulerTicking = false;
   let recoveryTicking = false;
   let commandDispatcherTicking = false;
@@ -185,7 +208,31 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         dependencies.database = "failed";
       }
     }
-    const ready = Object.values(dependencies).every((status) => status === "ready");
+    const coreStatuses = [
+      dependencies.database,
+      dependencies.adapter,
+      dependencies.adapterManifest,
+      dependencies.recovery,
+      dependencies.scheduler,
+      dependencies.commandDispatcher,
+      dependencies.ttlCleaner,
+      dependencies.outboxPublisher,
+      dependencies.outboxCleaner,
+      dependencies.providerTelemetryIngress,
+    ];
+    const businessEventStatuses = [
+      dependencies.businessEventPersistence,
+      dependencies.businessEventReplay,
+      dependencies.businessEventIngest,
+      dependencies.businessEventFinalizer,
+      dependencies.businessEventRetention,
+      dependencies.businessEventProjection,
+      ...Object.values(dependencies.businessEventAdapterSources),
+    ];
+    const ready =
+      coreStatuses.every((status) => status === "ready") &&
+      (!config.BUSINESS_EVENTS_REQUIRED_FOR_RUNTIME_READY ||
+        businessEventStatuses.every((status) => status === "ready"));
     return reply
       .code(ready ? 200 : 503)
       .send({ status: ready ? "ready" : "not_ready", dependencies });
@@ -282,6 +329,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     if (adapterManifestTimer !== undefined) clearInterval(adapterManifestTimer);
     if (outboxPublisherTimer !== undefined) clearInterval(outboxPublisherTimer);
     if (providerOpsPublisherTimer !== undefined) clearInterval(providerOpsPublisherTimer);
+    businessEventWorkersStopping = true;
+    for (const timer of businessEventRetryTimers) clearTimeout(timer);
+    businessEventRetryTimers.clear();
     gateway.close();
     await providerTelemetryServer?.close();
     await telemetry?.shutdown();
@@ -306,6 +356,126 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
         );
       }
       const validated = new OperationRegistry().validate(manifest);
+      if (config.BUSINESS_EVENTS_ENABLED && validated.businessEventSources.length === 0) {
+        throw new Error("BUSINESS_EVENTS_ENABLED_REQUIRES_SOURCE");
+      }
+      if (config.BUSINESS_EVENTS_ENABLED) {
+        for (const source of validated.businessEventSources) {
+          if (
+            BigInt(source.maxEventBytes) > BigInt(config.BUSINESS_EVENTS_MAX_EVENT_BYTES) ||
+            source.maxPayloadDepth > config.BUSINESS_EVENTS_MAX_PAYLOAD_DEPTH ||
+            source.maxPayloadNodes > config.BUSINESS_EVENTS_MAX_PAYLOAD_NODES ||
+            BigInt(source.maxPayloadStringBytes) >
+              BigInt(config.BUSINESS_EVENTS_MAX_PAYLOAD_STRING_BYTES)
+          ) {
+            throw new Error("BUSINESS_EVENT_SOURCE_LIMIT_EXCEEDS_RUNTIME");
+          }
+          if (
+            source.deliverySemantics === "durable_at_least_once" &&
+            BigInt(source.sourceRetentionMs) <
+              BigInt(
+                config.BUSINESS_EVENT_MAPPING_DEADLINE_MS +
+                  config.BUSINESS_EVENT_MAX_FUTURE_SKEW_MS +
+                  config.BUSINESS_EVENT_CLOCK_SKEW_SAFETY_MS,
+              )
+          ) {
+            throw new Error("BUSINESS_EVENT_SOURCE_RETENTION_INSUFFICIENT");
+          }
+          dependencies.businessEventAdapterSources[source.sourceId] = "starting";
+        }
+      }
+      const businessEventRepository = new BusinessEventRepository(pool);
+      const businessEventMetrics = {
+        increment: (name: string, labels: Record<string, string> = {}, amount = 1) =>
+          metrics.increment(name, labels, amount),
+        gauge: (name: string, value: number, labels: Record<string, string> = {}) => {
+          telemetrySelfGauges[prometheusMetricKey(name, labels)] = value;
+        },
+      };
+      const businessEventManager = config.BUSINESS_EVENTS_ENABLED
+        ? new BusinessEventNotificationManager(validated.providerId, businessEventRepository, {
+            pollIntervalMs: config.BUSINESS_EVENTS_POLL_INTERVAL_MS,
+            replayBatchSize: config.BUSINESS_EVENTS_REPLAY_BATCH_SIZE,
+            maxQueueMessages: config.BUSINESS_EVENTS_MAX_QUEUE_MESSAGES,
+            maxQueueBytes: config.BUSINESS_EVENTS_MAX_QUEUE_BYTES,
+            maxStreamDurationMs: config.BUSINESS_EVENTS_MAX_STREAM_DURATION_MS,
+            maxSubscriptions: config.BUSINESS_EVENTS_MAX_SUBSCRIPTIONS,
+            maxSubscriptionsPerAuth: config.BUSINESS_EVENTS_MAX_SUBSCRIPTIONS_PER_AUTH,
+            metrics: businessEventMetrics,
+          })
+        : undefined;
+      const businessEventDiscovery =
+        businessEventManager === undefined
+          ? undefined
+          : await (async () => {
+              await businessEventRepository.initializeProvider(
+                validated.providerId,
+                validated.businessEventSources.map((source) => ({
+                  sourceId: source.sourceId,
+                  sourceStreamId: source.sourceStreamId,
+                  deliverySemantics: source.deliverySemantics,
+                })),
+                config.BUSINESS_EVENTS_RETENTION_MS,
+              );
+              dependencies.businessEventPersistence = "ready";
+              dependencies.businessEventReplay = "ready";
+              dependencies.businessEventIngest = "ready";
+              dependencies.businessEventFinalizer = "ready";
+              dependencies.businessEventRetention = "ready";
+              dependencies.businessEventProjection = "ready";
+              return businessEventManager.discovery(config.BUSINESS_EVENTS_RETENTION_MS);
+            })();
+      const businessEventRelationManager = config.BUSINESS_EVENTS_ENABLED
+        ? new BusinessEventRelationManager(
+            validated.providerId,
+            businessEventRepository,
+            300_000,
+            businessEventMetrics,
+          )
+        : undefined;
+      if (config.BUSINESS_EVENTS_ENABLED) {
+        for (const source of validated.businessEventSources) {
+          const worker = new AdapterBusinessEventSourceClient(businessEventRepository, gateway, {
+            providerId: validated.providerId,
+            sourceId: source.sourceId,
+            sourceStreamId: source.sourceStreamId,
+            deliverySemantics: source.deliverySemantics,
+            replicaId: telemetryInstanceId,
+            inboxRetentionMs: config.BUSINESS_EVENTS_RETENTION_MS,
+            eventRetentionMs: config.BUSINESS_EVENTS_RETENTION_MS,
+            generationRetentionMs: config.BUSINESS_EVENTS_RETENTION_MS,
+            mappingDeadlineMs: config.BUSINESS_EVENT_MAPPING_DEADLINE_MS,
+            metrics: businessEventMetrics,
+          });
+          const run = async (): Promise<void> => {
+            if (businessEventWorkersStopping) return;
+            dependencies.businessEventAdapterSources[source.sourceId] = "ready";
+            try {
+              const outcome = await worker.runOnce();
+              if (outcome === "degraded") {
+                dependencies.businessEventAdapterSources[source.sourceId] = "degraded";
+              }
+            } catch {
+              dependencies.businessEventAdapterSources[source.sourceId] = "degraded";
+              metrics.increment("sdar_business_event_source_blocked_total", {
+                sourceId: source.sourceId,
+                reason: "worker_failure",
+              });
+            }
+            // The close hook mutates this flag asynchronously while the stream is awaited.
+            // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+            if (!businessEventWorkersStopping) {
+              const timer = setTimeout(() => {
+                businessEventRetryTimers.delete(timer);
+                void run();
+              }, config.BUSINESS_EVENTS_POLL_INTERVAL_MS);
+              timer.unref();
+              businessEventRetryTimers.add(timer);
+            }
+          };
+          void run();
+        }
+      }
       if (telemetry === undefined) {
         try {
           const security = loadOtlpExporterSecurity(config);
@@ -390,6 +560,9 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             },
           },
         }),
+        businessEventManager,
+        businessEventDiscovery,
+        businessEventRelationManager,
       );
       mcpRouter = new ProtocolRouter(
         frozenHandler,

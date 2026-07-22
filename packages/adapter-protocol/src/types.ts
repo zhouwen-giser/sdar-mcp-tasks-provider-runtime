@@ -39,6 +39,42 @@ export interface ProviderManifest {
   providerVersion: string;
   inventoryMode: "RUNTIME_VISIBLE" | "OPAQUE";
   operations: OperationDefinition[];
+  businessEventSources?: BusinessEventSourceCapability[];
+}
+
+export type BusinessEventDeliverySemantics = "durable_at_least_once" | "best_effort_live";
+
+export interface BusinessEventSourceCapability {
+  sourceId: string;
+  sourceStreamId: string;
+  deliverySemantics: BusinessEventDeliverySemantics;
+  replaySupported: boolean;
+  sourceRetentionMs: string;
+  maxEventBytes: string;
+  maxPayloadDepth: number;
+  maxPayloadNodes: number;
+  maxPayloadStringBytes: string;
+}
+
+export interface StreamBusinessEventsRequest {
+  sourceId: string;
+  sourceStreamId: string;
+  afterSourceSequence?: string;
+}
+
+export interface AdapterBusinessEvent {
+  sourceEventId: string;
+  sourceSequence: string;
+  sourceStreamId: string;
+  scope: "task" | "resource";
+  occurredAt: { seconds?: string; nanos?: number };
+  eventType: string;
+  description: string;
+  externalExecutionId?: string;
+  resourceRef?: string;
+  severityHint: "" | "info" | "warning" | "critical";
+  reasonCode: string;
+  rawPayload?: unknown;
 }
 
 export interface ExecutionSnapshot {

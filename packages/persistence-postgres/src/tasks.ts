@@ -565,6 +565,7 @@ export class TaskRepository {
           input.reservationRef,
         ],
       );
+      await materializeTaskResourceBinding(client, input);
       await insertObservation(client, input.taskId, 1, input.transition, {
         source: "adapter",
         adapterRevision: input.adapterRevision,
@@ -635,6 +636,7 @@ export class TaskRepository {
           input.reservationRef,
         ],
       );
+      await materializeTaskResourceBinding(client, input);
       await initializeTaskRetention(
         client,
         input.taskId,
@@ -3900,6 +3902,18 @@ async function transitionTask(
   );
   const row = updated.rows[0];
   if (row === undefined) throw new Error("TASK_TRANSITION_NOT_RETURNED");
+  if (isTerminalState(row.internal_state)) {
+    await client.query(
+      `UPDATE provider_task_resource_binding
+       SET terminal_at=$2::timestamptz,
+           retain_until=GREATEST(
+             retain_until,
+             $2::timestamptz + (1209960000 * interval '1 millisecond')
+           )
+       WHERE provider_id=$3 AND task_id=$1`,
+      [request.taskId, request.observation.occurredAt, row.provider_id],
+    );
+  }
   const revision = Number(row.observation_revision);
   await client.query(
     `INSERT INTO task_observation
@@ -4648,4 +4662,53 @@ async function initializeTaskRetention(
       acceptedAt,
     ],
   );
+}
+
+async function materializeTaskResourceBinding(
+  client: PoolClient,
+  input: AdmissionIntentInput,
+): Promise<void> {
+  const snapshot = await client.query<{ definition: Record<string, unknown> }>(
+    "SELECT definition FROM operation_snapshot WHERE snapshot_id=$1",
+    [input.operationSnapshotId],
+  );
+  const definition = snapshot.rows[0]?.definition;
+  const binding = definition?.resourceBinding;
+  if (typeof binding !== "object" || binding === null) return;
+  const record = binding as Record<string, unknown>;
+  if (record.mode !== "ARGUMENT_REFERENCE") return;
+  const pointer = record.resourceIdJsonPointer;
+  if (typeof pointer !== "string") throw new Error("BUSINESS_EVENT_RESOURCE_BINDING_INVALID");
+  const resourceRef = resolveJsonPointer(input.arguments, pointer);
+  if (typeof resourceRef !== "string" || !/^[!-~]{1,512}$/.test(resourceRef)) {
+    throw new Error("BUSINESS_EVENT_RESOURCE_BINDING_INVALID");
+  }
+  await client.query(
+    `INSERT INTO provider_task_resource_binding
+       (provider_id, task_id, resource_ref, operation_snapshot_id,
+        authorization_context_hash, execution_mode, simulation_id,
+        bound_at, terminal_at, retain_until)
+     SELECT provider_id, task_id, $2, operation_snapshot_id,
+            authorization_context_hash, execution_mode, simulation_id,
+            accepted_at, terminal_at,
+            COALESCE(terminal_at, accepted_at) + (1209960000 * interval '1 millisecond')
+     FROM provider_task WHERE task_id=$1
+     ON CONFLICT (provider_id, task_id) DO UPDATE
+       SET retain_until=GREATEST(provider_task_resource_binding.retain_until, EXCLUDED.retain_until)`,
+    [input.taskId, resourceRef],
+  );
+}
+
+function resolveJsonPointer(document: unknown, pointer: string): unknown {
+  if (pointer === "") return document;
+  if (!pointer.startsWith("/")) throw new Error("BUSINESS_EVENT_RESOURCE_BINDING_INVALID");
+  let current = document;
+  for (const encoded of pointer.slice(1).split("/")) {
+    const key = encoded.replaceAll("~1", "/").replaceAll("~0", "~");
+    if (typeof current !== "object" || current === null || !Object.hasOwn(current, key)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[key];
+  }
+  return current;
 }

@@ -5,6 +5,7 @@ import { jsonToProtoStruct, jsonToProtoValue } from "./struct.js";
 import { ADAPTER_PROTOCOL_VERSION } from "./types.js";
 import type {
   AvailabilityCheckInput,
+  AdapterBusinessEvent,
   CheckAvailabilityResponse,
   CommandAck,
   ExecutionSnapshot,
@@ -12,6 +13,7 @@ import type {
   ProviderManifest,
   ReconcileExecutionResponse,
   StartOperationResponse,
+  StreamBusinessEventsRequest,
 } from "./types.js";
 
 type UnaryAdapterMethod<T> = (
@@ -31,7 +33,20 @@ type AdapterClient = grpc.Client & {
   updateExecution: UnaryAdapterMethod<CommandAck>;
   pauseExecution: UnaryAdapterMethod<CommandAck>;
   resumeExecution: UnaryAdapterMethod<CommandAck>;
+  streamBusinessEvents: (
+    request: unknown,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+  ) => grpc.ClientReadableStream<AdapterBusinessEvent>;
 };
+
+export const BUSINESS_EVENT_REASON_METADATA = "io.sdar.business-events.reason-code";
+
+export function businessEventReasonFromError(error: grpc.ServiceError): string | undefined {
+  const values = error.metadata.get(BUSINESS_EVENT_REASON_METADATA);
+  const value = values[0];
+  return typeof value === "string" ? value : undefined;
+}
 
 export interface AdapterGatewayOptions {
   endpoint: string;
@@ -98,6 +113,24 @@ export class GrpcAdapterGateway {
     return this.#unary<ProviderManifest>("describeProvider", {
       metadata: this.#metadata(),
     });
+  }
+
+  streamBusinessEvents(
+    request: StreamBusinessEventsRequest,
+  ): grpc.ClientReadableStream<AdapterBusinessEvent> {
+    const metadata = new grpc.Metadata();
+    return this.#client.streamBusinessEvents(
+      {
+        metadata: this.#metadata(),
+        sourceId: request.sourceId,
+        sourceStreamId: request.sourceStreamId,
+        ...(request.afterSourceSequence === undefined
+          ? {}
+          : { afterSourceSequence: request.afterSourceSequence }),
+      },
+      metadata,
+      {},
+    );
   }
 
   getExecution(

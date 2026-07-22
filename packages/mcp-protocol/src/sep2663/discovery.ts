@@ -1,6 +1,9 @@
 import { FROZEN_PROTOCOL_VERSION } from "./request-validator.js";
 
-export function frozenDiscoveryResult(serverVersion: string): Record<string, unknown> {
+export function frozenDiscoveryResult(
+  serverVersion: string,
+  businessEvents?: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     resultType: "complete",
     supportedVersions: [FROZEN_PROTOCOL_VERSION],
@@ -12,6 +15,7 @@ export function frozenDiscoveryResult(serverVersion: string): Record<string, unk
           profileVersion: "1.0",
           taskNotifications: true,
         },
+        ...(businessEvents === undefined ? {} : { "io.sdar/businessEvents": businessEvents }),
       },
     },
     _meta: {
