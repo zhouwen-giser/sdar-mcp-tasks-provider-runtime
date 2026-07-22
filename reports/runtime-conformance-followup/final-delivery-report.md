@@ -9,7 +9,7 @@
 - Protocol version: `2026-07-28`
 - Frozen contract SHA-256: `d33623f33ea2dfbb0ad56868d9911af6c7b37b354a0b17a76798646bded9a845`
 - Implementation commit: `428bab6dc02f811c1a3e079b8c94f3da206ccca0`
-- Report commit: pending report publication
+- Report commit: `8ef06ade2d6712d8946f814f508ea3c8c9ccb489`
 - CI run: pending Draft PR publication
 
 ## Machine-executed evidence

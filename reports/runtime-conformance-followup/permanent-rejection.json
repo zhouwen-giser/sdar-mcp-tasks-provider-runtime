@@ -14,7 +14,7 @@
       "durationMs": 162.282108,
       "databaseMode": "real-postgresql-integration",
       "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
-      "reportCommit": null,
+      "reportCommit": "8ef06ade2d6712d8946f814f508ea3c8c9ccb489",
       "ciRun": null
     }
   ]
