@@ -2,9 +2,94 @@
   "schemaVersion": 1,
   "files": [
     {
+      "path": "business-events-golden/event-id.json",
+      "sha256": "7d8cb292a0c1aa552051146e9d4c2a3ec3482fab1ced74799078d4a1bc357542",
+      "sizeBytes": 228
+    },
+    {
+      "path": "business-events-golden/source-canonical-hash.json",
+      "sha256": "005431fb1cda9f96aed7d5198b90460d96f8d9aaf63421c7a6c3c727ca133962",
+      "sizeBytes": 1144
+    },
+    {
+      "path": "business-events-golden/stored-event-hash.json",
+      "sha256": "1df268d09282d3c689308c385addca1fa2acac0e6a6d91b621bd7144c2197c40",
+      "sizeBytes": 373
+    },
+    {
+      "path": "business-events-golden/timestamp-normalization.json",
+      "sha256": "67c3c1c265f67933b22f1a8cd9c4e27419240ffa6f7e0f9fc62e42ee655cb21d",
+      "sizeBytes": 196
+    },
+    {
       "path": "conformance-cases/cases.json",
       "sha256": "e6dc1c2e0d398ed829e60a143aa393b41f248141332c354c8bbcb5e3470be891",
       "sizeBytes": 12858
+    },
+    {
+      "path": "fixtures/business-events/invalid/invalid-decimal-sequence.json",
+      "sha256": "ade4ede1589142750113c52487e3364eac93bb94047537ca31349760bee2bb8a",
+      "sizeBytes": 481
+    },
+    {
+      "path": "fixtures/business-events/invalid/invalid-headers.json",
+      "sha256": "0b1782dd39c6e40bbaa2bb0f0598b7a3eec1e0ec6bb63660215182401c6b272f",
+      "sizeBytes": 238
+    },
+    {
+      "path": "fixtures/business-events/invalid/invalid-identifier.json",
+      "sha256": "548248bec6ae7b0cc11a6db2a71c5084d46e944faf0a218374eacba11862c68a",
+      "sizeBytes": 580
+    },
+    {
+      "path": "fixtures/business-events/invalid/invalid-scope.json",
+      "sha256": "a4a2e69add2a999d1ee5c6787be898593ed1fc1ce438317e4c5936fc6b7b06b3",
+      "sizeBytes": 694
+    },
+    {
+      "path": "fixtures/business-events/invalid/poison-boundaries.json",
+      "sha256": "924af1c3c4adad410ae4fa6755d9c994435ff7f127ca8846d84968a51ad0759d",
+      "sizeBytes": 476
+    },
+    {
+      "path": "fixtures/business-events/valid/continuity-notification.json",
+      "sha256": "a81b4c30ca8b8fc1883b0cfb7883acc823b52318a586a099ed0cd30ee0bd6ba0",
+      "sizeBytes": 632
+    },
+    {
+      "path": "fixtures/business-events/valid/current-cursor.json",
+      "sha256": "c2b55dcb1d1871b01085abe26c1e28ac139971b389b4d0f59422ca7adb895099",
+      "sizeBytes": 517
+    },
+    {
+      "path": "fixtures/business-events/valid/empty-stream.json",
+      "sha256": "16cad9c8c0185cd53ad7d6a51a21bdbaa04141865e32ef2fe0eb6c7b0bd34c68",
+      "sizeBytes": 688
+    },
+    {
+      "path": "fixtures/business-events/valid/mixed-continuity.json",
+      "sha256": "961e0a1953a3d8164dace44969657172afade6d539dbc2d881ac19f360a8291f",
+      "sizeBytes": 670
+    },
+    {
+      "path": "fixtures/business-events/valid/relation-truncated.json",
+      "sha256": "da58e9e46695107c686faacdb5b540d427d901ecfa0a42463cb9e4dc06430674",
+      "sizeBytes": 388
+    },
+    {
+      "path": "fixtures/business-events/valid/resource-scope.json",
+      "sha256": "a803abfabc2e76360b3c3f3fa93e78eb8f7bf58f8ccaf02cb06f485a8ce1bb55",
+      "sizeBytes": 827
+    },
+    {
+      "path": "fixtures/business-events/valid/rotated-drain.json",
+      "sha256": "41e6a76d0dc099337cf85443fe03ef988b389b31105b419f578398d219a350b0",
+      "sizeBytes": 722
+    },
+    {
+      "path": "fixtures/business-events/valid/task-scope.json",
+      "sha256": "eef8c26500de23e8b5728e44e66c7d83655051cd64b3a6f0fac964d901b73749",
+      "sizeBytes": 720
     },
     {
       "path": "frozen/SDAR_MCP_Tasks_Unified_Protocol_Profile_V1.0.md",
@@ -50,6 +135,21 @@
       "path": "sdar-availability-v1.schema.json",
       "sha256": "6b14556b083e0e1f4bf72eff5fa2a838220baf6d0fc5063b191329a5bad01a9f",
       "sizeBytes": 12385
+    },
+    {
+      "path": "sdar-business-events-continuity-v1.schema.json",
+      "sha256": "f92d0ad364a2f4ec068f99a0501a74a2d38748244ba6a04a85893527263807f0",
+      "sizeBytes": 1857
+    },
+    {
+      "path": "sdar-business-events-relation-v1.schema.json",
+      "sha256": "7e3bbe9d9ac96d10b4ab399cf5c90621a070959c3bdfb092327400c96a216dc4",
+      "sizeBytes": 2119
+    },
+    {
+      "path": "sdar-business-events-v1.schema.json",
+      "sha256": "dceb9ee64e414890813b784880a2d90f710c93faa0c8aaa8b4f2b7d6ba9b7e6f",
+      "sizeBytes": 9635
     },
     {
       "path": "sdar-evidence-v1.schema.json",

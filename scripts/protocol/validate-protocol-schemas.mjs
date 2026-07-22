@@ -7,8 +7,10 @@ const protocolRoot = resolve("protocol");
 const schemaFiles = readdirSync(protocolRoot)
   .filter((filename) => filename.endsWith(".schema.json"))
   .sort();
-if (schemaFiles.length !== 8) {
-  throw new Error(`Expected 8 derived protocol schemas, received ${schemaFiles.length}`);
+if (schemaFiles.length !== 11) {
+  throw new Error(
+    `Expected 11 protocol schemas including Business Events, received ${schemaFiles.length}`,
+  );
 }
 
 const ajv = new Ajv2020({ strict: false, validateFormats: false });
@@ -35,4 +37,6 @@ for (let index = 1; index <= 74; index += 1) {
   if (!caseIds.has(expected)) throw new Error(`Frozen conformance catalog is missing ${expected}`);
 }
 
-process.stdout.write(`Validated ${schemaFiles.length} protocol schemas and 74 conformance cases\n`);
+process.stdout.write(
+  `Validated ${schemaFiles.length} protocol schemas and 74 frozen conformance cases\n`,
+);

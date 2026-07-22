@@ -15,3 +15,4 @@ protocol/frozen/**
 protocol/upstream/**
 protocol/*.schema.json
 protocol/conformance-cases/**
+docs/requirements/SDAR_v1.2.2_Business_Events_Provider_Runtime_Requirements_V0.5.2.md
