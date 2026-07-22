@@ -5,6 +5,10 @@ import {
   jsonToProtoStruct,
   protoStructToJson,
 } from "../../../packages/adapter-protocol/src/index.js";
+import type {
+  AdapterBusinessEvent,
+  BusinessEventSourceCapability,
+} from "../../../packages/adapter-protocol/src/index.js";
 import { JsonFileStore } from "./store.js";
 
 export interface MockAdapterOptions {
@@ -14,6 +18,13 @@ export interface MockAdapterOptions {
   onControlSideEffect?: (taskId: string, command: string) => void;
   statePath?: string;
   startResponseDelayMs?: number;
+  businessEventSources?: BusinessEventSourceCapability[];
+  businessEvents?: Record<string, AdapterBusinessEvent[]>;
+  businessEventTermination?: {
+    sourceId: string;
+    code: grpc.status;
+    reasonCode: string;
+  };
 }
 
 interface MockExecution {
@@ -35,6 +46,12 @@ interface MockExecution {
 
 function notFound(message: string): grpc.ServiceError {
   return Object.assign(new Error(message), { code: grpc.status.NOT_FOUND }) as grpc.ServiceError;
+}
+
+function sourceError(code: grpc.status, reasonCode: string): grpc.ServiceError {
+  const metadata = new grpc.Metadata();
+  metadata.set("io.sdar.business-events.reason-code", reasonCode);
+  return Object.assign(new Error(reasonCode), { code, metadata }) as grpc.ServiceError;
 }
 
 export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.Server {
@@ -127,6 +144,7 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
         providerType: "reference",
         providerVersion,
         inventoryMode: "RUNTIME_VISIBLE",
+        businessEventSources: options.businessEventSources ?? [],
         operations: [
           {
             name: "echo_sync",
@@ -235,6 +253,49 @@ export function createMockAdapterServer(options: MockAdapterOptions = {}): grpc.
           },
         ],
       });
+    },
+    streamBusinessEvents: (
+      call: grpc.ServerWritableStream<
+        {
+          sourceId?: string;
+          sourceStreamId?: string;
+          afterSourceSequence?: string;
+          _afterSourceSequence?: string;
+        },
+        AdapterBusinessEvent
+      >,
+    ) => {
+      const source = (options.businessEventSources ?? []).find(
+        (candidate) => candidate.sourceId === call.request.sourceId,
+      );
+      if (source === undefined) {
+        call.emit("error", sourceError(grpc.status.NOT_FOUND, "SOURCE_NOT_FOUND"));
+        return;
+      }
+      if (source.sourceStreamId !== call.request.sourceStreamId) {
+        call.emit("error", sourceError(grpc.status.FAILED_PRECONDITION, "SOURCE_STREAM_RESET"));
+        return;
+      }
+      const hasCursor = call.request._afterSourceSequence === "afterSourceSequence";
+      if (source.deliverySemantics === "best_effort_live" && hasCursor) {
+        call.emit("error", sourceError(grpc.status.OUT_OF_RANGE, "SOURCE_CURSOR_AHEAD"));
+        return;
+      }
+      const termination = options.businessEventTermination;
+      if (termination?.sourceId === source.sourceId) {
+        call.emit("error", sourceError(termination.code, termination.reasonCode));
+        return;
+      }
+      const after = BigInt(hasCursor ? (call.request.afterSourceSequence ?? "0") : "0");
+      for (const event of options.businessEvents?.[source.sourceId] ?? []) {
+        if (
+          source.deliverySemantics === "best_effort_live" ||
+          BigInt(event.sourceSequence) > after
+        ) {
+          call.write(event);
+        }
+      }
+      call.end();
     },
     getExecution: (
       call: grpc.ServerUnaryCall<{ taskId?: string }, unknown>,

@@ -2,6 +2,31 @@
   "schemaVersion": 1,
   "files": [
     {
+      "path": "../packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_grpc_pb.d.ts",
+      "sha256": "0f78ac04fbb1557021d5e2dd76d2809055ef8262ea304ffc0c0505c7f36494d7",
+      "sizeBytes": 31192
+    },
+    {
+      "path": "../packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_grpc_pb.js",
+      "sha256": "b2aa7ad698feedd59c9e71ab43e6315a84e432d9653a4f923d67f93d6bde1b64",
+      "sizeBytes": 19694
+    },
+    {
+      "path": "../packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_pb.d.ts",
+      "sha256": "5357152711d97248b1cea7dc1f30bbaf1722e281d38af66023f40615a0c0cc7a",
+      "sizeBytes": 75607
+    },
+    {
+      "path": "../packages/adapter-protocol/generated/io/sdar/mcp/tasks/adapter/v1/adapter_pb.js",
+      "sha256": "e2ae1173913b886779db7998359a1ef7600f2baf172435fc67b20214443164a4",
+      "sizeBytes": 468329
+    },
+    {
+      "path": "../proto/io/sdar/mcp/tasks/adapter/v1/adapter.proto",
+      "sha256": "d36d49e8f6d85c5cb35e7c92fb6e66d8275c8d7cb4b97343c7f212d5c8ffc603",
+      "sizeBytes": 11705
+    },
+    {
       "path": "business-events-golden/event-id.json",
       "sha256": "7d8cb292a0c1aa552051146e9d4c2a3ec3482fab1ced74799078d4a1bc357542",
       "sizeBytes": 228

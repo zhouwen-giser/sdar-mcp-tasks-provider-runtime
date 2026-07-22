@@ -6,6 +6,17 @@ var io_sdar_mcp_tasks_adapter_v1_adapter_pb = require('../../../../../../io/sdar
 var google_protobuf_struct_pb = require('google-protobuf/google/protobuf/struct_pb.js');
 var google_protobuf_timestamp_pb = require('google-protobuf/google/protobuf/timestamp_pb.js');
 
+function serialize_io_sdar_mcp_tasks_adapter_v1_AdapterBusinessEvent(arg) {
+  if (!(arg instanceof io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent)) {
+    throw new Error('Expected argument of type io.sdar.mcp.tasks.adapter.v1.AdapterBusinessEvent');
+  }
+  return Buffer.from(arg.serializeBinary());
+}
+
+function deserialize_io_sdar_mcp_tasks_adapter_v1_AdapterBusinessEvent(buffer_arg) {
+  return io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent.deserializeBinary(new Uint8Array(buffer_arg));
+}
+
 function serialize_io_sdar_mcp_tasks_adapter_v1_CheckAvailabilityRequest(arg) {
   if (!(arg instanceof io_sdar_mcp_tasks_adapter_v1_adapter_pb.CheckAvailabilityRequest)) {
     throw new Error('Expected argument of type io.sdar.mcp.tasks.adapter.v1.CheckAvailabilityRequest');
@@ -193,6 +204,17 @@ function deserialize_io_sdar_mcp_tasks_adapter_v1_StartOperationResponse(buffer_
   return io_sdar_mcp_tasks_adapter_v1_adapter_pb.StartOperationResponse.deserializeBinary(new Uint8Array(buffer_arg));
 }
 
+function serialize_io_sdar_mcp_tasks_adapter_v1_StreamBusinessEventsRequest(arg) {
+  if (!(arg instanceof io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest)) {
+    throw new Error('Expected argument of type io.sdar.mcp.tasks.adapter.v1.StreamBusinessEventsRequest');
+  }
+  return Buffer.from(arg.serializeBinary());
+}
+
+function deserialize_io_sdar_mcp_tasks_adapter_v1_StreamBusinessEventsRequest(buffer_arg) {
+  return io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest.deserializeBinary(new Uint8Array(buffer_arg));
+}
+
 function serialize_io_sdar_mcp_tasks_adapter_v1_StreamExecutionEventsRequest(arg) {
   if (!(arg instanceof io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamExecutionEventsRequest)) {
     throw new Error('Expected argument of type io.sdar.mcp.tasks.adapter.v1.StreamExecutionEventsRequest');
@@ -327,6 +349,17 @@ var ResourceProviderAdapterService = exports.ResourceProviderAdapterService = {
     requestDeserialize: deserialize_io_sdar_mcp_tasks_adapter_v1_StreamExecutionEventsRequest,
     responseSerialize: serialize_io_sdar_mcp_tasks_adapter_v1_ExecutionEvent,
     responseDeserialize: deserialize_io_sdar_mcp_tasks_adapter_v1_ExecutionEvent,
+  },
+  streamBusinessEvents: {
+    path: '/io.sdar.mcp.tasks.adapter.v1.ResourceProviderAdapter/StreamBusinessEvents',
+    requestStream: false,
+    responseStream: true,
+    requestType: io_sdar_mcp_tasks_adapter_v1_adapter_pb.StreamBusinessEventsRequest,
+    responseType: io_sdar_mcp_tasks_adapter_v1_adapter_pb.AdapterBusinessEvent,
+    requestSerialize: serialize_io_sdar_mcp_tasks_adapter_v1_StreamBusinessEventsRequest,
+    requestDeserialize: deserialize_io_sdar_mcp_tasks_adapter_v1_StreamBusinessEventsRequest,
+    responseSerialize: serialize_io_sdar_mcp_tasks_adapter_v1_AdapterBusinessEvent,
+    responseDeserialize: deserialize_io_sdar_mcp_tasks_adapter_v1_AdapterBusinessEvent,
   },
   listResources: {
     path: '/io.sdar.mcp.tasks.adapter.v1.ResourceProviderAdapter/ListResources',

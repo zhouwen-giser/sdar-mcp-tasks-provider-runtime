@@ -91,7 +91,81 @@ class ReferenceAdapter(adapter_pb2_grpc.ResourceProviderAdapterServicer):
             provider_version="1.0.0",
             inventory_mode=adapter_pb2.RUNTIME_VISIBLE,
             operations=[self._echo_operation(), self._task_operation(), self._flex_operation()],
+            business_event_sources=self._business_event_sources(),
         )
+
+    async def StreamBusinessEvents(self, request, context):  # noqa: N802
+        sources = {source.source_id: source for source in self._business_event_sources()}
+        source = sources.get(request.source_id)
+        if source is None:
+            await self._abort_source(context, grpc.StatusCode.NOT_FOUND, "SOURCE_NOT_FOUND")
+        if request.source_stream_id != source.source_stream_id:
+            await self._abort_source(
+                context, grpc.StatusCode.FAILED_PRECONDITION, "SOURCE_STREAM_RESET"
+            )
+        if source.delivery_semantics == "best_effort_live" and request.HasField(
+            "after_source_sequence"
+        ):
+            await self._abort_source(context, grpc.StatusCode.OUT_OF_RANGE, "SOURCE_CURSOR_AHEAD")
+
+        after = request.after_source_sequence if request.HasField("after_source_sequence") else 0
+        configured = json.loads(os.getenv("BUSINESS_EVENTS_JSON", "[]"))
+        for document in configured:
+            sequence = int(document["sourceSequence"])
+            if source.delivery_semantics == "best_effort_live" or sequence > after:
+                occurred_at = Timestamp()
+                occurred_at.FromJsonString(document["occurredAt"])
+                yield adapter_pb2.AdapterBusinessEvent(
+                    source_event_id=document["sourceEventId"],
+                    source_sequence=sequence,
+                    source_stream_id=source.source_stream_id,
+                    scope=document["scope"],
+                    occurred_at=occurred_at,
+                    event_type=document["eventType"],
+                    description=document["description"],
+                    **(
+                        {"external_execution_id": document["externalExecutionId"]}
+                        if "externalExecutionId" in document
+                        else {}
+                    ),
+                    **(
+                        {"resource_ref": document["resourceRef"]}
+                        if "resourceRef" in document
+                        else {}
+                    ),
+                    severity_hint=document.get("severityHint", ""),
+                    reason_code=document.get("reasonCode", ""),
+                    raw_payload=json_struct(document.get("rawPayload", {})),
+                )
+
+    @staticmethod
+    async def _abort_source(context, status, reason_code: str) -> None:
+        context.set_trailing_metadata((("io.sdar.business-events.reason-code", reason_code),))
+        await context.abort(status, reason_code)
+
+    @staticmethod
+    def _business_event_sources():
+        source_id = os.getenv("BUSINESS_EVENT_SOURCE_ID")
+        if not source_id:
+            return []
+        semantics = os.getenv("BUSINESS_EVENT_DELIVERY_SEMANTICS", "durable_at_least_once")
+        durable = semantics == "durable_at_least_once"
+        return [
+            adapter_pb2.BusinessEventSourceCapability(
+                source_id=source_id,
+                source_stream_id=os.getenv(
+                    "BUSINESS_EVENT_SOURCE_STREAM_ID",
+                    "018f0d4e-7b3a-7cc1-8d57-2f4d9e2a0001",
+                ),
+                delivery_semantics=semantics,
+                replay_supported=durable,
+                source_retention_ms=604800000 if durable else 0,
+                max_event_bytes=65536,
+                max_payload_depth=16,
+                max_payload_nodes=4096,
+                max_payload_string_bytes=16384,
+            )
+        ]
 
     async def CheckAvailability(self, request, context):  # noqa: N802
         del context
