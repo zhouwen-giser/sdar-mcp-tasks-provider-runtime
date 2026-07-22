@@ -1,5 +1,12 @@
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
-import type { Attributes, Context, Link, TextMapGetter, TextMapSetter } from "@opentelemetry/api";
+import type {
+  Attributes,
+  Context,
+  Link,
+  Span,
+  TextMapGetter,
+  TextMapSetter,
+} from "@opentelemetry/api";
 import { ExportResultCode, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import * as grpc from "@grpc/grpc-js";
@@ -31,6 +38,7 @@ import { createProviderResource } from "./provider-resource.js";
 import type { ProviderResourceInput } from "./provider-resource.js";
 import type { ProviderOpsEnvelope } from "./event-envelope.js";
 import { TelemetrySanitizer } from "./telemetry-sanitizer.js";
+import { sanitizeBusinessEventTraceAttributes } from "./business-event-sanitizer.js";
 
 const INSTRUMENTATION_NAME = "@sdar/provider-ops-telemetry";
 const INSTRUMENTATION_VERSION = RUNTIME_VERSION;
@@ -363,7 +371,7 @@ export class ProviderTelemetry {
     let parent = ROOT_CONTEXT;
     try {
       parent = this.#propagator.extract(ROOT_CONTEXT, headers, httpHeaderGetter);
-    } catch {
+    } catch (error) {
       // Invalid upstream propagation becomes a new root span.
     }
     return this.#traceInContext(parent, name, attributes, SpanKind.SERVER, operation);
@@ -403,6 +411,73 @@ export class ProviderTelemetry {
         return operation(metadata);
       },
     );
+  }
+
+  traceAdapterStreamRpc<T>(
+    method: string,
+    attributes: Attributes,
+    open: (metadata: grpc.Metadata) => grpc.ClientReadableStream<T>,
+  ): grpc.ClientReadableStream<T> {
+    const fallback = (): grpc.ClientReadableStream<T> => open(new grpc.Metadata());
+    if (!this.#started || this.#tracerProvider === undefined) return fallback();
+    let span: Span | undefined;
+    let opened = false;
+    try {
+      span = this.#tracerProvider
+        .getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION)
+        .startSpan("adapter.rpc.stream_business_events", {
+          kind: SpanKind.CLIENT,
+          attributes: this.#sanitizer.sanitizeAttributes({
+            "rpc.system": "grpc",
+            "rpc.method": method,
+            "server.address": this.#options.resource.providerId,
+            ...sanitizeBusinessEventTraceAttributes(attributes),
+          }),
+        });
+      const activeSpan = span;
+      const context = trace.setSpan(this.#contextManager.active(), span);
+      const metadata = new grpc.Metadata();
+      try {
+        this.#propagator.inject(context, metadata, grpcMetadataSetter);
+      } catch {
+        // Propagation failure cannot block the stream.
+      }
+      const startedAt = performance.now();
+      opened = true;
+      const stream = this.#contextManager.with(context, () => open(metadata));
+      let ended = false;
+      const finish = (statusCode: number, outcome: "success" | "error" | "cancelled"): void => {
+        if (ended) return;
+        ended = true;
+        try {
+          activeSpan.setAttribute("rpc.grpc.status_code", statusCode);
+          activeSpan.setAttribute("rpc.stream.duration_ms", performance.now() - startedAt);
+          activeSpan.setAttribute("outcome", outcome);
+          activeSpan.setStatus({
+            code: outcome === "success" ? SpanStatusCode.OK : SpanStatusCode.ERROR,
+          });
+          activeSpan.end();
+        } catch {
+          // Span completion cannot affect stream semantics.
+        }
+      };
+      stream.once("end", () => finish(grpc.status.OK, "success"));
+      stream.once("error", (error: grpc.ServiceError) =>
+        finish(
+          typeof error.code === "number" ? error.code : grpc.status.UNKNOWN,
+          error.code === grpc.status.CANCELLED ? "cancelled" : "error",
+        ),
+      );
+      return stream;
+    } catch (error) {
+      try {
+        span?.end();
+      } catch {
+        // Ignore failed span cleanup.
+      }
+      if (opened) throw error;
+      return fallback();
+    }
   }
 
   currentTraceContext(): {

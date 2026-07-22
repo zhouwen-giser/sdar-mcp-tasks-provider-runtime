@@ -140,6 +140,12 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
               ...(rpcContext.tracestate === undefined ? {} : { tracestate: rpcContext.tracestate }),
             },
       ) ?? operation(new grpc.Metadata()),
+    traceStreamRpc: (method, rpcContext, open) =>
+      telemetry?.traceAdapterStreamRpc(
+        method,
+        rpcContext.sourceId === undefined ? {} : { sourceId: rpcContext.sourceId },
+        open,
+      ) ?? open(new grpc.Metadata()),
   });
   const dependencies: RuntimeDependencies = {
     database: "starting",

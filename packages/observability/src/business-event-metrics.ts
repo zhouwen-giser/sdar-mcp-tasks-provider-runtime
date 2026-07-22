@@ -1,4 +1,8 @@
 import type { Attributes } from "@opentelemetry/api";
+import {
+  sanitizeBusinessEventDiagnosticBody,
+  sanitizeBusinessEventTraceAttributes,
+} from "./business-event-sanitizer.js";
 
 export const BUSINESS_EVENT_METRIC_DEFINITIONS = {
   sdar_business_event_source_received_total: definition("counter", ["sourceId", "outcome"]),
@@ -40,6 +44,27 @@ export type FrozenBusinessEventGaugeName = {
 export type BusinessEventHistogramName = keyof typeof OPERATIONAL_METRIC_DEFINITIONS;
 export type BusinessEventMetricName =
   FrozenBusinessEventMetricName | keyof typeof OPERATIONAL_METRIC_DEFINITIONS;
+
+export type BusinessEventDiagnosticEventName =
+  | "business_events.source.connection"
+  | "business_events.source.rejected"
+  | "business_events.mapping.retry"
+  | "business_events.finalizer.wait"
+  | "business_events.stream.rotation"
+  | "business_events.stream.delivery"
+  | "business_events.relation.query";
+
+export type BusinessEventSpanName =
+  | "business_events.source.connect"
+  | "business_events.source.ingest"
+  | "business_events.source.prepare"
+  | "business_events.source.finalize"
+  | "business_events.stream.rotate"
+  | "business_events.stream.listen"
+  | "business_events.stream.replay"
+  | "business_events.stream.live"
+  | "business_events.relation.query"
+  | "business_events.operator.rotate";
 
 export interface BusinessEventMetricDefinition {
   kind: "counter" | "gauge" | "histogram";
@@ -158,6 +183,28 @@ export interface BusinessEventMetricOtlpSink {
     attributes?: Attributes,
     kind?: "counter" | "histogram" | "gauge",
   ): void;
+  event?(name: string, body: unknown, attributes?: Attributes): void;
+  trace?<T>(name: string, attributes: Attributes, operation: () => Promise<T>): Promise<T>;
+}
+
+export interface BusinessEventOperationalTelemetry {
+  increment(
+    name: FrozenBusinessEventMetricName,
+    labels?: Record<string, string>,
+    amount?: number,
+  ): void;
+  gauge(
+    name: FrozenBusinessEventGaugeName | "sdar_business_event_active_subscriptions",
+    value: number,
+    labels?: Record<string, string>,
+  ): void;
+  histogram(name: BusinessEventHistogramName, value: number, labels?: Record<string, string>): void;
+  event(name: BusinessEventDiagnosticEventName, body: Record<string, unknown>): void;
+  trace<T>(
+    name: BusinessEventSpanName,
+    attributes: Record<string, string | number | boolean>,
+    operation: () => Promise<T>,
+  ): Promise<T>;
 }
 
 export class BusinessEventTelemetryBridge {
@@ -214,6 +261,37 @@ export class BusinessEventTelemetryBridge {
       this.providerTelemetry?.metric(name, value, attributes, "histogram");
     } catch {
       /* fail open */
+    }
+  }
+
+  event(name: BusinessEventDiagnosticEventName, body: Record<string, unknown>): void {
+    try {
+      this.providerTelemetry?.event?.(name, sanitizeBusinessEventDiagnosticBody(body));
+    } catch {
+      // Diagnostics are fail-open.
+    }
+  }
+
+  async trace<T>(
+    name: BusinessEventSpanName,
+    attributes: Record<string, string | number | boolean>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.providerTelemetry?.trace === undefined) return operation();
+    let invoked = false;
+    const invoke = (): Promise<T> => {
+      invoked = true;
+      return operation();
+    };
+    try {
+      return await this.providerTelemetry.trace<T>(
+        name,
+        sanitizeBusinessEventTraceAttributes(attributes),
+        invoke,
+      );
+    } catch (error) {
+      if (invoked) throw error;
+      return operation();
     }
   }
 }

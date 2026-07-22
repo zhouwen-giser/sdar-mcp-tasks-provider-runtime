@@ -63,6 +63,12 @@ export interface BusinessEventNotificationOptions {
 export interface BusinessEventMetrics {
   increment(name: string, labels?: Record<string, string>, amount?: number): void;
   gauge(name: string, value: number, labels?: Record<string, string>): void;
+  event?(name: string, body: Record<string, unknown>): void;
+  trace?<T>(
+    name: string,
+    attributes: Record<string, string | number | boolean>,
+    operation: () => Promise<T>,
+  ): Promise<T>;
 }
 
 export interface BusinessEventRelationReader extends BusinessEventReader {
@@ -92,6 +98,15 @@ export class BusinessEventRelationManager {
   ) {}
 
   async list(
+    request: FrozenJsonRpcRequest,
+    authorization: AuthorizationContext,
+  ): Promise<Record<string, unknown>> {
+    return traceBusinessEvent(this.metrics, "business_events.relation.query", {}, () =>
+      this.#list(request, authorization),
+    );
+  }
+
+  async #list(
     request: FrozenJsonRpcRequest,
     authorization: AuthorizationContext,
   ): Promise<Record<string, unknown>> {
@@ -139,6 +154,11 @@ export class BusinessEventRelationManager {
         parsed.limit,
       );
       this.#increment("sdar_business_event_relation_pages_total", { outcome: "complete" });
+      this.#event("business_events.relation.query", {
+        outcome: "complete",
+        relatedTaskCount: page.items.length,
+        relationTruncated: page.nextAfterTaskId !== undefined,
+      });
       return {
         resultType: "complete",
         streamId: parsed.streamId,
@@ -153,6 +173,10 @@ export class BusinessEventRelationManager {
       if (error instanceof Error && error.message === "BUSINESS_EVENT_RELATION_CURSOR_EXPIRED") {
         this.#increment("sdar_business_event_relation_token_expired_total");
       }
+      this.#event("business_events.relation.query", {
+        outcome: "failed",
+        reasonCode: relationReasonCode(error),
+      });
       throw mapRelationError(error);
     }
   }
@@ -162,6 +186,14 @@ export class BusinessEventRelationManager {
       this.metrics?.increment(name, labels);
     } catch {
       // Telemetry is best effort and cannot affect protocol behavior.
+    }
+  }
+
+  #event(name: string, body: Record<string, unknown>): void {
+    try {
+      this.metrics?.event?.(name, body);
+    } catch {
+      // Diagnostics cannot affect protocol behavior.
     }
   }
 }
@@ -248,7 +280,12 @@ export class BusinessEventNotificationManager {
     this.#gauge("sdar_business_event_active_subscriptions", this.#activeSubscriptions);
     try {
       const selection = parseListenSelection(request.params);
-      const current = await this.reader.currentGeneration(this.providerId);
+      const current = await traceBusinessEvent(
+        this.#options.metrics,
+        "business_events.stream.listen",
+        {},
+        () => this.reader.currentGeneration(this.providerId),
+      );
       if (current === undefined) throw businessEventError("BUSINESS_EVENT_STREAM_RESET", 409);
       const generation =
         selection.kind === "cursor"
@@ -401,13 +438,25 @@ export class BusinessEventNotificationManager {
     while (BigInt(lastScannedSequence) < BigInt(throughSequence) && !isClosed()) {
       const generation = await this.reader.generation(this.providerId, streamId);
       if (generation === undefined || generation.status === "retired") break;
-      const events = await this.reader.replayEvents(
-        this.providerId,
-        streamId,
-        lastScannedSequence,
-        throughSequence,
-        this.#options.replayBatchSize,
+      const events = await traceBusinessEvent(
+        this.#options.metrics,
+        deliveryPhase === "replay"
+          ? "business_events.stream.replay"
+          : "business_events.stream.live",
+        {},
+        () =>
+          this.reader.replayEvents(
+            this.providerId,
+            streamId,
+            lastScannedSequence,
+            throughSequence,
+            this.#options.replayBatchSize,
+          ),
       );
+      this.#event("business_events.stream.delivery", {
+        outcome: deliveryPhase,
+        batchSize: events.length,
+      });
       if (events.length === 0) break;
       for (const event of events) {
         lastScannedSequence = event.sequence;
@@ -487,6 +536,41 @@ export class BusinessEventNotificationManager {
       // Telemetry is best effort and cannot affect protocol behavior.
     }
   }
+
+  #event(name: string, body: Record<string, unknown>): void {
+    try {
+      this.#options.metrics.event?.(name, body);
+    } catch {
+      // Diagnostics cannot affect protocol behavior.
+    }
+  }
+}
+
+async function traceBusinessEvent<T>(
+  telemetry: BusinessEventMetrics | undefined,
+  name: string,
+  attributes: Record<string, string | number | boolean>,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const trace = telemetry?.trace;
+  if (trace === undefined) return operation();
+  let invoked = false;
+  const invoke = (): Promise<T> => {
+    invoked = true;
+    return operation();
+  };
+  try {
+    return await trace(name, attributes, invoke);
+  } catch (error) {
+    if (invoked) throw error;
+    return operation();
+  }
+}
+
+function relationReasonCode(error: unknown): string {
+  return error instanceof Error && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.message)
+    ? error.message
+    : "UNKNOWN";
 }
 
 export function requireBusinessEventsCapability(request: FrozenJsonRpcRequest): void {
