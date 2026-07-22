@@ -1,7 +1,6 @@
 # Runtime Frozen Conformance Closure ExecPlan
 
-Status: complete on main; post-merge frozen interop alignment verified locally on
-`fix/frozen-interop-contract-alignment`, publication pending
+Status: complete on main; post-merge frozen interop alignment verified and published as Draft PR #16
 
 Branch: `fix/frozen-interop-contract-alignment`
 
@@ -32,7 +31,7 @@ protobuf field numbers, Provider Ops, and the frozen normative text remain immut
 | I2    | Add and map explicit Adapter reservation mode       | unit, generated protobuf, TS/Python Adapter tests | complete    |
 | I3    | Regenerate derived schemas and lock                 | frozen protocol checks and 74/74                  | complete    |
 | I4    | Full Provider verification and real SDAR interop    | `verify:v2` plus strict cross-repository run      | complete    |
-| I5    | Evidence, commit, push, and pull request            | immutable commit and green remote checks          | in progress |
+| I5    | Evidence, commit, push, and pull request            | immutable commit and green remote checks          | complete    |
 
 The final local `pnpm verify:v2` completed in 340.8 seconds with frozen 74/74, Runtime closure
 29/29, unit 79/79, contract 9/9, integration 199/199, recovery 9/9, security 29/29, E2E 6/6,
@@ -43,6 +42,10 @@ verified strict discovery, explicit `reservationMode: "none"`, base-only MRTR/bu
 CreateTaskResult projections, mandatory `tasks/get`, and a Task Notification from the same Runtime
 Revision. During that run, strict SDAR discovery also exposed and this branch corrected an unrelated
 top-level `resultType` extension on `tools/list`; protocol and Runtime-stack regressions now forbid it.
+Implementation commit `b30d839` is published by Draft PR #16 at documentation-only head `50a2b49`
+against `main@217e089`. GitHub Actions run `29881484104` completed successfully: both `runtime-ci`
+(including `verify:v2`, Buf lint and RC1 protobuf compatibility) and `runtime-compose` passed. Protected
+review/merge remains intentionally outside this ExecPlan's automatic actions.
 
 ## Ordered execution
 
