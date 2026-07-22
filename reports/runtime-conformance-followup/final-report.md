@@ -1,4 +1,3 @@
-
 ## Published Draft PR and CI evidence (2026-07-22)
 
 - Draft PR: [#17](https://github.com/zhouwen-giser/sdar-mcp-tasks-provider-runtime/pull/17), `OPEN`, base `main`, head `fix/frozen-runtime-conformance-followup`.
