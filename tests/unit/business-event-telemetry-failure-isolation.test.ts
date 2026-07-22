@@ -6,7 +6,7 @@ import {
 
 describe("Business Event telemetry failure isolation", () => {
   it("does not replace metric, gauge, log or pre-invocation trace business results", async () => {
-    const businessOperation = vi.fn(async () => "committed");
+    const businessOperation = vi.fn(() => Promise.resolve("committed"));
     const bridge = new BusinessEventTelemetryBridge(
       {
         increment: () => {
@@ -53,13 +53,13 @@ describe("Business Event telemetry failure isolation", () => {
     const expected = new Error("BUSINESS_EVENT_STALE_FENCE");
     const bridge = new BusinessEventTelemetryBridge(
       { increment: () => undefined },
-      { metric: () => undefined, trace: async (_name, _attributes, operation) => operation() },
+      { metric: () => undefined, trace: (_name, _attributes, operation) => operation() },
       new BusinessEventMetricPolicy(["source-a"]),
     );
     await expect(
-      bridge.trace("business_events.source.ingest", { sourceId: "source-a" }, async () => {
-        throw expected;
-      }),
+      bridge.trace("business_events.source.ingest", { sourceId: "source-a" }, () =>
+        Promise.reject(expected),
+      ),
     ).rejects.toBe(expected);
   });
 });

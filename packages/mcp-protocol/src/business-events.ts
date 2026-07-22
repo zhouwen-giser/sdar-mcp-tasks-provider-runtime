@@ -552,17 +552,16 @@ async function traceBusinessEvent<T>(
   attributes: Record<string, string | number | boolean>,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const trace = telemetry?.trace;
-  if (trace === undefined) return operation();
-  let invoked = false;
+  if (telemetry?.trace === undefined) return operation();
+  const invocation = { started: false };
   const invoke = (): Promise<T> => {
-    invoked = true;
+    invocation.started = true;
     return operation();
   };
   try {
-    return await trace(name, attributes, invoke);
+    return await telemetry.trace(name, attributes, invoke);
   } catch (error) {
-    if (invoked) throw error;
+    if (invocation.started) throw error;
     return operation();
   }
 }

@@ -287,17 +287,17 @@ export class AdapterBusinessEventSourceClient {
     attributes: Record<string, string | number | boolean>,
     operation: () => Promise<T>,
   ): Promise<T> {
-    const trace = this.options.metrics?.trace;
-    if (trace === undefined) return operation();
-    let invoked = false;
+    const telemetry = this.options.metrics;
+    if (telemetry?.trace === undefined) return operation();
+    const invocation = { started: false };
     const invoke = (): Promise<T> => {
-      invoked = true;
+      invocation.started = true;
       return operation();
     };
     try {
-      return await trace(name, attributes, invoke);
+      return await telemetry.trace(name, attributes, invoke);
     } catch (error) {
-      if (invoked) throw error;
+      if (invocation.started) throw error;
       return operation();
     }
   }

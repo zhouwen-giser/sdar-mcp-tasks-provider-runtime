@@ -14,3 +14,7 @@ MCP HTTP 操作创建 W3C 服务端 Span（链路片段）。Adapter Span 包裹
 Sanitizer（脱敏器）是导出边界：凭证类字段、自由文本、原始参数/结果、Adapter 载荷、未知 Provider 字段、原始异常消息和堆栈都会被移除。深度、节点、字符串和总字节预算同时覆盖数组、Map、Set 与循环引用。
 
 生产环境启用 OTLP 时必须使用 HTTPS。请求头和 mTLS 材料从 Secret 挂载文件读取且只传给导出器。初始化或导出失败会产生不含密钥的告警；审计事实保持可重试，而且 OTLP Collector 故障不会改变 Runtime 就绪状态。Provider 遥测入口是独立的 gRPC 服务，启用后其监听与 mTLS 初始化属于就绪检查。
+
+Business Events 使用同一套 Provider Ops Outbox 和 OTel Provider，不建立第二套持久通道。其严格
+有界 Metric Bridge、事务审计、流式 gRPC Trace 和专用脱敏边界见
+[Business Events 可观测性架构](business-events-observability.md)。

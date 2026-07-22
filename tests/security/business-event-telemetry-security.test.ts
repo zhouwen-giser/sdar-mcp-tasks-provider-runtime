@@ -85,7 +85,7 @@ describe("Business Event telemetry export security", () => {
     await bridge.trace(
       "business_events.source.ingest",
       malicious as unknown as Record<string, string | number | boolean>,
-      async () => undefined,
+      () => Promise.resolve(undefined),
     );
     const envelope = createBusinessEventProviderOpsEnvelope(
       { runtimeVersion: "2.0.0-rc.1", instanceId: "security-test" },

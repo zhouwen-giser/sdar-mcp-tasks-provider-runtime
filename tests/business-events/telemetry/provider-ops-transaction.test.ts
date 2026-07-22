@@ -81,9 +81,7 @@ describe("transactional Business Event Provider Ops", () => {
     const providerId = "provider.telemetry.rollback";
     const repository = new BusinessEventRepository(harness.pool, {
       providerOpsRecorder: {
-        capture: async () => {
-          throw new Error("AUDIT_INSERT_FAILED");
-        },
+        capture: () => Promise.reject(new Error("AUDIT_INSERT_FAILED")),
       },
     });
     await expect(

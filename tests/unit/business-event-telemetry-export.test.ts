@@ -56,8 +56,8 @@ describe("Business Event OTel export", () => {
         outcome: "received",
         rawPayload: "secret",
         taskId: "task-secret",
-      } as Record<string, string>,
-      async () => "ok",
+      },
+      () => Promise.resolve("ok"),
     );
     await telemetry.shutdown();
 

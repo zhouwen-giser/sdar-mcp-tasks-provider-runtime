@@ -36,11 +36,7 @@ const OPERATIONAL_METRIC_DEFINITIONS = {
 } as const satisfies Record<string, BusinessEventMetricDefinition>;
 
 export type FrozenBusinessEventMetricName = keyof typeof BUSINESS_EVENT_METRIC_DEFINITIONS;
-export type FrozenBusinessEventGaugeName = {
-  [
-    K in FrozenBusinessEventMetricName
-  ]: (typeof BUSINESS_EVENT_METRIC_DEFINITIONS)[K]["kind"] extends "gauge" ? K : never;
-}[FrozenBusinessEventMetricName];
+export type FrozenBusinessEventGaugeName = "sdar_business_event_publication_barrier_waiting";
 export type BusinessEventHistogramName = keyof typeof OPERATIONAL_METRIC_DEFINITIONS;
 export type BusinessEventMetricName =
   FrozenBusinessEventMetricName | keyof typeof OPERATIONAL_METRIC_DEFINITIONS;
@@ -275,9 +271,9 @@ export class BusinessEventTelemetryBridge {
     ) {
       return operation();
     }
-    let invoked = false;
+    const invocation = { started: false };
     const invoke = (): Promise<T> => {
-      invoked = true;
+      invocation.started = true;
       return operation();
     };
     try {
@@ -287,7 +283,7 @@ export class BusinessEventTelemetryBridge {
         invoke,
       );
     } catch (error) {
-      if (invoked) throw error;
+      if (invocation.started) throw error;
       return operation();
     }
   }

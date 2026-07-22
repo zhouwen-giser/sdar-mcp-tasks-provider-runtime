@@ -405,7 +405,7 @@ export class ProviderTelemetry {
     let parent = ROOT_CONTEXT;
     try {
       parent = this.#propagator.extract(ROOT_CONTEXT, headers, httpHeaderGetter);
-    } catch (error) {
+    } catch {
       // Invalid upstream propagation becomes a new root span.
     }
     return this.#traceInContext(parent, name, attributes, SpanKind.SERVER, operation);

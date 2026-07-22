@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 
-const directory = "reports/business-events-profile-v1";
+const directory = process.env.BUSINESS_EVENTS_REPORT_DIR ?? "reports/business-events-profile-v1";
 mkdirSync(directory, { recursive: true });
 const commit = command("git", ["rev-parse", "HEAD"]).stdout.trim();
 const ciRun = process.env.GITHUB_RUN_ID ?? "local";

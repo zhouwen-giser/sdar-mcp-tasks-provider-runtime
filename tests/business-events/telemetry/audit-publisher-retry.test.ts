@@ -37,11 +37,7 @@ describe("Business Event audit publisher isolation", () => {
     }
     const publisher = new DurableProviderOpsPublisher(
       new ProviderOpsDeliveryRepository(harness.pool),
-      {
-        export: async () => {
-          throw new Error("collector unavailable");
-        },
-      },
+      { export: () => Promise.reject(new Error("collector unavailable")) },
       "replica-a",
     );
     await expect(publisher.tick()).resolves.toMatchObject({ claimed: 1, retried: 1, delivered: 0 });
