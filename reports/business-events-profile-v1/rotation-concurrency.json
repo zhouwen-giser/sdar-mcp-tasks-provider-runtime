@@ -6,12 +6,12 @@
       "name": "rotation-concurrency",
       "testName": "pnpm exec vitest run tests/business-events/finalizer tests/business-events/rotation tests/business-events/concurrency",
       "status": "pass",
-      "durationMs": 4194,
+      "durationMs": 4189,
       "databaseMode": "local-postgresql",
       "replicaCount": 2,
       "sourceDeliveryMode": "durable_and_best_effort",
-      "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
-      "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",
+      "implementationCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
+      "reportCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
       "ciRun": "local",
       "exitCode": 0
     }

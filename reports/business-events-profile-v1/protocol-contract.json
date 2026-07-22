@@ -6,12 +6,12 @@
       "name": "protocol-contract",
       "testName": "node scripts/protocol/run-business-events-contract-catalog.mjs",
       "status": "pass",
-      "durationMs": 1750,
+      "durationMs": 1178,
       "databaseMode": "local-postgresql",
       "replicaCount": 1,
       "sourceDeliveryMode": "mixed",
-      "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
-      "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",
+      "implementationCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
+      "reportCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
       "ciRun": "local",
       "exitCode": 0
     }

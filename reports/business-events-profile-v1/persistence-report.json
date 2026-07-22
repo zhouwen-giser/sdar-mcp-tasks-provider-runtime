@@ -6,12 +6,12 @@
       "name": "persistence-report",
       "testName": "pnpm exec vitest run tests/business-events/persistence tests/business-events/retention",
       "status": "pass",
-      "durationMs": 3180,
+      "durationMs": 3005,
       "databaseMode": "local-postgresql",
       "replicaCount": 2,
       "sourceDeliveryMode": "mixed",
-      "implementationCommit": "f0800a4557a254ce474dbce07013faceb13729db",
-      "reportCommit": "f0800a4557a254ce474dbce07013faceb13729db",
+      "implementationCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
+      "reportCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
       "ciRun": "local",
       "exitCode": 0
     }
