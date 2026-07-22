@@ -38,6 +38,7 @@ describe("MRTR durable response acceptance", () => {
         "00000000-0000-4000-8000-000000000001",
         authorization,
         { approval: { action: "accept", content: true } },
+        expect.any(Function),
       );
     },
   );
