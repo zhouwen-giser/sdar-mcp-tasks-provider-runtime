@@ -1,4 +1,4 @@
-CREATE TABLE provider_business_event_stream_generation (
+CREATE TABLE IF NOT EXISTS provider_business_event_stream_generation (
   provider_id text NOT NULL,
   stream_id uuid NOT NULL,
   status text NOT NULL CHECK (status IN ('current', 'rotating', 'replayable_closed', 'retired')),
@@ -24,15 +24,15 @@ CREATE TABLE provider_business_event_stream_generation (
   CHECK (last_continuous_sequence IS NULL OR continuity_class = 'all_durable')
 );
 
-CREATE UNIQUE INDEX provider_business_event_one_current_idx
+CREATE UNIQUE INDEX IF NOT EXISTS provider_business_event_one_current_idx
   ON provider_business_event_stream_generation(provider_id)
   WHERE status = 'current';
 
-CREATE INDEX provider_business_event_generation_retention_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_generation_retention_idx
   ON provider_business_event_stream_generation(retain_until, provider_id, stream_id)
   WHERE status <> 'current';
 
-CREATE TABLE provider_business_event_runtime_state (
+CREATE TABLE IF NOT EXISTS provider_business_event_runtime_state (
   provider_id text PRIMARY KEY,
   current_stream_id uuid NOT NULL,
   generation_version bigint NOT NULL CHECK (generation_version > 0),
@@ -42,7 +42,7 @@ CREATE TABLE provider_business_event_runtime_state (
     DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE TABLE provider_business_event_generation_source (
+CREATE TABLE IF NOT EXISTS provider_business_event_generation_source (
   provider_id text NOT NULL,
   runtime_stream_id uuid NOT NULL,
   source_id text NOT NULL CHECK (source_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
@@ -57,7 +57,7 @@ CREATE TABLE provider_business_event_generation_source (
     ON DELETE RESTRICT
 );
 
-CREATE TABLE provider_business_event_continuity_record (
+CREATE TABLE IF NOT EXISTS provider_business_event_continuity_record (
   continuity_record_id uuid PRIMARY KEY,
   provider_id text NOT NULL,
   previous_stream_id uuid NOT NULL,
@@ -79,10 +79,10 @@ CREATE TABLE provider_business_event_continuity_record (
   CHECK (last_continuous_sequence IS NULL OR last_continuous_sequence <= last_replayable_sequence)
 );
 
-CREATE INDEX provider_business_event_continuity_previous_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_continuity_previous_idx
   ON provider_business_event_continuity_record(provider_id, previous_stream_id, created_at);
 
-CREATE TABLE adapter_business_event_source_state (
+CREATE TABLE IF NOT EXISTS adapter_business_event_source_state (
   provider_id text NOT NULL,
   source_id text NOT NULL CHECK (source_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
   source_stream_id uuid NOT NULL,
@@ -104,10 +104,10 @@ CREATE TABLE adapter_business_event_source_state (
   CHECK ((lease_owner IS NULL) = (lease_until IS NULL))
 );
 
-CREATE INDEX adapter_business_event_source_lease_idx
+CREATE INDEX IF NOT EXISTS adapter_business_event_source_lease_idx
   ON adapter_business_event_source_state(lease_until, provider_id, source_id);
 
-CREATE TABLE adapter_business_event_inbox (
+CREATE TABLE IF NOT EXISTS adapter_business_event_inbox (
   inbox_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   provider_id text NOT NULL,
   source_id text NOT NULL,
@@ -151,23 +151,23 @@ CREATE TABLE adapter_business_event_inbox (
   )
 );
 
-CREATE UNIQUE INDEX adapter_business_event_inbox_event_identity_idx
+CREATE UNIQUE INDEX IF NOT EXISTS adapter_business_event_inbox_event_identity_idx
   ON adapter_business_event_inbox(provider_id, source_id, source_stream_id, normalized_source_event_id)
   WHERE normalized_source_event_id IS NOT NULL;
 
-CREATE UNIQUE INDEX adapter_business_event_inbox_sequence_idx
+CREATE UNIQUE INDEX IF NOT EXISTS adapter_business_event_inbox_sequence_idx
   ON adapter_business_event_inbox(provider_id, source_id, source_stream_id, normalized_source_sequence)
   WHERE normalized_source_sequence IS NOT NULL;
 
-CREATE INDEX adapter_business_event_inbox_barrier_idx
+CREATE INDEX IF NOT EXISTS adapter_business_event_inbox_barrier_idx
   ON adapter_business_event_inbox(provider_id, source_id, source_stream_id, normalized_source_sequence)
   WHERE status IN ('received', 'pending_mapping', 'ready', 'continuity_loss_pending', 'rejected', 'mapping_failed');
 
-CREATE INDEX adapter_business_event_inbox_retention_idx
+CREATE INDEX IF NOT EXISTS adapter_business_event_inbox_retention_idx
   ON adapter_business_event_inbox(retain_until, inbox_id)
   WHERE status IN ('published', 'terminal_skipped', 'rejected', 'mapping_failed');
 
-CREATE TABLE provider_business_event (
+CREATE TABLE IF NOT EXISTS provider_business_event (
   provider_id text NOT NULL,
   stream_id uuid NOT NULL,
   sequence bigint NOT NULL CHECK (sequence > 0),
@@ -204,13 +204,13 @@ CREATE TABLE provider_business_event (
   CHECK (expires_at > created_at)
 );
 
-CREATE INDEX provider_business_event_replay_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_replay_idx
   ON provider_business_event(provider_id, stream_id, sequence);
 
-CREATE INDEX provider_business_event_expiry_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_expiry_idx
   ON provider_business_event(expires_at, provider_id, stream_id, sequence);
 
-CREATE TABLE provider_business_event_relation (
+CREATE TABLE IF NOT EXISTS provider_business_event_relation (
   provider_id text NOT NULL,
   stream_id uuid NOT NULL,
   event_id char(43) NOT NULL,
@@ -222,10 +222,10 @@ CREATE TABLE provider_business_event_relation (
     REFERENCES provider_business_event(provider_id, stream_id, event_id) ON DELETE CASCADE
 );
 
-CREATE INDEX provider_business_event_relation_task_order_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_relation_task_order_idx
   ON provider_business_event_relation(provider_id, stream_id, event_id, task_id);
 
-CREATE TABLE provider_task_resource_binding (
+CREATE TABLE IF NOT EXISTS provider_task_resource_binding (
   provider_id text NOT NULL,
   task_id uuid NOT NULL,
   resource_ref text NOT NULL CHECK (
@@ -244,13 +244,13 @@ CREATE TABLE provider_task_resource_binding (
   CHECK (retain_until >= COALESCE(terminal_at, bound_at))
 );
 
-CREATE INDEX provider_task_resource_binding_event_time_idx
+CREATE INDEX IF NOT EXISTS provider_task_resource_binding_event_time_idx
   ON provider_task_resource_binding(provider_id, resource_ref, bound_at, terminal_at, task_id);
 
-CREATE INDEX provider_task_resource_binding_retention_idx
+CREATE INDEX IF NOT EXISTS provider_task_resource_binding_retention_idx
   ON provider_task_resource_binding(retain_until, provider_id, task_id);
 
-CREATE TABLE provider_task_visibility_tombstone (
+CREATE TABLE IF NOT EXISTS provider_task_visibility_tombstone (
   provider_id text NOT NULL,
   task_id uuid NOT NULL,
   authorization_context_hash char(64) NOT NULL CHECK (authorization_context_hash ~ '^[0-9a-f]{64}$'),
@@ -265,10 +265,10 @@ CREATE TABLE provider_task_visibility_tombstone (
   CHECK (retain_until >= terminal_at)
 );
 
-CREATE INDEX provider_task_visibility_tombstone_retention_idx
+CREATE INDEX IF NOT EXISTS provider_task_visibility_tombstone_retention_idx
   ON provider_task_visibility_tombstone(retain_until, provider_id, task_id);
 
-CREATE TABLE provider_business_event_relation_projection (
+CREATE TABLE IF NOT EXISTS provider_business_event_relation_projection (
   token_hash char(64) PRIMARY KEY CHECK (token_hash ~ '^[0-9a-f]{64}$'),
   provider_id text NOT NULL,
   stream_id uuid NOT NULL,
@@ -286,7 +286,7 @@ CREATE TABLE provider_business_event_relation_projection (
   CHECK (expires_at > created_at)
 );
 
-CREATE TABLE provider_business_event_relation_projection_item (
+CREATE TABLE IF NOT EXISTS provider_business_event_relation_projection_item (
   token_hash char(64) NOT NULL,
   task_id uuid NOT NULL,
   ordinal integer NOT NULL CHECK (ordinal >= 0),
@@ -296,8 +296,8 @@ CREATE TABLE provider_business_event_relation_projection_item (
     REFERENCES provider_business_event_relation_projection(token_hash) ON DELETE CASCADE
 );
 
-CREATE INDEX provider_business_event_projection_page_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_projection_page_idx
   ON provider_business_event_relation_projection_item(token_hash, task_id);
 
-CREATE INDEX provider_business_event_projection_expiry_idx
+CREATE INDEX IF NOT EXISTS provider_business_event_projection_expiry_idx
   ON provider_business_event_relation_projection(expires_at, token_hash);

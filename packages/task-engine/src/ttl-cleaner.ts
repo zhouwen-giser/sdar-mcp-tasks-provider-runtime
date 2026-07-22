@@ -202,6 +202,28 @@ export class TtlCleaner {
           continue;
         }
         try {
+          await client.query(
+            `INSERT INTO provider_task_visibility_tombstone
+               (provider_id, task_id, authorization_context_hash, execution_mode,
+                simulation_id, resource_ref, terminal_at, retain_until)
+             SELECT task.provider_id, task.task_id, task.authorization_context_hash,
+                    task.execution_mode, task.simulation_id, binding.resource_ref,
+                    task.terminal_at,
+                    GREATEST(
+                      COALESCE(binding.retain_until,
+                        task.terminal_at + (1209960000 * interval '1 millisecond')),
+                      $2
+                    )
+             FROM provider_task task
+             LEFT JOIN provider_task_resource_binding binding
+               ON binding.provider_id=task.provider_id AND binding.task_id=task.task_id
+             WHERE task.task_id=$1 AND task.terminal_at IS NOT NULL
+             ON CONFLICT (provider_id, task_id) DO UPDATE
+               SET retain_until=GREATEST(
+                 provider_task_visibility_tombstone.retain_until, EXCLUDED.retain_until
+               )`,
+            [row.task_id, now],
+          );
           await captureTaskOperationalEvent(client, row.task_id, {
             recordType: "provider.ttl.lifecycle",
             eventType: "purge",
@@ -226,6 +248,48 @@ export class TtlCleaner {
           await this.#releaseRecoveryLease(client, row.task_id, lockOwner);
         }
       }
+      await client.query(
+        `DELETE FROM provider_task_resource_binding binding
+         WHERE binding.retain_until <= $1
+           AND NOT EXISTS (
+             SELECT 1 FROM provider_business_event_relation relation
+             JOIN provider_business_event event
+               ON event.provider_id=relation.provider_id
+              AND event.stream_id=relation.stream_id
+              AND event.event_id=relation.event_id
+             WHERE relation.provider_id=binding.provider_id
+               AND relation.task_id=binding.task_id
+               AND event.expires_at > $1
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM provider_business_event_relation_projection_item item
+             JOIN provider_business_event_relation_projection projection
+               ON projection.token_hash=item.token_hash
+             WHERE item.task_id=binding.task_id AND projection.expires_at > $1
+           )`,
+        [now],
+      );
+      await client.query(
+        `DELETE FROM provider_task_visibility_tombstone tombstone
+         WHERE tombstone.retain_until <= $1
+           AND NOT EXISTS (
+             SELECT 1 FROM provider_business_event_relation relation
+             JOIN provider_business_event event
+               ON event.provider_id=relation.provider_id
+              AND event.stream_id=relation.stream_id
+              AND event.event_id=relation.event_id
+             WHERE relation.provider_id=tombstone.provider_id
+               AND relation.task_id=tombstone.task_id
+               AND event.expires_at > $1
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM provider_business_event_relation_projection_item item
+             JOIN provider_business_event_relation_projection projection
+               ON projection.token_hash=item.token_hash
+             WHERE item.task_id=tombstone.task_id AND projection.expires_at > $1
+           )`,
+        [now],
+      );
       await client.query("COMMIT");
       const result = {
         renewed: renewed.rowCount ?? 0,
