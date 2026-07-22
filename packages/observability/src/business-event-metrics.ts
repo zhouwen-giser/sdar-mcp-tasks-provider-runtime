@@ -215,12 +215,9 @@ export class BusinessEventTelemetryBridge {
     readonly prometheusGauges: Record<string, number> = {},
   ) {}
 
-  increment(
-    name: FrozenBusinessEventMetricName,
-    labels: Record<string, string> = {},
-    amount = 1,
-  ): void {
-    const attributes = this.policy.attributes(name, labels);
+  increment(name: string, labels: Record<string, string> = {}, amount = 1): void {
+    const metricName = name as BusinessEventMetricName;
+    const attributes = this.policy.attributes(metricName, labels);
     try {
       this.runtimeMetrics.increment(name, attributes, amount);
     } catch {
@@ -233,12 +230,9 @@ export class BusinessEventTelemetryBridge {
     }
   }
 
-  gauge(
-    name: FrozenBusinessEventGaugeName | "sdar_business_event_active_subscriptions",
-    value: number,
-    labels: Record<string, string> = {},
-  ): void {
-    const attributes = this.policy.attributes(name, labels);
+  gauge(name: string, value: number, labels: Record<string, string> = {}): void {
+    const metricName = name as BusinessEventMetricName;
+    const attributes = this.policy.attributes(metricName, labels);
     try {
       this.prometheusGauges[prometheusMetricKey(name, attributes)] = value;
     } catch {
@@ -251,12 +245,9 @@ export class BusinessEventTelemetryBridge {
     }
   }
 
-  histogram(
-    name: BusinessEventHistogramName,
-    value: number,
-    labels: Record<string, string> = {},
-  ): void {
-    const attributes = this.policy.attributes(name, labels);
+  histogram(name: string, value: number, labels: Record<string, string> = {}): void {
+    const metricName = name as BusinessEventMetricName;
+    const attributes = this.policy.attributes(metricName, labels);
     try {
       this.providerTelemetry?.metric(name, value, attributes, "histogram");
     } catch {
@@ -264,7 +255,8 @@ export class BusinessEventTelemetryBridge {
     }
   }
 
-  event(name: BusinessEventDiagnosticEventName, body: Record<string, unknown>): void {
+  event(name: string, body: Record<string, unknown>): void {
+    if (!BUSINESS_EVENT_DIAGNOSTIC_EVENTS.has(name as BusinessEventDiagnosticEventName)) return;
     try {
       this.providerTelemetry?.event?.(name, sanitizeBusinessEventDiagnosticBody(body));
     } catch {
@@ -273,11 +265,16 @@ export class BusinessEventTelemetryBridge {
   }
 
   async trace<T>(
-    name: BusinessEventSpanName,
+    name: string,
     attributes: Record<string, string | number | boolean>,
     operation: () => Promise<T>,
   ): Promise<T> {
-    if (this.providerTelemetry?.trace === undefined) return operation();
+    if (
+      !BUSINESS_EVENT_SPANS.has(name as BusinessEventSpanName) ||
+      this.providerTelemetry?.trace === undefined
+    ) {
+      return operation();
+    }
     let invoked = false;
     const invoke = (): Promise<T> => {
       invoked = true;
@@ -295,6 +292,29 @@ export class BusinessEventTelemetryBridge {
     }
   }
 }
+
+const BUSINESS_EVENT_DIAGNOSTIC_EVENTS = new Set<BusinessEventDiagnosticEventName>([
+  "business_events.source.connection",
+  "business_events.source.rejected",
+  "business_events.mapping.retry",
+  "business_events.finalizer.wait",
+  "business_events.stream.rotation",
+  "business_events.stream.delivery",
+  "business_events.relation.query",
+]);
+
+const BUSINESS_EVENT_SPANS = new Set<BusinessEventSpanName>([
+  "business_events.source.connect",
+  "business_events.source.ingest",
+  "business_events.source.prepare",
+  "business_events.source.finalize",
+  "business_events.stream.rotate",
+  "business_events.stream.listen",
+  "business_events.stream.replay",
+  "business_events.stream.live",
+  "business_events.relation.query",
+  "business_events.operator.rotate",
+]);
 
 function definition(
   kind: BusinessEventMetricDefinition["kind"],
