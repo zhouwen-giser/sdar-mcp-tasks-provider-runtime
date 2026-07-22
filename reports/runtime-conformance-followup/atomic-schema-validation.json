@@ -1,0 +1,51 @@
+{
+  "generatedFrom": "vitest-json-reporter",
+  "category": "MRTR Unit/Mock Tests",
+  "summary": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0
+  },
+  "tests": [
+    {
+      "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
+      "testTitle": "MRTR atomic locked-schema validation maps invalid client content to invalid_params using the locked schema",
+      "status": "passed",
+      "durationMs": 43.82099499999998,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
+      "testTitle": "MRTR atomic locked-schema validation maps an invalid Provider schema to adapter_contract",
+      "status": "passed",
+      "durationMs": 18.818420000000003,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
+      "testTitle": "MRTR atomic locked-schema validation does not invoke the validator for ANSWERED requests",
+      "status": "passed",
+      "durationMs": 1.7228510000000483,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/mrtr-atomic-validation.test.ts",
+      "testTitle": "MRTR atomic locked-schema validation does not invoke the validator for SUPERSEDED requests",
+      "status": "passed",
+      "durationMs": 0.9278090000000248,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    }
+  ]
+}

@@ -33,6 +33,9 @@ Maximum claim: **Runtime Component Conformant**.
 
 No Runtime Profile-wide, Provider-specific safety, or release-tag claim is made. No tag was created.
 
+A follow-up audit corrected the PostgreSQL coverage breakdown. See
+`reports/runtime-conformance-followup/report-correction.md`.
+
 ## Publication evidence
 
 - Branch: `fix/frozen-runtime-conformance-closure`

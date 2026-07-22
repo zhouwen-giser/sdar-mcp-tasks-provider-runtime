@@ -1,0 +1,81 @@
+{
+  "generatedFrom": "vitest-json-reporter",
+  "category": "MRTR Unit/Mock Tests",
+  "summary": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0
+  },
+  "tests": [
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_POLL_INTERVAL_MS",
+      "status": "passed",
+      "durationMs": 8.776368999999988,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_MAX_SUBSCRIPTIONS",
+      "status": "passed",
+      "durationMs": 2.0118950000000098,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH",
+      "status": "passed",
+      "durationMs": 1.2354589999999916,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_MAX_TASK_BINDINGS",
+      "status": "passed",
+      "durationMs": 1.1469280000000026,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_MAX_QUEUE_MESSAGES",
+      "status": "passed",
+      "durationMs": 1.2243529999999794,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_MAX_QUEUE_BYTES",
+      "status": "passed",
+      "durationMs": 0.9119299999999839,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    },
+    {
+      "testFile": "tests/runtime-conformance-followup/notification-config-bounds.test.ts",
+      "testTitle": "notification configuration frozen bounds accepts exact limits for TASK_NOTIFICATION_BATCH_SIZE",
+      "status": "passed",
+      "durationMs": 1.1116230000000087,
+      "databaseMode": "unit-mock",
+      "implementationCommit": "428bab6dc02f811c1a3e079b8c94f3da206ccca0",
+      "reportCommit": null,
+      "ciRun": null
+    }
+  ]
+}
