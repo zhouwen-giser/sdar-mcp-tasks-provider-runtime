@@ -3,7 +3,10 @@
   "kind": "ConfigMap",
   "metadata": {
     "name": "sdar-runtime-config",
-    "namespace": "sdar-system"
+    "namespace": "sdar-system",
+    "annotations": {
+      "sdar.io/task-notification-bounds": "poll=100..10000,subscriptions=1..10000,per-auth=1..1000,bindings=1..100000,queue-messages=1..1024,queue-bytes=4096..16777216,batch=1..1000"
+    }
   },
   "data": {
     "HOST": "0.0.0.0",
