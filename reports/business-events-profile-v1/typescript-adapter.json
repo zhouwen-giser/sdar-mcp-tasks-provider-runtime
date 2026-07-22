@@ -10,12 +10,12 @@
     "name": "source-conformance",
     "testName": "pnpm exec vitest run tests/business-events/adapter-contract tests/business-events/source tests/business-events/fencing tests/business-events/poison",
     "status": "pass",
-    "durationMs": 5191,
+    "durationMs": 5192,
     "databaseMode": "local-postgresql",
     "replicaCount": 2,
     "sourceDeliveryMode": "durable_and_best_effort",
-    "implementationCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
-    "reportCommit": "d2a86962f05eaf90ae9205e5f6d0144b4212f4f4",
+    "implementationCommit": "936381a66b90b3fcd165457bc5b840183f9d6023",
+    "reportCommit": "936381a66b90b3fcd165457bc5b840183f9d6023",
     "ciRun": "local",
     "exitCode": 0
   }
