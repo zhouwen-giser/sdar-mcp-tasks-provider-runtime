@@ -395,7 +395,15 @@ export async function runConformance(options: ConformanceOptions): Promise<Confo
       );
       const taskId = String(created.taskId);
       assert(taskId.length > 0, "frozen input Task was not published");
-      assert(JSON.stringify(created).includes("elicitation/create"), "frozen MRTR request missing");
+      assert(
+        !("inputRequests" in created) && !("result" in created) && !("error" in created),
+        "CreateTaskResult leaked DetailedTask payload",
+      );
+      const inputRequired = await engine.getFrozenTask(taskId, authorization);
+      assert(
+        JSON.stringify(inputRequired).includes("elicitation/create"),
+        "frozen MRTR request missing from tasks/get",
+      );
       await engine.updateTaskInputResponses(
         taskId,
         { approval: { action: "accept", content: true } },

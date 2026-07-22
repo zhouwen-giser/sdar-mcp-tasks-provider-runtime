@@ -56,7 +56,6 @@ export class Sep2663ProtocolHandler {
           break;
         case "tools/list":
           result = {
-            resultType: "complete",
             tools: this.manifest.operations.map((operation) => operation.tool),
           };
           break;

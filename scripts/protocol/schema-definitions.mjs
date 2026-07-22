@@ -160,6 +160,17 @@ const detailedTaskBase = {
   ],
 };
 
+const createTaskBase = {
+  type: "object",
+  required: detailedTaskBase.required,
+  properties: Object.fromEntries(
+    Object.entries(detailedTaskBase.properties).filter(
+      ([name]) => !["inputRequests", "result", "error"].includes(name),
+    ),
+  ),
+  additionalProperties: false,
+};
+
 const evidencePayloadRef = {
   oneOf: [
     {
@@ -393,9 +404,9 @@ export function protocolSchemas() {
       $defs: {
         ...taskDefs,
         CreateTaskResult: {
-          ...detailedTaskBase,
-          properties: { ...detailedTaskBase.properties, resultType: { const: "task" } },
-          required: [...detailedTaskBase.required, "resultType"],
+          ...createTaskBase,
+          properties: { ...createTaskBase.properties, resultType: { const: "task" } },
+          required: [...createTaskBase.required, "resultType"],
         },
         DetailedTaskResult: {
           ...detailedTaskBase,
@@ -652,7 +663,7 @@ function availabilitySchema() {
   };
   const result = {
     type: "object",
-    required: ["requestId", "operationName", "availability", "riskLevel"],
+    required: ["requestId", "operationName", "availability", "riskLevel", "reservationMode"],
     properties: {
       requestId: { type: "string", minLength: 1, maxLength: 128 },
       operationName: { type: "string", pattern: operationNamePattern },

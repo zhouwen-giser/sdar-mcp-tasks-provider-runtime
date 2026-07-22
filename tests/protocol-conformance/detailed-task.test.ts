@@ -15,7 +15,6 @@ describe("frozen DetailedTask projection", () => {
       resultType: "task",
       taskId: "00000000-0000-4000-8000-000000000001",
       ttlMs: 3_600_000,
-      result: { resultType: "complete", structuredContent: { ok: true } },
       _meta: {
         "io.sdar/taskExecution": { profileVersion: "1.0", runtimeRevision: "42" },
       },
@@ -23,9 +22,23 @@ describe("frozen DetailedTask projection", () => {
     expect(created).not.toHaveProperty("task");
     expect(created).not.toHaveProperty("ttl");
     expect(created).not.toHaveProperty("pollInterval");
+    expect(created).not.toHaveProperty("result");
+    expect(created).not.toHaveProperty("error");
+    expect(created).not.toHaveProperty("inputRequests");
 
     expect(mapTaskToDetailedTask(task, [], "get")).toMatchObject({ resultType: "complete" });
     expect(mapTaskToDetailedTask(task)).not.toHaveProperty("resultType");
+  });
+
+  it.each([
+    ["input_required", { inputRequests: {} }],
+    ["completed", { result: { structuredContent: {}, isError: false } }],
+    ["failed", { error: { code: -32603, message: "Execution failed" } }],
+  ] as const)("keeps %s status payloads out of CreateTaskResult", (mcpStatus, payload) => {
+    const created = mapTaskToDetailedTask(fixture({ mcpStatus, ...payload }), [], "create");
+    expect(created).not.toHaveProperty("inputRequests");
+    expect(created).not.toHaveProperty("result");
+    expect(created).not.toHaveProperty("error");
   });
 
   it("C-017 maps input_required with open MRTR requests by stable request key", () => {

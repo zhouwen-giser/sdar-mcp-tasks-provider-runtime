@@ -75,10 +75,13 @@ describe("independently deployed Runtime stack", () => {
     });
 
     const tools = await frozenRequest("tools/list", {}, 2);
-    expect(tools.json()).toMatchObject({ result: { resultType: "complete" } });
-    expect(
-      tools.json<{ result: { tools: { name: string }[] } }>().result.tools.map((tool) => tool.name),
-    ).toEqual(["echo_sync", "durable_task", "flex_task"]);
+    const toolsBody = tools.json<{ result: { tools: { name: string }[] } }>();
+    expect(toolsBody.result).not.toHaveProperty("resultType");
+    expect(toolsBody.result.tools.map((tool) => tool.name)).toEqual([
+      "echo_sync",
+      "durable_task",
+      "flex_task",
+    ]);
 
     const synchronous = await frozenRequest(
       "tools/call",

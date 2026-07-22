@@ -62,6 +62,7 @@ goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.ReconcileExecutionResponse
 goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.ReconcileStatus', null, global);
 goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.RequestCancelRequest', null, global);
 goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.RequestMetadata', null, global);
+goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.ReservationMode', null, global);
 goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.ResourceBinding', null, global);
 goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.ResourceBinding.Mode', null, global);
 goog.exportSymbol('proto.io.sdar.mcp.tasks.adapter.v1.ResourceInstance', null, global);
@@ -4214,7 +4215,9 @@ proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.toObject = function(includ
     nextAvailableWindowsList: jspb.Message.toObjectList(msg.getNextAvailableWindowsList(),
     proto.io.sdar.mcp.tasks.adapter.v1.AvailableWindow.toObject, includeInstance),
     estimatedDelayMs: jspb.Message.getFieldWithDefault(msg, 10, 0),
-    possibleEffectsList: (f = jspb.Message.getRepeatedField(msg, 11)) == null ? undefined : f
+    possibleEffectsList: (f = jspb.Message.getRepeatedField(msg, 11)) == null ? undefined : f,
+    reservationMode: jspb.Message.getFieldWithDefault(msg, 12, 0),
+    reservationRef: jspb.Message.getFieldWithDefault(msg, 13, "")
   };
 
   if (includeInstance) {
@@ -4297,6 +4300,14 @@ proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.deserializeBinaryFromReade
     case 11:
       var value = /** @type {string} */ (reader.readString());
       msg.addPossibleEffects(value);
+      break;
+    case 12:
+      var value = /** @type {!proto.io.sdar.mcp.tasks.adapter.v1.ReservationMode} */ (reader.readEnum());
+      msg.setReservationMode(value);
+      break;
+    case 13:
+      var value = /** @type {string} */ (reader.readString());
+      msg.setReservationRef(value);
       break;
     default:
       reader.skipField();
@@ -4404,6 +4415,20 @@ proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.serializeBinaryToWriter = 
   if (f.length > 0) {
     writer.writeRepeatedString(
       11,
+      f
+    );
+  }
+  f = message.getReservationMode();
+  if (f !== 0.0) {
+    writer.writeEnum(
+      12,
+      f
+    );
+  }
+  f = /** @type {string} */ (jspb.Message.getField(message, 13));
+  if (f != null) {
+    writer.writeString(
+      13,
       f
     );
   }
@@ -4682,6 +4707,60 @@ proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.addPossibleEffec
  */
 proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.clearPossibleEffectsList = function() {
   return this.setPossibleEffectsList([]);
+};
+
+
+/**
+ * optional ReservationMode reservation_mode = 12;
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.ReservationMode}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.getReservationMode = function() {
+  return /** @type {!proto.io.sdar.mcp.tasks.adapter.v1.ReservationMode} */ (jspb.Message.getFieldWithDefault(this, 12, 0));
+};
+
+
+/**
+ * @param {!proto.io.sdar.mcp.tasks.adapter.v1.ReservationMode} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.setReservationMode = function(value) {
+  return jspb.Message.setProto3EnumField(this, 12, value);
+};
+
+
+/**
+ * optional string reservation_ref = 13;
+ * @return {string}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.getReservationRef = function() {
+  return /** @type {string} */ (jspb.Message.getFieldWithDefault(this, 13, ""));
+};
+
+
+/**
+ * @param {string} value
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.setReservationRef = function(value) {
+  return jspb.Message.setField(this, 13, value);
+};
+
+
+/**
+ * Clears the field making it undefined.
+ * @return {!proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult} returns this
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.clearReservationRef = function() {
+  return jspb.Message.setField(this, 13, undefined);
+};
+
+
+/**
+ * Returns whether this field is set.
+ * @return {boolean}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.AvailabilityResult.prototype.hasReservationRef = function() {
+  return jspb.Message.getField(this, 13) != null;
 };
 
 
@@ -12805,6 +12884,16 @@ proto.io.sdar.mcp.tasks.adapter.v1.RiskLevel = {
   MEDIUM: 2,
   HIGH: 3,
   CRITICAL: 4
+};
+
+/**
+ * @enum {number}
+ */
+proto.io.sdar.mcp.tasks.adapter.v1.ReservationMode = {
+  RESERVATION_MODE_UNSPECIFIED: 0,
+  NONE: 1,
+  BEST_EFFORT: 2,
+  GUARANTEED: 3
 };
 
 /**

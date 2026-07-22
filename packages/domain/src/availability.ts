@@ -33,7 +33,7 @@ export interface AvailabilityResultValue {
   earliestStartTime?: string;
   nextAvailableWindows?: { startTime: string; endTime: string }[];
   estimatedDelayMs?: number;
-  reservationMode?: ReservationMode;
+  reservationMode: ReservationMode;
   reservationRef?: string;
   possibleEffects?: string[];
 }
@@ -53,6 +53,13 @@ export function validateAvailabilityResponse(
   const requestedById = new Map(requested.map((check) => [check.requestId, check]));
   const seen = new Set<string>();
   for (const result of results) {
+    const reservationMode: unknown = result.reservationMode;
+    if (
+      typeof reservationMode !== "string" ||
+      !["none", "best_effort", "guaranteed"].includes(reservationMode)
+    ) {
+      throw new Error("AVAILABILITY_RESERVATION_MODE_MISSING");
+    }
     if (
       !(["available", "restricted", "disabled", "unknown"] as string[]).includes(
         result.availability,
@@ -122,6 +129,7 @@ export function unknownAvailability(requested: AvailabilityCheck[]): Availabilit
       riskLevel: "critical",
       reasonCode: "ADAPTER_TRANSIENT_UNAVAILABLE",
       description: "Availability could not be determined; final admission still applies.",
+      reservationMode: "none",
     })),
   };
 }

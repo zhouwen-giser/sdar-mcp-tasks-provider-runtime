@@ -3,7 +3,7 @@
   "measurementEnvironment": "win32/x64 Docker Engine",
   "image": "sdar-runtime:v2-audit-primary",
   "base": "node:22-bookworm-slim",
-  "sizeBytes": 99920328,
+  "sizeBytes": 99923345,
   "maximumBytes": 350000000,
   "user": "node",
   "layers": 11,

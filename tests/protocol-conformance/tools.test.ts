@@ -13,7 +13,6 @@ describe("frozen tools/list", () => {
     expect(response.httpStatus).toBe(200);
     expect(response.body).toMatchObject({
       result: {
-        resultType: "complete",
         tools: [
           {
             name: "embodied.move",
@@ -28,6 +27,7 @@ describe("frozen tools/list", () => {
         ],
       },
     });
+    expect(response.body).not.toHaveProperty("result.resultType");
     const serialized = JSON.stringify(response.body);
     expect(serialized).not.toContain('"execution"');
     expect(serialized).not.toContain('"supportsCancel"');

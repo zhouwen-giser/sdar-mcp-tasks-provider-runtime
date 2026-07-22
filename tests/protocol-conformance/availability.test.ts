@@ -90,6 +90,7 @@ describe("frozen Availability envelope", () => {
           operationName: "op",
           availability: "restricted",
           riskLevel: "high",
+          reservationMode: "none",
           validUntil: "2026-07-18T03:10:00.000Z",
         },
       ]),

@@ -33,8 +33,8 @@
     },
     {
       "path": "mcp-tasks-sep2663.schema.json",
-      "sha256": "728ca2f1c37643bdcf5f4ccb7bdbd52b1dda8f167a1941f7f28fb4bd8cfa3c8b",
-      "sizeBytes": 44038
+      "sha256": "54e754fe1eda17a31c7c9fba4b13844a838a28c43166ec26af24eb95176a77ef",
+      "sizeBytes": 41066
     },
     {
       "path": "pms-mismatch.schema.json",
@@ -48,8 +48,8 @@
     },
     {
       "path": "sdar-availability-v1.schema.json",
-      "sha256": "9f2d2bfffea114a297ffa1ab3ce8f6b464fb43b9da8c347ceeb5eeaaf01c4977",
-      "sizeBytes": 12358
+      "sha256": "6b14556b083e0e1f4bf72eff5fa2a838220baf6d0fc5063b191329a5bad01a9f",
+      "sizeBytes": 12385
     },
     {
       "path": "sdar-evidence-v1.schema.json",

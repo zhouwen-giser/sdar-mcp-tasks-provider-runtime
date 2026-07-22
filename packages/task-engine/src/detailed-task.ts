@@ -47,6 +47,10 @@ export function mapTaskToDetailedTask(
     },
   };
 
+  // SEP-2663 CreateTaskResult is the operational Task base. Status-specific
+  // payloads are exposed only by tasks/get and task notifications.
+  if (projection === "create") return base;
+
   if (task.mcpStatus === "input_required") {
     const open = inputRequests.filter((request) => request.status === "OPEN");
     if (open.length === 0) throw new Error("TASK_INPUT_REQUESTS_MISSING");

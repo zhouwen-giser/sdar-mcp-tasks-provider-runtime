@@ -130,6 +130,8 @@ export interface AvailabilityResult {
   earliestStartTime?: unknown;
   nextAvailableWindows: { startTime?: unknown; endTime?: unknown }[];
   estimatedDelayMs: string | number;
+  reservationMode: string;
+  reservationRef?: string;
   possibleEffects: string[];
 }
 
