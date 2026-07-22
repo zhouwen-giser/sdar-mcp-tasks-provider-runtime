@@ -45,6 +45,21 @@ describe("Runtime configuration", () => {
     );
   });
 
+  it.each([
+    ["TASK_NOTIFICATION_POLL_INTERVAL_MS", 100, 10_000],
+    ["TASK_NOTIFICATION_MAX_SUBSCRIPTIONS", 1, 10_000],
+    ["TASK_NOTIFICATION_MAX_SUBSCRIPTIONS_PER_AUTH", 1, 1_000],
+    ["TASK_NOTIFICATION_MAX_TASK_BINDINGS", 1, 100_000],
+    ["TASK_NOTIFICATION_MAX_QUEUE_MESSAGES", 1, 1_024],
+    ["TASK_NOTIFICATION_MAX_QUEUE_BYTES", 4_096, 16_777_216],
+    ["TASK_NOTIFICATION_BATCH_SIZE", 1, 1_000],
+  ] as const)("enforces frozen notification bound %s", (name, minimum, maximum) => {
+    expect(loadRuntimeConfig({ [name]: String(minimum) })[name]).toBe(minimum);
+    expect(loadRuntimeConfig({ [name]: String(maximum) })[name]).toBe(maximum);
+    expect(() => loadRuntimeConfig({ [name]: String(minimum - 1) })).toThrow();
+    expect(() => loadRuntimeConfig({ [name]: String(maximum + 1) })).toThrow();
+  });
+
   it("parses opt-in OTLP configuration without making telemetry a readiness dependency", () => {
     const config = loadRuntimeConfig({
       OTEL_ENABLED: "true",

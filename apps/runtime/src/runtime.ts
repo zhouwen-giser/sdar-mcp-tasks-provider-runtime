@@ -384,7 +384,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           maxQueueBytes: config.TASK_NOTIFICATION_MAX_QUEUE_BYTES,
           batchSize: config.TASK_NOTIFICATION_BATCH_SIZE,
           metrics: {
-            increment: (name, amount = 1) => metrics.increment(name, {}, amount),
+            increment: (name, labels = {}, amount = 1) => metrics.increment(name, labels, amount),
             gauge: (name, value) => {
               telemetrySelfGauges[name] = value;
             },

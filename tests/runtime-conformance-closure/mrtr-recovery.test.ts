@@ -156,7 +156,7 @@ describe("MRTR durable recovery", () => {
     const command = commands[0];
     if (command === undefined) throw new Error("Expected promoted UPDATE command");
 
-    await repository.rejectClaimedCommand(
+    await repository.rejectInputResponseAndFailTask(
       command,
       "ADAPTER_REJECTED",
       "Adapter rejected the input response.",
@@ -165,6 +165,14 @@ describe("MRTR durable recovery", () => {
     expect(await inboxRecord(taskId)).toMatchObject({
       state: "FAILED",
       last_error_code: "INPUT_RESPONSE_REJECTED",
+    });
+    expect(await repository.listInputRequests(taskId)).toMatchObject([
+      { key: "approval", status: "SUPERSEDED" },
+    ]);
+    expect(await repository.getById(taskId)).toMatchObject({
+      internalState: "TERMINAL_FAILED",
+      mcpStatus: "failed",
+      error: { code: -32603, data: { reasonCode: "INPUT_RESPONSE_REJECTED" } },
     });
   });
 

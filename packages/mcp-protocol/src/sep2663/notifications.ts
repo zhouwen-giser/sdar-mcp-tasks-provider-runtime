@@ -7,7 +7,7 @@ import { FrozenErrorCode, FrozenProtocolError, invalidParams } from "./errors.js
 import type { FrozenJsonRpcRequest } from "./request-validator.js";
 
 export interface TaskNotificationMetrics {
-  increment(name: string, amount?: number): void;
+  increment(name: string, labels?: Record<string, string>, amount?: number): void;
   gauge(name: string, value: number): void;
 }
 
@@ -34,7 +34,8 @@ interface WriterOptions {
   maxMessages: number;
   maxBytes: number;
   onQueueDelta(messages: number, bytes: number): void;
-  onRejected(): void;
+  onRejected(reason: "queue_message_limit" | "queue_byte_limit"): void;
+  onSent(): void;
 }
 
 export class TaskNotificationWriter {
@@ -52,11 +53,13 @@ export class TaskNotificationWriter {
     if (this.#closed) return false;
     const frame = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
     const bytes = Buffer.byteLength(frame);
-    if (
-      this.#queue.length + 1 > this.options.maxMessages ||
-      this.#queueBytes + bytes > this.options.maxBytes
-    ) {
-      this.options.onRejected();
+    if (this.#queue.length + 1 > this.options.maxMessages) {
+      this.options.onRejected("queue_message_limit");
+      this.close();
+      return false;
+    }
+    if (this.#queueBytes + bytes > this.options.maxBytes) {
+      this.options.onRejected("queue_byte_limit");
       this.close();
       return false;
     }
@@ -90,7 +93,9 @@ export class TaskNotificationWriter {
       if (next === undefined) return;
       this.#queueBytes -= next.bytes;
       this.options.onQueueDelta(-1, -next.bytes);
-      if (!this.response.write(next.frame)) {
+      const writable = this.response.write(next.frame);
+      this.options.onSent();
+      if (!writable) {
         this.#waitingForDrain = true;
         this.response.once("drain", () => {
           this.#waitingForDrain = false;
@@ -174,7 +179,11 @@ export class TaskNotificationManager {
       maxMessages: this.#options.maxQueueMessages,
       maxBytes: this.#options.maxQueueBytes,
       onQueueDelta: (messages, bytes) => this.#updateQueueMetrics(messages, bytes),
-      onRejected: () => this.#increment("sdar_task_notification_rejections_total"),
+      onRejected: (reason) => {
+        this.#increment("sdar_task_notification_events_total", { outcome: "overflow" });
+        this.#increment("sdar_task_notification_rejections_total", { reason });
+      },
+      onSent: () => this.#increment("sdar_task_notification_events_total", { outcome: "sent" }),
     });
     subscription.acceptedTaskIds = requestedTaskIds;
     this.#subscriptions.set(identity.internalId, subscription);
@@ -330,6 +339,7 @@ export class TaskNotificationManager {
     if (previous?.revision === revision) {
       if (previous.signature !== next.signature)
         throw new Error("TASK_NOTIFICATION_REVISION_CONFLICT");
+      this.#increment("sdar_task_notification_events_total", { outcome: "deduplicated" });
       return;
     }
     if (previous?.terminal === true && !next.terminal) {
@@ -347,7 +357,7 @@ export class TaskNotificationManager {
     for (let offset = 0; offset < taskIds.length; offset += this.#options.batchSize) {
       const batch = taskIds.slice(offset, offset + this.#options.batchSize);
       this.#increment("sdar_task_notification_poll_batches_total");
-      this.#increment("sdar_task_notification_poll_tasks_total", batch.length);
+      this.#increment("sdar_task_notification_poll_tasks_total", {}, batch.length);
       if (this.taskEngine.getFrozenTasks !== undefined) {
         const loaded = await this.taskEngine.getFrozenTasks(batch, authorization);
         for (const [taskId, snapshot] of loaded) snapshots.set(taskId, snapshot);
@@ -382,12 +392,16 @@ export class TaskNotificationManager {
     const perAuthorization = [...this.#subscriptions.values()].filter(
       (subscription) => subscription.identity.authorizationScope === authorizationKey,
     ).length;
-    if (
-      this.#subscriptions.size >= this.#options.maxSubscriptions ||
-      perAuthorization >= this.#options.maxSubscriptionsPerAuth ||
-      this.#taskBindings + requestedBindings > this.#options.maxTaskBindings
-    ) {
-      this.#increment("sdar_task_notification_rejections_total");
+    const reason =
+      this.#subscriptions.size >= this.#options.maxSubscriptions
+        ? "replica_limit"
+        : perAuthorization >= this.#options.maxSubscriptionsPerAuth
+          ? "authorization_limit"
+          : this.#taskBindings + requestedBindings > this.#options.maxTaskBindings
+            ? "binding_limit"
+            : null;
+    if (reason !== null) {
+      this.#increment("sdar_task_notification_rejections_total", { reason });
       throw new FrozenProtocolError(
         FrozenErrorCode.InternalError,
         "Task notification capacity exceeded",
@@ -404,16 +418,15 @@ export class TaskNotificationManager {
     subscription: TaskNotificationSubscription,
     snapshot: Record<string, unknown>,
   ): boolean {
-    const accepted = subscription.writer.enqueue(
+    return subscription.writer.enqueue(
       taskNotification(subscription.identity.wireRequestId, snapshot),
     );
-    if (accepted) this.#increment("sdar_task_notification_events_total");
-    return accepted;
   }
 
   #release(subscription: TaskNotificationSubscription): void {
     if (!this.#subscriptions.delete(subscription.identity.internalId)) return;
     subscription.writer.dispose();
+    this.#increment("sdar_task_notification_events_total", { outcome: "closed" });
     this.#taskBindings -= subscription.acceptedTaskIds.length;
     const key = transportWireIndexKey(subscription.identity);
     const indexed = this.#transportWireIndex.get(key);
@@ -421,6 +434,7 @@ export class TaskNotificationManager {
     if (indexed?.size === 0) this.#transportWireIndex.delete(key);
     this.#increment(
       "sdar_task_notification_stream_duration_seconds",
+      {},
       (Date.now() - subscription.startedAt) / 1000,
     );
     this.#updateActiveMetrics();
@@ -433,17 +447,29 @@ export class TaskNotificationManager {
   #updateQueueMetrics(messages: number, bytes: number): void {
     this.#queueMessages += messages;
     this.#queueBytes += bytes;
-    this.#metrics?.gauge("sdar_task_notification_queue_messages", this.#queueMessages);
-    this.#metrics?.gauge("sdar_task_notification_queue_bytes", this.#queueBytes);
+    this.#gauge("sdar_task_notification_queue_messages", this.#queueMessages);
+    this.#gauge("sdar_task_notification_queue_bytes", this.#queueBytes);
   }
 
   #updateActiveMetrics(): void {
-    this.#metrics?.gauge("sdar_task_notification_active_subscriptions", this.#subscriptions.size);
-    this.#metrics?.gauge("sdar_task_notification_active_bindings", this.#taskBindings);
+    this.#gauge("sdar_task_notification_active_subscriptions", this.#subscriptions.size);
+    this.#gauge("sdar_task_notification_active_bindings", this.#taskBindings);
   }
 
-  #increment(name: string, amount = 1): void {
-    this.#metrics?.increment(name, amount);
+  #increment(name: string, labels: Record<string, string> = {}, amount = 1): void {
+    try {
+      this.#metrics?.increment(name, labels, amount);
+    } catch {
+      // Telemetry is fail-open and cannot affect subscription behavior.
+    }
+  }
+
+  #gauge(name: string, value: number): void {
+    try {
+      this.#metrics?.gauge(name, value);
+    } catch {
+      // Telemetry is fail-open and cannot affect subscription behavior.
+    }
   }
 }
 

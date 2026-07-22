@@ -22,6 +22,7 @@ import type {
 } from "../../domain/src/index.js";
 import {
   CapabilityNotSupportedError,
+  AdapterContractError,
   defaultTiming,
   InvalidParamsError,
   CommandInProgressError,
@@ -860,17 +861,24 @@ export class TaskEngine {
     if (!operation.capabilities.inputRequired) {
       throw new CapabilityNotSupportedError("INPUT_NOT_SUPPORTED");
     }
-    const requests = await this.#repository.listInputRequests(taskId);
     const ajv = new Ajv2020({ strict: true, allErrors: true });
-    for (const [key, response] of Object.entries(inputResponses)) {
-      const request = requests.find((candidate) => candidate.key === key);
-      if (request === undefined) continue;
-      if (request.status !== "OPEN") continue;
-      if (response.action === "accept" && !ajv.compile(request.schema)(response.content)) {
-        throw new InvalidParamsError("INVALID_INPUT_RESPONSE");
-      }
-    }
-    await this.#repository.acceptMcpInputResponses(taskId, authorization, inputResponses);
+    await this.#repository.acceptMcpInputResponses(
+      taskId,
+      authorization,
+      inputResponses,
+      (request, response) => {
+        if (response.action !== "accept") return;
+        let validate;
+        try {
+          validate = ajv.compile(request.schema);
+        } catch (error) {
+          throw new AdapterContractError("INVALID_INPUT_SCHEMA", { cause: error });
+        }
+        if (!validate(response.content)) {
+          throw new InvalidParamsError("INVALID_INPUT_RESPONSE");
+        }
+      },
+    );
   }
 
   async controlTask(

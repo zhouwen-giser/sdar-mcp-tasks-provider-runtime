@@ -61,6 +61,7 @@ jobs:
           name: release-evidence
           path: |
             reports/capacity/*.json
+            reports/runtime-conformance-followup/**
             reports/protocol-v1-conformance/*
             reports/protocol-v1-migration/*.json
             reports/sbom/*.json
