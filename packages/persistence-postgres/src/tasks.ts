@@ -121,6 +121,13 @@ function mapPendingCommandRecord(row: PendingCommandRecordRow): PendingCommandRe
   };
 }
 
+function assertUuidList(values: readonly string[]): void {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (values.some((value) => !uuid.test(value))) {
+    throw new Error("RUNTIME_CONTRACT_INVALID_TASK_UUID");
+  }
+}
+
 function mapCommandResolution(row: PendingCommandRecordRow): Omit<CommandResolution, "duplicate"> {
   return {
     sequence: Number(row.command_sequence),
@@ -155,6 +162,21 @@ export interface McpInputResponse {
   action: "accept" | "decline" | "cancel";
   content?: unknown;
 }
+
+export interface LockedInputResponseRequest {
+  key: string;
+  status: "OPEN" | "ANSWERED" | "SUPERSEDED";
+  schema: Record<string, unknown>;
+  requestJson: {
+    method: "elicitation/create";
+    params: Record<string, unknown>;
+  };
+}
+
+export type ValidateLockedInputResponse = (
+  request: LockedInputResponseRequest,
+  response: McpInputResponse,
+) => void;
 
 export interface InputResponseAcceptance {
   acceptedKeys: string[];
@@ -678,13 +700,14 @@ export class TaskRepository {
     authorization: AuthorizationContext,
   ): Promise<TaskRecord[]> {
     if (taskIds.length === 0) return [];
+    assertUuidList(taskIds);
     const result = await this.pool.query<TaskRow & { handle_expired: boolean }>(
       `SELECT *,
               (internal_state LIKE 'TERMINAL_%'
                AND handle_expires_at IS NOT NULL
                AND handle_expires_at <= clock_timestamp()) AS handle_expired
        FROM provider_task
-       WHERE task_id::text = ANY($1::text[])
+       WHERE task_id = ANY($1::uuid[])
          AND authorization_context_hash=$2 AND execution_mode=$3
          AND simulation_id IS NOT DISTINCT FROM $4
        ORDER BY task_id`,
@@ -1073,6 +1096,143 @@ export class TaskRepository {
     }
   }
 
+  async rejectInputResponseAndFailTask(
+    command: PendingCommandRecord,
+    reasonCode: string,
+    message: string,
+  ): Promise<"failed" | "task_terminal" | "superseded_by_safe_stop"> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const lockedTask = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new Error("TASK_NOT_FOUND");
+      const claimed = await client.query(
+        `SELECT 1 FROM task_command
+         WHERE task_id=$1 AND command_sequence=$2 AND command_type='UPDATE'
+           AND state='CLAIMED' AND claim_owner=$3
+         FOR UPDATE`,
+        [command.taskId, command.commandSequence, command.claimOwner],
+      );
+      if (claimed.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+
+      const terminal = isTerminalState(task.internal_state);
+      const safeStop =
+        task.cancel_requested || task.stop_reason !== null || task.internal_state === "STOPPING";
+      const disposition = terminal
+        ? "task_terminal"
+        : safeStop
+          ? "superseded_by_safe_stop"
+          : "failed";
+      const commandCode = terminal
+        ? "TASK_TERMINAL"
+        : safeStop
+          ? "SUPERSEDED_BY_SAFE_STOP"
+          : reasonCode;
+      const commandState = disposition === "failed" ? "REJECTED" : "EXHAUSTED";
+
+      await client.query(
+        `UPDATE task_command
+         SET state=$4, claim_owner=NULL, claim_until=NULL, last_error_code=$5,
+             last_error_message=$6, updated_at=clock_timestamp()
+         WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
+        [
+          command.taskId,
+          command.commandSequence,
+          command.claimOwner,
+          commandState,
+          commandCode,
+          disposition === "failed" ? message : "Input response was superseded by task state.",
+        ],
+      );
+      const responseKeys = Object.keys(
+        (command.payload.inputResponses as Record<string, unknown> | undefined) ?? {},
+      );
+      if (responseKeys.length > 0 && !terminal) {
+        await client.query(
+          `UPDATE task_input_request SET status='SUPERSEDED'
+           WHERE task_id=$1 AND request_key=ANY($2::text[]) AND status='OPEN'`,
+          [command.taskId, responseKeys],
+        );
+      }
+      const inboxState = disposition === "failed" ? "FAILED" : "IGNORED";
+      await client.query(
+        `UPDATE task_input_response_inbox
+         SET state=$3, failed_at=CASE WHEN $3='FAILED' THEN clock_timestamp() ELSE failed_at END,
+             updated_at=clock_timestamp(), last_error_code=$4, last_error_message=$5
+         WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+        [
+          command.taskId,
+          command.commandSequence,
+          inboxState,
+          disposition === "failed" ? "INPUT_RESPONSE_REJECTED" : commandCode,
+          disposition === "failed"
+            ? "Input response was rejected."
+            : "Input response was superseded by task state.",
+        ],
+      );
+      if (!terminal && !safeStop) {
+        await transitionTask(client, {
+          taskId: command.taskId,
+          expectedVersion: Number(task.version),
+          update: {
+            internalState: "TERMINAL_FAILED",
+            mcpStatus: "failed",
+            substate: null,
+            statusMessage: "Input response was rejected.",
+            result: null,
+            error: {
+              code: -32603,
+              message: "Input response was rejected.",
+              data: { reasonCode: "INPUT_RESPONSE_REJECTED" },
+            },
+          },
+          observation: {
+            type: "task.failed",
+            occurredAt: new Date(),
+            reasonCode: "INPUT_RESPONSE_REJECTED",
+            message: "Input response was rejected.",
+            substate: null,
+            source: "runtime",
+            payload: { commandSequence: command.commandSequence },
+          },
+          outboxType: "task.failed",
+          eventKey: `${command.taskId}:command:${String(command.commandSequence)}:input-rejected`,
+          outboxPayload: {
+            commandSequence: command.commandSequence,
+            reasonCode: "INPUT_RESPONSE_REJECTED",
+          },
+        });
+      }
+      await insertCommandFact(
+        client,
+        command.taskId,
+        {
+          sequence: command.commandSequence,
+          commandType: command.commandType,
+          state: commandState,
+          attemptCount: command.attemptCount,
+        },
+        disposition === "failed" ? "task.command.rejected" : "task.command.superseded",
+        {
+          previousState: "CLAIMED",
+          reasonCode: commandCode,
+          adapterRpcStatus: disposition === "failed" ? "rejected" : "not_dispatched",
+        },
+      );
+      await client.query("COMMIT");
+      return disposition;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async failInputResponseDelivery(command: PendingCommandRecord, message: string): Promise<void> {
     const client = await this.pool.connect();
     try {
@@ -1083,23 +1243,47 @@ export class TaskRepository {
       );
       const task = lockedTask.rows[0];
       if (task === undefined) throw new Error("TASK_NOT_FOUND");
+      const terminal = isTerminalState(task.internal_state);
+      const safeStop =
+        task.cancel_requested || task.stop_reason !== null || task.internal_state === "STOPPING";
+      const commandCode = terminal
+        ? "TASK_TERMINAL"
+        : safeStop
+          ? "SUPERSEDED_BY_SAFE_STOP"
+          : "INPUT_RESPONSE_DELIVERY_EXHAUSTED";
       const exhausted = await client.query(
         `UPDATE task_command
          SET state='EXHAUSTED', claim_owner=NULL, claim_until=NULL,
-             last_error_code='INPUT_RESPONSE_DELIVERY_EXHAUSTED', last_error_message=$4,
+             last_error_code=$4, last_error_message=$5,
              updated_at=clock_timestamp()
          WHERE task_id=$1 AND command_sequence=$2 AND state='CLAIMED' AND claim_owner=$3`,
-        [command.taskId, command.commandSequence, command.claimOwner, message],
+        [command.taskId, command.commandSequence, command.claimOwner, commandCode, message],
       );
       if (exhausted.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
+      const responseKeys = Object.keys(
+        (command.payload.inputResponses as Record<string, unknown> | undefined) ?? {},
+      );
+      if (responseKeys.length > 0 && !terminal) {
+        await client.query(
+          `UPDATE task_input_request SET status='SUPERSEDED'
+           WHERE task_id=$1 AND request_key=ANY($2::text[]) AND status='OPEN'`,
+          [command.taskId, responseKeys],
+        );
+      }
       await client.query(
         `UPDATE task_input_response_inbox
-         SET state='FAILED', failed_at=clock_timestamp(), updated_at=clock_timestamp(),
-             last_error_code='INPUT_RESPONSE_DELIVERY_EXHAUSTED', last_error_message=$3
+         SET state=$3, failed_at=CASE WHEN $3='FAILED' THEN clock_timestamp() ELSE failed_at END,
+             updated_at=clock_timestamp(), last_error_code=$4, last_error_message=$5
          WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
-        [command.taskId, command.commandSequence, message],
+        [
+          command.taskId,
+          command.commandSequence,
+          terminal || safeStop ? "IGNORED" : "FAILED",
+          commandCode,
+          message,
+        ],
       );
-      if (!isTerminalState(task.internal_state)) {
+      if (!terminal && !safeStop) {
         await transitionTask(client, {
           taskId: command.taskId,
           expectedVersion: Number(task.version),
@@ -1144,7 +1328,7 @@ export class TaskRepository {
         "task.command.exhausted",
         {
           previousState: "CLAIMED",
-          reasonCode: "INPUT_RESPONSE_DELIVERY_EXHAUSTED",
+          reasonCode: commandCode,
           adapterRpcStatus: "error",
         },
       );
@@ -2156,6 +2340,7 @@ export class TaskRepository {
     const byTaskId = new Map<string, InputRequestRecord[]>();
     for (const taskId of taskIds) byTaskId.set(taskId, []);
     if (taskIds.length === 0) return byTaskId;
+    assertUuidList(taskIds);
     const result = await this.pool.query<{
       task_id: string;
       request_key: string;
@@ -2168,10 +2353,10 @@ export class TaskRepository {
       response_hash: string | null;
       response_json: Record<string, unknown> | null;
     }>(
-      `SELECT task_id::text AS task_id, request_key, description, schema, required, status,
+      `SELECT task_id, request_key, description, schema, required, status,
               answer_hash, request_json, response_hash, response_json
        FROM task_input_request
-       WHERE task_id::text = ANY($1::text[])
+       WHERE task_id = ANY($1::uuid[])
        ORDER BY task_id, created_at, request_key`,
       [taskIds],
     );
@@ -2197,6 +2382,7 @@ export class TaskRepository {
     taskId: string,
     authorization: AuthorizationContext,
     inputResponses: Record<string, McpInputResponse>,
+    validateLockedResponse: ValidateLockedInputResponse = () => undefined,
   ): Promise<InputResponseAcceptance> {
     const client = await this.pool.connect();
     try {
@@ -2227,8 +2413,10 @@ export class TaskRepository {
               await client.query<{
                 request_key: string;
                 status: InputRequestRecord["status"];
+                schema: Record<string, unknown>;
+                request_json: InputRequestRecord["requestJson"];
               }>(
-                `SELECT request_key, status FROM task_input_request
+                `SELECT request_key, status, schema, request_json FROM task_input_request
                  WHERE task_id=$1 AND request_key=ANY($2::text[])
                  ORDER BY request_key FOR UPDATE`,
                 [taskId, keys],
@@ -2257,6 +2445,15 @@ export class TaskRepository {
           result.ignoredSupersededKeys.push(key);
           continue;
         }
+        validateLockedResponse(
+          {
+            key,
+            status: request.status,
+            schema: request.schema,
+            requestJson: request.request_json,
+          },
+          response,
+        );
         const responseHash = createHash("sha256")
           .update(canonicalizeResponse(response))
           .digest("hex");
@@ -2310,45 +2507,44 @@ export class TaskRepository {
     if (!Number.isInteger(limit) || limit < 1 || limit > 1024) {
       throw new RangeError("INPUT_RESPONSE_PROMOTION_LIMIT_INVALID");
     }
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const pending = await client.query<{
-        task_id: string;
-        request_key: string;
-        response_hash: string;
-        response_json: McpInputResponse;
-      }>(
-        `WITH candidate_tasks AS (
-           SELECT task_id, min(accepted_at) AS first_accepted_at
-           FROM task_input_response_inbox
-           WHERE state='PENDING'
-           GROUP BY task_id
-           ORDER BY first_accepted_at, task_id
-           LIMIT $1
-         )
-         SELECT inbox.task_id, inbox.request_key, inbox.response_hash, inbox.response_json
-         FROM task_input_response_inbox inbox
-         JOIN candidate_tasks USING (task_id)
-         WHERE inbox.state='PENDING'
-         ORDER BY inbox.task_id, inbox.accepted_at, inbox.request_key
-         FOR UPDATE OF inbox SKIP LOCKED`,
-        [limit],
-      );
-      const byTask = new Map<string, typeof pending.rows>();
-      for (const row of pending.rows) {
-        const rows = byTask.get(row.task_id) ?? [];
-        rows.push(row);
-        byTask.set(row.task_id, rows);
-      }
-      let promoted = 0;
-      for (const [taskId, responses] of byTask) {
+    const candidates = await this.pool.query<{ task_id: string }>(
+      `SELECT task_id
+       FROM task_input_response_inbox
+       WHERE state='PENDING'
+       GROUP BY task_id
+       ORDER BY min(accepted_at), task_id
+       LIMIT $1`,
+      [limit],
+    );
+    let promoted = 0;
+    for (const taskId of candidates.rows.map((row) => row.task_id).sort()) {
+      const client = await this.pool.connect();
+      try {
+        await client.query("BEGIN");
         const lockedTask = await client.query<TaskRow>(
           "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
           [taskId],
         );
         const task = lockedTask.rows[0];
         if (task === undefined) throw new Error("TASK_NOT_FOUND");
+        const responses = (
+          await client.query<{
+            request_key: string;
+            response_hash: string;
+            response_json: McpInputResponse;
+          }>(
+            `SELECT request_key, response_hash, response_json
+             FROM task_input_response_inbox
+             WHERE task_id=$1 AND state='PENDING'
+             ORDER BY accepted_at, request_key
+             FOR UPDATE SKIP LOCKED`,
+            [taskId],
+          )
+        ).rows;
+        if (responses.length === 0) {
+          await client.query("COMMIT");
+          continue;
+        }
         const keys = responses.map((response) => response.request_key);
         if (
           task.cancel_requested ||
@@ -2364,6 +2560,7 @@ export class TaskRepository {
              WHERE task_id=$1 AND request_key=ANY($2::text[]) AND state='PENDING'`,
             [taskId, keys],
           );
+          await client.query("COMMIT");
           continue;
         }
         const updated = await client.query<{ next_command_sequence: string }>(
@@ -2411,15 +2608,15 @@ export class TaskRepository {
           { reasonCode: "INPUT_RESPONSE_ACCEPTED", adapterRpcStatus: "not_started" },
         );
         promoted += 1;
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK").catch(() => undefined);
+        throw error;
+      } finally {
+        client.release();
       }
-      await client.query("COMMIT");
-      return promoted;
-    } catch (error) {
-      await client.query("ROLLBACK").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
     }
+    return promoted;
   }
 
   async listObservations(
@@ -3088,6 +3285,12 @@ export class TaskRepository {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      const lockedTask = await client.query<TaskRow>(
+        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
+        [command.taskId],
+      );
+      const task = lockedTask.rows[0];
+      if (task === undefined) throw new Error("TASK_NOT_FOUND");
       const claimed = await client.query<PendingCommandRecordRow>(
         `SELECT task_id, command_sequence, command_type, state, payload, attempt_count,
                 claim_owner, stop_reason, adapter_ack, next_attempt_at, last_error_code,
@@ -3099,13 +3302,6 @@ export class TaskRepository {
         [command.taskId, command.commandSequence, command.claimOwner],
       );
       if (claimed.rows[0] === undefined) throw new Error("COMMAND_CLAIM_LOST");
-
-      const lockedTask = await client.query<TaskRow>(
-        "SELECT * FROM provider_task WHERE task_id=$1 FOR UPDATE",
-        [command.taskId],
-      );
-      const task = lockedTask.rows[0];
-      if (task === undefined) throw new Error("TASK_NOT_FOUND");
 
       const exhaust = async (code: "TASK_TERMINAL" | "SUPERSEDED_BY_SAFE_STOP") => {
         const message =
@@ -3123,8 +3319,33 @@ export class TaskRepository {
         if (result.rowCount !== 1) throw new Error("COMMAND_CLAIM_LOST");
       };
 
+      const ignoreInputResponse = async () => {
+        const keys = Object.keys(
+          (command.payload.inputResponses as Record<string, unknown> | undefined) ?? {},
+        );
+        if (keys.length > 0) {
+          await client.query(
+            `UPDATE task_input_request SET status='SUPERSEDED'
+             WHERE task_id=$1 AND request_key=ANY($2::text[]) AND status='OPEN'`,
+            [command.taskId, keys],
+          );
+        }
+        await client.query(
+          `UPDATE task_input_response_inbox
+           SET state='IGNORED', updated_at=clock_timestamp(), last_error_code=$3,
+               last_error_message='Input response was superseded by task state.'
+           WHERE task_id=$1 AND command_sequence=$2 AND state='ASSIGNED'`,
+          [
+            command.taskId,
+            command.commandSequence,
+            isTerminalState(task.internal_state) ? "TASK_TERMINAL" : "SUPERSEDED_BY_SAFE_STOP",
+          ],
+        );
+      };
+
       if (isTerminalState(task.internal_state)) {
         await exhaust("TASK_TERMINAL");
+        await ignoreInputResponse();
         await insertCommandFact(
           client,
           command.taskId,
@@ -3150,6 +3371,7 @@ export class TaskRepository {
         task.internal_state === "STOPPING"
       ) {
         await exhaust("SUPERSEDED_BY_SAFE_STOP");
+        await ignoreInputResponse();
         await insertCommandFact(
           client,
           command.taskId,

@@ -329,7 +329,7 @@ export class DurableCommandDispatcher {
           );
           return "retriable";
         }
-        await this.repository.rejectClaimedCommand(
+        await this.repository.rejectInputResponseAndFailTask(
           command,
           typeof ack.reasonCode === "string" ? ack.reasonCode : "ADAPTER_REJECTED",
           ack.message || "Adapter rejected update command.",
