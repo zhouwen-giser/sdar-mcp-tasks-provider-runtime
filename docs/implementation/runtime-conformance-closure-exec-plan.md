@@ -1,9 +1,9 @@
 # Runtime Frozen Conformance Closure ExecPlan
 
 Status: complete on main; post-merge frozen interop alignment verified locally on
-`codex/frozen-interop-contract-alignment`, publication pending
+`fix/frozen-interop-contract-alignment`, publication pending
 
-Branch: `codex/frozen-interop-contract-alignment`
+Branch: `fix/frozen-interop-contract-alignment`
 
 Post-merge base: `origin/main` at `217e0892c1d827c32c2a5342709fd3e77cfdb259`
 
