@@ -24,14 +24,14 @@ capable of carrying reservation semantics. ADR-011 authorizes the smallest addit
 protocol change needed to restore the frozen external contract. Historical migrations, existing
 protobuf field numbers, Provider Ops, and the frozen normative text remain immutable.
 
-| Phase | Deliverable                                         | Gate                                              | Status      |
-| ----- | --------------------------------------------------- | ------------------------------------------------- | ----------- |
-| I0    | Rebase independent fix branch on merged PR #15/main | clean ancestry and reproduced mismatches          | complete    |
-| I1    | Separate creation and DetailedTask projections      | strict CreateTaskResult regressions               | complete    |
-| I2    | Add and map explicit Adapter reservation mode       | unit, generated protobuf, TS/Python Adapter tests | complete    |
-| I3    | Regenerate derived schemas and lock                 | frozen protocol checks and 74/74                  | complete    |
-| I4    | Full Provider verification and real SDAR interop    | `verify:v2` plus strict cross-repository run      | complete    |
-| I5    | Evidence, commit, push, and pull request            | immutable commit and green remote checks          | complete    |
+| Phase | Deliverable                                         | Gate                                              | Status   |
+| ----- | --------------------------------------------------- | ------------------------------------------------- | -------- |
+| I0    | Rebase independent fix branch on merged PR #15/main | clean ancestry and reproduced mismatches          | complete |
+| I1    | Separate creation and DetailedTask projections      | strict CreateTaskResult regressions               | complete |
+| I2    | Add and map explicit Adapter reservation mode       | unit, generated protobuf, TS/Python Adapter tests | complete |
+| I3    | Regenerate derived schemas and lock                 | frozen protocol checks and 74/74                  | complete |
+| I4    | Full Provider verification and real SDAR interop    | `verify:v2` plus strict cross-repository run      | complete |
+| I5    | Evidence, commit, push, and pull request            | immutable commit and green remote checks          | complete |
 
 The final local `pnpm verify:v2` completed in 340.8 seconds with frozen 74/74, Runtime closure
 29/29, unit 79/79, contract 9/9, integration 199/199, recovery 9/9, security 29/29, E2E 6/6,
