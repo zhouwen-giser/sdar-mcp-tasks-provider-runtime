@@ -71,15 +71,17 @@ function testEngine(
     pool: {},
     getAuthorized: vi.fn().mockResolvedValue({ operationSnapshotId: "snapshot-1" }),
     acceptMcpInputResponses: vi.fn(
-      async (
+      (
         _taskId: string,
         _authorization: AuthorizationContext,
         responses: Record<string, McpInputResponse>,
         validate: ValidateLockedInputResponse,
       ) => {
+        const response = responses.approval;
+        if (response === undefined) throw new Error("EXPECTED_APPROVAL_RESPONSE");
         if (status === "OPEN") {
           observer?.();
-          validate({ ...request, status }, responses.approval!);
+          validate({ ...request, status }, response);
         }
         return {
           acceptedKeys: status === "OPEN" ? ["approval"] : [],

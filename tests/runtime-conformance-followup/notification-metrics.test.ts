@@ -137,8 +137,12 @@ class Response extends EventEmitter {
   constructor(readonly closeAfter: number) {
     super();
   }
-  setHeader(): void {}
-  flushHeaders(): void {}
+  setHeader(): void {
+    return undefined;
+  }
+  flushHeaders(): void {
+    return undefined;
+  }
   write(frame: string): boolean {
     this.frames.push(frame);
     if (this.frames.length >= this.closeAfter) setImmediate(() => this.emit("close"));
@@ -188,9 +192,10 @@ function request(id: string) {
 async function waitForMetric(increment: ReturnType<typeof vi.fn>, outcome: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     if (
-      increment.mock.calls.some(
-        (call) => call[0] === "sdar_task_notification_events_total" && call[1]?.outcome === outcome,
-      )
+      increment.mock.calls.some((call) => {
+        const labels = call[1] as Record<string, unknown> | undefined;
+        return call[0] === "sdar_task_notification_events_total" && labels?.outcome === outcome;
+      })
     )
       return;
     await new Promise((resolve) => setTimeout(resolve, 5));
