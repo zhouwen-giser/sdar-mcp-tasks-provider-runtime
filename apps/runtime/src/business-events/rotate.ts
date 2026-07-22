@@ -1,5 +1,10 @@
 import { Pool } from "pg";
-import { BusinessEventRepository } from "../../../../packages/persistence-postgres/src/index.js";
+import { randomUUID } from "node:crypto";
+import { RUNTIME_VERSION } from "../../../../packages/domain/src/index.js";
+import {
+  BusinessEventProviderOpsRecorder,
+  BusinessEventRepository,
+} from "../../../../packages/persistence-postgres/src/index.js";
 import { BusinessEventRotationService } from "./rotation-service.js";
 
 const options = parseArguments(process.argv.slice(2));
@@ -8,7 +13,12 @@ if (databaseUrl === undefined) throw new Error("DATABASE_URL is required");
 const pool = new Pool({ connectionString: databaseUrl, max: 2 });
 try {
   const result = await new BusinessEventRotationService(
-    new BusinessEventRepository(pool),
+    new BusinessEventRepository(pool, {
+      providerOpsRecorder: new BusinessEventProviderOpsRecorder({
+        runtimeVersion: RUNTIME_VERSION,
+        instanceId: process.env.OTEL_SERVICE_INSTANCE_ID ?? randomUUID(),
+      }),
+    }),
     Number(process.env.BUSINESS_EVENTS_RETENTION_MS ?? "604800000"),
   ).rotate({
     providerId: options.providerId,

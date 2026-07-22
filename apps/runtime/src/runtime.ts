@@ -18,12 +18,15 @@ import {
 } from "../../../packages/mcp-protocol/src/index.js";
 import type { AuthenticationOptions } from "../../../packages/mcp-protocol/src/index.js";
 import {
+  BusinessEventMetricPolicy,
+  BusinessEventTelemetryBridge,
   createLogger,
   ProviderTelemetry,
   RuntimeMetrics,
 } from "../../../packages/observability/src/index.js";
 import type { RuntimeLogger } from "../../../packages/observability/src/index.js";
 import { OperationRegistry } from "../../../packages/operation-registry/src/index.js";
+import type { ValidatedManifest } from "../../../packages/operation-registry/src/index.js";
 import {
   ProviderTelemetryGrpcServer,
   ProviderTelemetryIngress,
@@ -34,6 +37,7 @@ import {
   OutboxRepository,
   ProviderOpsDeliveryRepository,
   BusinessEventRepository,
+  BusinessEventProviderOpsRecorder,
   TaskRepository,
   runMigrations,
 } from "../../../packages/persistence-postgres/src/index.js";
@@ -104,6 +108,8 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
   const telemetrySelfGauges: Record<string, number> = {};
   const telemetryInstanceId = config.OTEL_SERVICE_INSTANCE_ID ?? randomUUID();
   let telemetry: ProviderTelemetry | undefined;
+  let businessEventTelemetry: BusinessEventTelemetryBridge | undefined;
+  let businessEventSourceIds: string[] = [];
   let providerTelemetryServer: ProviderTelemetryGrpcServer | undefined;
   const pool = new Pool({ connectionString: config.DATABASE_URL, max: config.DATABASE_POOL_MAX });
   const resolveAuthorization = createAuthorizationResolver(authenticationOptions(config));
@@ -140,6 +146,12 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
               ...(rpcContext.tracestate === undefined ? {} : { tracestate: rpcContext.tracestate }),
             },
       ) ?? operation(new grpc.Metadata()),
+    traceStreamRpc: (method, rpcContext, open) =>
+      telemetry?.traceAdapterStreamRpc(
+        method,
+        rpcContext.sourceId === undefined ? {} : { sourceId: rpcContext.sourceId },
+        open,
+      ) ?? open(new grpc.Metadata()),
   });
   const dependencies: RuntimeDependencies = {
     database: "starting",
@@ -262,6 +274,34 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     for (const row of taskStates.rows) {
       gauges[`sdar_task_state{state="${row.internal_state}"}`] = Number(row.count);
     }
+    if (config.BUSINESS_EVENTS_ENABLED) {
+      const businessEventSnapshot = await pool.query<{
+        inbox_backlog: string;
+        oldest_pending_mapping_age_seconds: string;
+        active_relation_tokens: string;
+      }>(
+        `SELECT
+           (SELECT count(*) FROM adapter_business_event_inbox
+             WHERE status IN ('received','pending_mapping','ready'))::text AS inbox_backlog,
+           COALESCE((SELECT EXTRACT(EPOCH FROM clock_timestamp()-min(received_at))
+             FROM adapter_business_event_inbox WHERE status='pending_mapping'),0)::text
+             AS oldest_pending_mapping_age_seconds,
+           (SELECT count(*) FROM provider_business_event_relation_projection
+             WHERE expires_at>clock_timestamp())::text AS active_relation_tokens`,
+      );
+      const snapshot = businessEventSnapshot.rows[0];
+      const operationalGauges = {
+        sdar_business_event_inbox_backlog: Number(snapshot?.inbox_backlog ?? 0),
+        sdar_business_event_oldest_pending_mapping_age_seconds: Number(
+          snapshot?.oldest_pending_mapping_age_seconds ?? 0,
+        ),
+        sdar_business_event_active_relation_tokens: Number(snapshot?.active_relation_tokens ?? 0),
+      };
+      Object.assign(gauges, operationalGauges);
+      for (const [name, value] of Object.entries(operationalGauges)) {
+        telemetry?.metric(name, value, {}, "gauge");
+      }
+    }
     return reply.type("text/plain; version=0.0.4").send(metrics.render(gauges));
   });
   app.get("/internal/provider", async (_request, reply) => {
@@ -332,11 +372,51 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
     businessEventWorkersStopping = true;
     for (const timer of businessEventRetryTimers) clearTimeout(timer);
     businessEventRetryTimers.clear();
+    for (const sourceId of businessEventSourceIds) {
+      businessEventTelemetry?.gauge("sdar_business_event_publication_barrier_waiting", 0, {
+        sourceId,
+      });
+    }
     gateway.close();
     await providerTelemetryServer?.close();
     await telemetry?.shutdown();
     await pool.end();
   });
+
+  function initializeProviderTelemetry(validated: ValidatedManifest): void {
+    if (telemetry !== undefined) return;
+    try {
+      const security = loadOtlpExporterSecurity(config);
+      const candidate = new ProviderTelemetry({
+        enabled: config.OTEL_ENABLED,
+        otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
+        otlpTimeoutMillis: config.OTEL_EXPORTER_OTLP_TIMEOUT_MS,
+        ...security,
+        boundedDynamicMetricValues: {
+          sourceId: new Set(validated.businessEventSources.map((source) => source.sourceId)),
+        },
+        resource: {
+          serviceVersion: RUNTIME_VERSION,
+          instanceId: telemetryInstanceId,
+          deploymentEnvironment: config.RUNTIME_ENV,
+          providerId: validated.providerId,
+          providerVersion: validated.providerVersion,
+        },
+        onSelfMetric: (name, value, attributes, kind) => {
+          const labels = Object.fromEntries(
+            Object.entries(attributes).map(([key, label]) => [key, String(label)]),
+          );
+          const metricName = prometheusMetricKey(name, labels);
+          if (kind === "gauge") telemetrySelfGauges[metricName] = value;
+          else metrics.increment(name, labels, value);
+        },
+      });
+      candidate.start();
+      telemetry = candidate;
+    } catch (error) {
+      logger.warn({ err: error }, "Provider telemetry initialization failed");
+    }
+  }
 
   async function initialize(): Promise<ProviderManifest> {
     try {
@@ -384,14 +464,26 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
           dependencies.businessEventAdapterSources[source.sourceId] = "starting";
         }
       }
-      const businessEventRepository = new BusinessEventRepository(pool);
-      const businessEventMetrics = {
-        increment: (name: string, labels: Record<string, string> = {}, amount = 1) =>
-          metrics.increment(name, labels, amount),
-        gauge: (name: string, value: number, labels: Record<string, string> = {}) => {
-          telemetrySelfGauges[prometheusMetricKey(name, labels)] = value;
-        },
-      };
+      initializeProviderTelemetry(validated);
+      businessEventSourceIds = validated.businessEventSources.map((source) => source.sourceId);
+      const businessEventMetricPolicy = new BusinessEventMetricPolicy(businessEventSourceIds);
+      businessEventTelemetry = new BusinessEventTelemetryBridge(
+        metrics,
+        telemetry,
+        businessEventMetricPolicy,
+        telemetrySelfGauges,
+      );
+      const businessEventMetrics = businessEventTelemetry;
+      const businessEventRepository = new BusinessEventRepository(pool, {
+        ...(config.BUSINESS_EVENTS_ENABLED
+          ? {
+              providerOpsRecorder: new BusinessEventProviderOpsRecorder({
+                runtimeVersion: RUNTIME_VERSION,
+                instanceId: telemetryInstanceId,
+              }),
+            }
+          : {}),
+      });
       const businessEventManager = config.BUSINESS_EVENTS_ENABLED
         ? new BusinessEventNotificationManager(validated.providerId, businessEventRepository, {
             pollIntervalMs: config.BUSINESS_EVENTS_POLL_INTERVAL_MS,
@@ -457,7 +549,7 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
               }
             } catch {
               dependencies.businessEventAdapterSources[source.sourceId] = "degraded";
-              metrics.increment("sdar_business_event_source_blocked_total", {
+              businessEventMetrics.increment("sdar_business_event_source_blocked_total", {
                 sourceId: source.sourceId,
                 reason: "worker_failure",
               });
@@ -474,36 +566,6 @@ export function createRuntime(config: RuntimeConfig): RuntimeApplication {
             }
           };
           void run();
-        }
-      }
-      if (telemetry === undefined) {
-        try {
-          const security = loadOtlpExporterSecurity(config);
-          const candidate = new ProviderTelemetry({
-            enabled: config.OTEL_ENABLED,
-            otlpEndpoint: config.OTEL_EXPORTER_OTLP_ENDPOINT,
-            otlpTimeoutMillis: config.OTEL_EXPORTER_OTLP_TIMEOUT_MS,
-            ...security,
-            resource: {
-              serviceVersion: RUNTIME_VERSION,
-              instanceId: telemetryInstanceId,
-              deploymentEnvironment: config.RUNTIME_ENV,
-              providerId: validated.providerId,
-              providerVersion: manifest.providerVersion,
-            },
-            onSelfMetric: (name, value, attributes, kind) => {
-              const labels = Object.fromEntries(
-                Object.entries(attributes).map(([key, label]) => [key, String(label)]),
-              );
-              const metricName = prometheusMetricKey(name, labels);
-              if (kind === "gauge") telemetrySelfGauges[metricName] = value;
-              else metrics.increment(name, labels, value);
-            },
-          });
-          candidate.start();
-          telemetry = candidate;
-        } catch (error) {
-          logger.warn({ err: error }, "Provider telemetry initialization failed");
         }
       }
       dependencies.adapter = "ready";

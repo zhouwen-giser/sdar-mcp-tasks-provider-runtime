@@ -26,6 +26,12 @@ export interface AdapterBusinessEventSourceClientOptions {
   metrics?: {
     increment(name: string, labels?: Record<string, string>, amount?: number): void;
     gauge(name: string, value: number, labels?: Record<string, string>): void;
+    event?(name: string, body: Record<string, unknown>): void;
+    trace?<T>(
+      name: string,
+      attributes: Record<string, string | number | boolean>,
+      operation: () => Promise<T>,
+    ): Promise<T>;
   };
 }
 
@@ -49,6 +55,20 @@ export class AdapterBusinessEventSourceClient {
   }
 
   async runOnce(): Promise<"not_owner" | "completed" | "rotated" | "degraded"> {
+    return this.#trace(
+      "business_events.source.connect",
+      {
+        sourceId: this.options.sourceId,
+        deliverySemantics: this.options.deliverySemantics,
+      },
+      () => this.#runOnce(),
+    );
+  }
+
+  async #runOnce(): Promise<"not_owner" | "completed" | "rotated" | "degraded"> {
+    this.#gauge("sdar_business_event_publication_barrier_waiting", 0, {
+      sourceId: this.options.sourceId,
+    });
     const lease = await this.repository.acquireSourceLease(
       this.options.providerId,
       this.options.sourceId,
@@ -67,10 +87,19 @@ export class AdapterBusinessEventSourceClient {
     });
     try {
       await consumeStream(stream, async (event) => this.#handleEvent(lease, event));
+      this.#event("business_events.source.connection", {
+        sourceId: this.options.sourceId,
+        outcome: "closed",
+      });
       return "completed";
     } catch (error) {
       if (isServiceError(error)) {
         const reason = businessEventReasonFromError(error) ?? "SOURCE_TEMPORARILY_UNAVAILABLE";
+        this.#event("business_events.source.connection", {
+          sourceId: this.options.sourceId,
+          outcome: "failed",
+          reasonCode: reason,
+        });
         if (
           this.options.deliverySemantics === "durable_at_least_once" &&
           [
@@ -80,12 +109,17 @@ export class AdapterBusinessEventSourceClient {
             "SOURCE_DATA_LOSS",
           ].includes(reason)
         ) {
-          await this.repository.rotateStream(
-            this.options.providerId,
-            reason,
-            [this.options.sourceId],
-            `${this.options.sourceStreamId}:${reason}:${lease.lastPersistedSourceSequence}`,
-            this.#generationRetentionMs,
+          await this.#trace(
+            "business_events.stream.rotate",
+            { sourceId: this.options.sourceId, outcome: "success", reason },
+            () =>
+              this.repository.rotateStream(
+                this.options.providerId,
+                reason,
+                [this.options.sourceId],
+                `${this.options.sourceStreamId}:${reason}:${lease.lastPersistedSourceSequence}`,
+                this.#generationRetentionMs,
+              ),
           );
           this.#increment("sdar_business_event_stream_rotations_total", { reason });
           this.#increment("sdar_business_event_continuity_loss_total", { reason });
@@ -104,11 +138,16 @@ export class AdapterBusinessEventSourceClient {
 
   async #handleEvent(lease: BusinessEventLease, event: AdapterBusinessEvent): Promise<void> {
     const fact = normalizeAdapterEvent(event);
-    const intake = await this.repository.intakeSourceFact(
-      lease,
-      fact,
-      this.#inboxRetentionMs,
-      this.#mappingDeadlineMs,
+    const intake = await this.#trace(
+      "business_events.source.ingest",
+      { sourceId: this.options.sourceId, scope: fact.scope },
+      () =>
+        this.repository.intakeSourceFact(
+          lease,
+          fact,
+          this.#inboxRetentionMs,
+          this.#mappingDeadlineMs,
+        ),
     );
     this.#increment("sdar_business_event_source_received_total", {
       sourceId: this.options.sourceId,
@@ -121,6 +160,12 @@ export class AdapterBusinessEventSourceClient {
       return;
     }
     if (intake.disposition === "rejected") {
+      this.#event("business_events.source.rejected", {
+        sourceId: this.options.sourceId,
+        scope: fact.scope,
+        outcome: "rejected",
+        reasonCode: fact.reasonCode ?? "SOURCE_POISON_EVENT",
+      });
       this.#increment("sdar_business_event_source_rejected_total", {
         sourceId: this.options.sourceId,
         reason: "poison_event",
@@ -130,12 +175,17 @@ export class AdapterBusinessEventSourceClient {
       intake.disposition === "rejected" &&
       this.options.deliverySemantics === "durable_at_least_once"
     ) {
-      await this.repository.rotateStream(
-        this.options.providerId,
-        "SOURCE_POISON_EVENT",
-        [this.options.sourceId],
-        `${this.options.sourceStreamId}:poison:${fact.sourceSequence}`,
-        this.#generationRetentionMs,
+      await this.#trace(
+        "business_events.stream.rotate",
+        { sourceId: this.options.sourceId, outcome: "success", reason: "SOURCE_POISON_EVENT" },
+        () =>
+          this.repository.rotateStream(
+            this.options.providerId,
+            "SOURCE_POISON_EVENT",
+            [this.options.sourceId],
+            `${this.options.sourceStreamId}:poison:${fact.sourceSequence}`,
+            this.#generationRetentionMs,
+          ),
       );
       this.#increment("sdar_business_event_stream_rotations_total", {
         reason: "SOURCE_POISON_EVENT",
@@ -145,19 +195,28 @@ export class AdapterBusinessEventSourceClient {
       });
       return;
     }
-    const prepared = await this.repository.prepareNextSourceEvent(
-      this.options.providerId,
-      this.options.sourceId,
+    const prepared = await this.#trace(
+      "business_events.source.prepare",
+      { sourceId: this.options.sourceId },
+      () => this.repository.prepareNextSourceEvent(this.options.providerId, this.options.sourceId),
     );
     if (prepared === "ready") {
-      await this.repository.finalizeNextSourceEvent(
-        this.options.providerId,
-        this.options.sourceId,
-        this.#eventRetentionMs,
+      await this.#trace(
+        "business_events.source.finalize",
+        { sourceId: this.options.sourceId, outcome: "finalized" },
+        () =>
+          this.repository.finalizeNextSourceEvent(
+            this.options.providerId,
+            this.options.sourceId,
+            this.#eventRetentionMs,
+          ),
       );
       this.#increment("sdar_business_event_finalized_total", {
         sourceId: this.options.sourceId,
         outcome: "finalized",
+      });
+      this.#gauge("sdar_business_event_publication_barrier_waiting", 0, {
+        sourceId: this.options.sourceId,
       });
     } else if (
       prepared === "terminal" &&
@@ -166,12 +225,17 @@ export class AdapterBusinessEventSourceClient {
       this.#increment("sdar_business_event_source_mapping_failed_total", {
         sourceId: this.options.sourceId,
       });
-      await this.repository.rotateStream(
-        this.options.providerId,
-        "SOURCE_MAPPING_FAILED",
-        [this.options.sourceId],
-        `${this.options.sourceStreamId}:mapping:${fact.sourceSequence}`,
-        this.#generationRetentionMs,
+      await this.#trace(
+        "business_events.stream.rotate",
+        { sourceId: this.options.sourceId, outcome: "success", reason: "SOURCE_MAPPING_FAILED" },
+        () =>
+          this.repository.rotateStream(
+            this.options.providerId,
+            "SOURCE_MAPPING_FAILED",
+            [this.options.sourceId],
+            `${this.options.sourceStreamId}:mapping:${fact.sourceSequence}`,
+            this.#generationRetentionMs,
+          ),
       );
       this.#increment("sdar_business_event_stream_rotations_total", {
         reason: "SOURCE_MAPPING_FAILED",
@@ -179,7 +243,15 @@ export class AdapterBusinessEventSourceClient {
       this.#increment("sdar_business_event_continuity_loss_total", {
         reason: "SOURCE_MAPPING_FAILED",
       });
+      this.#gauge("sdar_business_event_publication_barrier_waiting", 0, {
+        sourceId: this.options.sourceId,
+      });
     } else if (prepared === "pending") {
+      this.#event("business_events.finalizer.wait", {
+        sourceId: this.options.sourceId,
+        outcome: "blocked",
+        reasonCode: "SOURCE_MAPPING_FAILED",
+      });
       this.#gauge("sdar_business_event_publication_barrier_waiting", 1, {
         sourceId: this.options.sourceId,
       });
@@ -199,6 +271,34 @@ export class AdapterBusinessEventSourceClient {
       this.options.metrics?.gauge(name, value, labels);
     } catch {
       // Telemetry is best effort and cannot alter source processing.
+    }
+  }
+
+  #event(name: string, body: Record<string, unknown>): void {
+    try {
+      this.options.metrics?.event?.(name, body);
+    } catch {
+      // Diagnostics cannot alter source processing.
+    }
+  }
+
+  async #trace<T>(
+    name: string,
+    attributes: Record<string, string | number | boolean>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const telemetry = this.options.metrics;
+    if (telemetry?.trace === undefined) return operation();
+    const invocation = { started: false };
+    const invoke = (): Promise<T> => {
+      invocation.started = true;
+      return operation();
+    };
+    try {
+      return await telemetry.trace(name, attributes, invoke);
+    } catch (error) {
+      if (invocation.started) throw error;
+      return operation();
     }
   }
 }

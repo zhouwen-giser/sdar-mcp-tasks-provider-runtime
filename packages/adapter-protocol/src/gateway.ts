@@ -64,6 +64,11 @@ export interface AdapterGatewayOptions {
     context: AdapterRpcContext,
     operation: (metadata: grpc.Metadata) => Promise<T>,
   ) => Promise<T>;
+  traceStreamRpc?: <T>(
+    method: string,
+    context: AdapterRpcContext,
+    open: (metadata: grpc.Metadata) => grpc.ClientReadableStream<T>,
+  ) => grpc.ClientReadableStream<T>;
 }
 
 export interface AdapterRpcContext {
@@ -73,6 +78,7 @@ export interface AdapterRpcContext {
   commandSequence?: number;
   traceparent?: string;
   tracestate?: string;
+  sourceId?: string;
 }
 
 export interface StartOperationOptions {
@@ -96,6 +102,7 @@ export class GrpcAdapterGateway {
   readonly #timeoutMs: number;
   readonly #onRpc: AdapterGatewayOptions["onRpc"];
   readonly #traceRpc: AdapterGatewayOptions["traceRpc"];
+  readonly #traceStreamRpc: AdapterGatewayOptions["traceStreamRpc"];
 
   constructor(options: AdapterGatewayOptions) {
     const Client = adapterClientConstructor();
@@ -107,6 +114,7 @@ export class GrpcAdapterGateway {
     this.#timeoutMs = options.timeoutMs ?? 5_000;
     this.#onRpc = options.onRpc;
     this.#traceRpc = options.traceRpc;
+    this.#traceStreamRpc = options.traceStreamRpc;
   }
 
   describeProvider(): Promise<ProviderManifest> {
@@ -118,18 +126,22 @@ export class GrpcAdapterGateway {
   streamBusinessEvents(
     request: StreamBusinessEventsRequest,
   ): grpc.ClientReadableStream<AdapterBusinessEvent> {
-    const metadata = new grpc.Metadata();
-    return this.#client.streamBusinessEvents(
-      {
-        metadata: this.#metadata(),
-        sourceId: request.sourceId,
-        sourceStreamId: request.sourceStreamId,
-        ...(request.afterSourceSequence === undefined
-          ? {}
-          : { afterSourceSequence: request.afterSourceSequence }),
-      },
-      metadata,
-      {},
+    const open = (metadata: grpc.Metadata) =>
+      this.#client.streamBusinessEvents(
+        {
+          metadata: this.#metadata(),
+          sourceId: request.sourceId,
+          sourceStreamId: request.sourceStreamId,
+          ...(request.afterSourceSequence === undefined
+            ? {}
+            : { afterSourceSequence: request.afterSourceSequence }),
+        },
+        metadata,
+        {},
+      );
+    return (
+      this.#traceStreamRpc?.("streamBusinessEvents", { sourceId: request.sourceId }, open) ??
+      open(new grpc.Metadata())
     );
   }
 

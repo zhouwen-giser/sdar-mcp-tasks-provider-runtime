@@ -1,5 +1,12 @@
 import { ROOT_CONTEXT, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
-import type { Attributes, Context, Link, TextMapGetter, TextMapSetter } from "@opentelemetry/api";
+import type {
+  Attributes,
+  Context,
+  Link,
+  Span,
+  TextMapGetter,
+  TextMapSetter,
+} from "@opentelemetry/api";
 import { ExportResultCode, W3CTraceContextPropagator } from "@opentelemetry/core";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import * as grpc from "@grpc/grpc-js";
@@ -31,6 +38,7 @@ import { createProviderResource } from "./provider-resource.js";
 import type { ProviderResourceInput } from "./provider-resource.js";
 import type { ProviderOpsEnvelope } from "./event-envelope.js";
 import { TelemetrySanitizer } from "./telemetry-sanitizer.js";
+import { sanitizeBusinessEventTraceAttributes } from "./business-event-sanitizer.js";
 
 const INSTRUMENTATION_NAME = "@sdar/provider-ops-telemetry";
 const INSTRUMENTATION_VERSION = RUNTIME_VERSION;
@@ -61,6 +69,7 @@ export interface ProviderTelemetryOptions {
     attributes: Attributes,
     kind: ProviderMetricKind,
   ) => void;
+  boundedDynamicMetricValues?: Record<string, ReadonlySet<string>>;
 }
 
 export type ProviderMetricKind = "counter" | "histogram" | "gauge";
@@ -122,6 +131,19 @@ const METRIC_LABEL_VALUES: Record<string, ReadonlySet<string>> = {
     "success",
     "error",
     "rejected",
+    "received",
+    "duplicate",
+    "finalized",
+    "published",
+    "filtered",
+    "sent",
+    "failed",
+    "closed",
+    "subscription_capacity",
+    "queue_message_overflow",
+    "queue_byte_overflow",
+    "complete",
+    "delivered",
     "timeout",
     "unavailable",
     "scan",
@@ -140,7 +162,28 @@ const METRIC_LABEL_VALUES: Record<string, ReadonlySet<string>> = {
     "SAFE_STOP_UNCONFIRMED",
     "other",
   ]),
-  reason: new Set(["queue_full", "timeout", "exporter_error", "serialization", "invalid", "other"]),
+  reason: new Set([
+    "queue_full",
+    "timeout",
+    "exporter_error",
+    "serialization",
+    "invalid",
+    "poison_event",
+    "worker_failure",
+    "SOURCE_CURSOR_EXPIRED",
+    "SOURCE_STREAM_RESET",
+    "SOURCE_CURSOR_AHEAD",
+    "SOURCE_DATA_LOSS",
+    "SOURCE_POISON_EVENT",
+    "SOURCE_MAPPING_FAILED",
+    "SOURCE_TEMPORARILY_UNAVAILABLE",
+    "authorization_filtered",
+    "authorization",
+    "no_visible_task",
+    "projection_stale",
+    "retention_authority_invalid",
+    "other",
+  ]),
   resultClass: new Set([
     "success",
     "business_failure",
@@ -188,9 +231,19 @@ export class ProviderTelemetry {
   readonly #sanitizer = new TelemetrySanitizer();
   readonly #propagator = new W3CTraceContextPropagator();
   readonly #contextManager = new AsyncLocalStorageContextManager().enable();
+  readonly #boundedDynamicMetricValues: Readonly<Record<string, ReadonlySet<string>>>;
 
   constructor(options: ProviderTelemetryOptions) {
     this.#options = options;
+    const dynamic = options.boundedDynamicMetricValues ?? {};
+    for (const [label, values] of Object.entries(dynamic)) {
+      if (label !== "sourceId" || values.size > 16) {
+        throw new Error("TELEMETRY_DYNAMIC_METRIC_VALUES_INVALID");
+      }
+    }
+    this.#boundedDynamicMetricValues = Object.fromEntries(
+      Object.entries(dynamic).map(([label, values]) => [label, new Set(values)]),
+    );
   }
 
   start(): void {
@@ -392,6 +445,73 @@ export class ProviderTelemetry {
         return operation(metadata);
       },
     );
+  }
+
+  traceAdapterStreamRpc<T>(
+    method: string,
+    attributes: Attributes,
+    open: (metadata: grpc.Metadata) => grpc.ClientReadableStream<T>,
+  ): grpc.ClientReadableStream<T> {
+    const fallback = (): grpc.ClientReadableStream<T> => open(new grpc.Metadata());
+    if (!this.#started || this.#tracerProvider === undefined) return fallback();
+    let span: Span | undefined;
+    let opened = false;
+    try {
+      span = this.#tracerProvider
+        .getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION)
+        .startSpan("adapter.rpc.stream_business_events", {
+          kind: SpanKind.CLIENT,
+          attributes: this.#sanitizer.sanitizeAttributes({
+            "rpc.system": "grpc",
+            "rpc.method": method,
+            "server.address": this.#options.resource.providerId,
+            ...sanitizeBusinessEventTraceAttributes(attributes),
+          }),
+        });
+      const activeSpan = span;
+      const context = trace.setSpan(this.#contextManager.active(), span);
+      const metadata = new grpc.Metadata();
+      try {
+        this.#propagator.inject(context, metadata, grpcMetadataSetter);
+      } catch {
+        // Propagation failure cannot block the stream.
+      }
+      const startedAt = performance.now();
+      opened = true;
+      const stream = this.#contextManager.with(context, () => open(metadata));
+      let ended = false;
+      const finish = (statusCode: number, outcome: "success" | "error" | "cancelled"): void => {
+        if (ended) return;
+        ended = true;
+        try {
+          activeSpan.setAttribute("rpc.grpc.status_code", statusCode);
+          activeSpan.setAttribute("rpc.stream.duration_ms", performance.now() - startedAt);
+          activeSpan.setAttribute("outcome", outcome);
+          activeSpan.setStatus({
+            code: outcome === "success" ? SpanStatusCode.OK : SpanStatusCode.ERROR,
+          });
+          activeSpan.end();
+        } catch {
+          // Span completion cannot affect stream semantics.
+        }
+      };
+      stream.once("end", () => finish(grpc.status.OK, "success"));
+      stream.once("error", (error: grpc.ServiceError) =>
+        finish(
+          typeof error.code === "number" ? error.code : grpc.status.UNKNOWN,
+          error.code === grpc.status.CANCELLED ? "cancelled" : "error",
+        ),
+      );
+      return stream;
+    } catch (error) {
+      try {
+        span?.end();
+      } catch {
+        // Ignore failed span cleanup.
+      }
+      if (opened) throw error;
+      return fallback();
+    }
   }
 
   currentTraceContext(): {
@@ -619,19 +739,27 @@ export class ProviderTelemetry {
         else if (kind === "histogram") instrument = meter.createHistogram(name);
         else {
           const gauge = meter.createObservableGauge(name);
-          let currentValue = 0;
-          let currentAttributes: Attributes = {};
-          gauge.addCallback((observation) => observation.observe(currentValue, currentAttributes));
+          const series = new Map<string, { value: number; attributes: Attributes }>();
+          gauge.addCallback((observation) => {
+            for (const current of series.values()) {
+              observation.observe(current.value, current.attributes);
+            }
+          });
           instrument = {
             set: (nextValue, nextAttributes = {}) => {
-              currentValue = nextValue;
-              currentAttributes = nextAttributes;
+              series.set(attributeSeriesKey(nextAttributes), {
+                value: nextValue,
+                attributes: nextAttributes,
+              });
             },
           };
         }
         this.#metricInstruments.set(key, instrument);
       }
-      const boundedAttributes = boundedMetricAttributes(attributes);
+      const boundedAttributes = boundedMetricAttributes(
+        attributes,
+        this.#boundedDynamicMetricValues,
+      );
       if (name.startsWith("telemetry_")) {
         try {
           this.#options.onSelfMetric?.(name, value, boundedAttributes, kind);
@@ -771,14 +899,28 @@ function batchOptions(options: ProviderTelemetryBatchOptions | undefined) {
   };
 }
 
-function boundedMetricAttributes(attributes: Attributes): Attributes {
+function boundedMetricAttributes(
+  attributes: Attributes,
+  dynamicValues: Readonly<Record<string, ReadonlySet<string>>> = {},
+): Attributes {
   return Object.fromEntries(
     Object.entries(attributes)
-      .filter(([key, value]) => BOUNDED_METRIC_LABELS.has(key) && value !== undefined)
+      .filter(
+        ([key, value]) =>
+          (BOUNDED_METRIC_LABELS.has(key) || dynamicValues[key] !== undefined) &&
+          value !== undefined,
+      )
       .map(([key, value]) => {
         const text = typeof value === "string" ? value : "other";
-        return [key, METRIC_LABEL_VALUES[key]?.has(text) === true ? text : "other"];
+        const allowed = dynamicValues[key] ?? METRIC_LABEL_VALUES[key];
+        return [key, allowed?.has(text) === true ? text : "other"];
       }),
+  );
+}
+
+function attributeSeriesKey(attributes: Attributes): string {
+  return JSON.stringify(
+    Object.entries(attributes).sort(([left], [right]) => left.localeCompare(right)),
   );
 }
 
