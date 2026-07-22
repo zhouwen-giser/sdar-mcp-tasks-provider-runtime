@@ -7,3 +7,10 @@
 - `runtime-compose`: `completed/success`, 2026-07-22T03:25:15Z through 2026-07-22T03:26:12Z.
 - Machine-readable evidence: `reports/runtime-conformance-followup/ci-run.json`.
 - Delivery constraints remain satisfied: Draft only, no auto-merge, no tag.
+
+## Authorized Climate protected-path exception (2026-07-22)
+
+- The user explicitly authorized updating `reports/home-assistant-climate/provider-conformance.json` to resolve the inherited stale-report contradiction.
+- The existing generator wrote the report without changing Provider implementation, Provider tests, or the generator.
+- `pnpm protocol:ha-climate:check` now passes with 8/8 cases.
+- Machine-readable authorization and verification evidence: `reports/runtime-conformance-followup/climate-protected-path-exception.json`.
