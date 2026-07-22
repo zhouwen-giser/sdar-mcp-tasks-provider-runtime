@@ -6,6 +6,7 @@ import {
   normalizeRfc3339Nano,
   parseBusinessEventSequence,
 } from "../../adapter-protocol/src/index.js";
+import type { BusinessEventProviderOpsRecorderLike } from "./business-event-provider-ops.js";
 
 export type BusinessEventDeliverySemantics = "durable_at_least_once" | "best_effort_live";
 export type BusinessEventContinuityClass = "all_durable" | "mixed" | "best_effort_only";
@@ -119,8 +120,19 @@ export interface AuthorizedBusinessEventProjection {
   projectionRelationHash: string;
 }
 
+export interface BusinessEventRepositoryOptions {
+  providerOpsRecorder?: BusinessEventProviderOpsRecorderLike;
+}
+
 export class BusinessEventRepository {
-  constructor(readonly pool: Pool) {}
+  readonly providerOpsRecorder: BusinessEventProviderOpsRecorderLike | undefined;
+
+  constructor(
+    readonly pool: Pool,
+    options: BusinessEventRepositoryOptions = {},
+  ) {
+    this.providerOpsRecorder = options.providerOpsRecorder;
+  }
 
   async initializeProvider(
     providerId: string,
@@ -174,6 +186,23 @@ export class BusinessEventRepository {
           [providerId, source.sourceId, source.sourceStreamId, source.deliverySemantics],
         );
       }
+      await this.providerOpsRecorder?.capture({
+        client,
+        providerId,
+        recordType: "provider.business_event.stream.lifecycle",
+        aggregateId: providerId,
+        stableAggregateIdentity: streamId,
+        eventIdentity: "generation_created",
+        revision: "1",
+        occurredAt: new Date(),
+        payload: {
+          event: "generation_created",
+          currentStreamId: streamId,
+          generationStatus: "current",
+          continuityClass,
+          generationVersion: "1",
+        },
+      });
       await client.query("COMMIT");
       return {
         providerId,
@@ -243,20 +272,78 @@ export class BusinessEventRepository {
     owner: string,
     leaseMs: number,
   ): Promise<BusinessEventLease | undefined> {
-    const result = await this.pool.query<SourceStateRow>(
-      `UPDATE adapter_business_event_source_state
-       SET lease_owner=$4,
-           lease_until=clock_timestamp() + ($5 * interval '1 millisecond'),
-           fencing_token=fencing_token + 1,
-           updated_at=clock_timestamp()
-       WHERE provider_id=$1 AND source_id=$2 AND source_stream_id=$3
-         AND status NOT LIKE 'blocked_%'
-         AND status <> 'continuity_loss_pending'
-         AND (lease_until IS NULL OR lease_until <= clock_timestamp() OR lease_owner=$4)
-       RETURNING *`,
-      [providerId, sourceId, sourceStreamId, owner, leaseMs],
-    );
-    return result.rows[0] === undefined ? undefined : mapLease(result.rows[0]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const before = await client.query<{
+        lease_owner: string | null;
+        lease_until: Date | null;
+        fencing_token: string;
+        status: string;
+      }>(
+        `SELECT lease_owner,lease_until,fencing_token,status
+         FROM adapter_business_event_source_state
+         WHERE provider_id=$1 AND source_id=$2 AND source_stream_id=$3 FOR UPDATE`,
+        [providerId, sourceId, sourceStreamId],
+      );
+      const previous = before.rows[0];
+      if (
+        previous === undefined ||
+        previous.status.startsWith("blocked_") ||
+        previous.status === "continuity_loss_pending" ||
+        (previous.lease_until !== null &&
+          previous.lease_until > new Date() &&
+          previous.lease_owner !== owner)
+      ) {
+        await client.query("COMMIT");
+        return undefined;
+      }
+      const result = await client.query<SourceStateRow>(
+        `UPDATE adapter_business_event_source_state
+         SET lease_owner=$4,
+             lease_until=clock_timestamp() + ($5 * interval '1 millisecond'),
+             fencing_token=fencing_token + 1,
+             updated_at=clock_timestamp()
+         WHERE provider_id=$1 AND source_id=$2 AND source_stream_id=$3
+         RETURNING *`,
+        [providerId, sourceId, sourceStreamId, owner, leaseMs],
+      );
+      const row = result.rows[0];
+      if (row === undefined) throw new Error("BUSINESS_EVENT_SOURCE_NOT_FOUND");
+      const event =
+        previous.lease_owner === owner
+          ? "lease_renewed"
+          : previous.lease_owner === null
+            ? "lease_acquired"
+            : "lease_takeover";
+      if (event !== "lease_renewed") {
+        await this.providerOpsRecorder?.capture({
+          client,
+          providerId,
+          recordType: "provider.business_event.source.lifecycle",
+          aggregateId: providerId,
+          stableAggregateIdentity: `${sourceId}:${sourceStreamId}`,
+          eventIdentity: event,
+          revision: row.fencing_token,
+          occurredAt: new Date(),
+          payload: {
+            event,
+            sourceId,
+            sourceStreamId,
+            previousStatus: previous.status,
+            currentStatus: previous.status,
+            fencingToken: row.fencing_token,
+          },
+        });
+      }
+      await client.query("COMMIT");
+      return mapLease(row);
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async renewSourceLease(lease: BusinessEventLease, leaseMs: number): Promise<BusinessEventLease> {
@@ -314,6 +401,14 @@ export class BusinessEventRepository {
       const state = await lockAndValidateLease(client, lease);
       if (fact.sourceStreamId !== lease.sourceStreamId) {
         await blockSource(client, lease, "blocked_identity_conflict", "SOURCE_STREAM_RESET");
+        await this.#captureIngestAudit(
+          client,
+          lease,
+          fact,
+          rawEnvelopeHash,
+          "rejected",
+          "SOURCE_STREAM_RESET",
+        );
         await client.query("COMMIT");
         throw new Error("SOURCE_STREAM_RESET");
       }
@@ -347,11 +442,27 @@ export class BusinessEventRepository {
           return { disposition: "duplicate", sourceCanonicalHash };
         }
         await blockSource(client, lease, "blocked_identity_conflict", "SOURCE_IDENTITY_CONFLICT");
+        await this.#captureIngestAudit(
+          client,
+          lease,
+          fact,
+          rawEnvelopeHash,
+          "rejected",
+          "SOURCE_IDENTITY_CONFLICT",
+        );
         await client.query("COMMIT");
         throw new Error("BUSINESS_EVENT_IDEMPOTENCY_CONFLICT");
       }
       if (sequence <= BigInt(state.last_persisted_source_sequence)) {
         await blockSource(client, lease, "blocked_identity_conflict", "SOURCE_SEQUENCE_REGRESSION");
+        await this.#captureIngestAudit(
+          client,
+          lease,
+          fact,
+          rawEnvelopeHash,
+          "rejected",
+          "SOURCE_SEQUENCE_REGRESSION",
+        );
         await client.query("COMMIT");
         throw new Error("BUSINESS_EVENT_SOURCE_SEQUENCE_REGRESSION");
       }
@@ -406,6 +517,14 @@ export class BusinessEventRepository {
           rejected,
         ],
       );
+      await this.#captureIngestAudit(
+        client,
+        lease,
+        fact,
+        rawEnvelopeHash,
+        rejected ? "rejected" : "received",
+        validationError,
+      );
       await client.query("COMMIT");
       return rejected
         ? { disposition: "rejected", sourceCanonicalHash }
@@ -436,6 +555,25 @@ export class BusinessEventRepository {
         [lease.providerId, lease.sourceId, lease.sourceStreamId, transportPayloadHash, retainMs],
       );
       await blockSource(client, lease, "blocked_contract_violation", "UNDECODABLE_SOURCE_SEQUENCE");
+      await this.providerOpsRecorder?.capture({
+        client,
+        providerId: lease.providerId,
+        recordType: "provider.business_event.ingest.lifecycle",
+        aggregateId: lease.providerId,
+        stableAggregateIdentity: `${lease.sourceId}:${lease.sourceStreamId}:${transportPayloadHash}`,
+        eventIdentity: "rejected",
+        revision: transportPayloadHash,
+        occurredAt: new Date(),
+        payload: {
+          event: "rejected",
+          sourceId: lease.sourceId,
+          sourceStreamId: lease.sourceStreamId,
+          inboxState: "rejected",
+          decodeStatus: "undecodable",
+          transportPayloadHash,
+          reasonCode: "SOURCE_PAYLOAD_UNDECODABLE",
+        },
+      });
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
@@ -518,6 +656,30 @@ export class BusinessEventRepository {
              WHERE provider_id=$1 AND source_id=$2`,
             [providerId, sourceId, durable ? "continuity_loss_pending" : "degraded"],
           );
+          await this.providerOpsRecorder?.capture({
+            client,
+            providerId,
+            recordType: "provider.business_event.ingest.lifecycle",
+            aggregateId: providerId,
+            stableAggregateIdentity: `${sourceId}:${state.source_stream_id}:${row.normalized_source_event_id ?? row.inbox_id}`,
+            eventIdentity: "mapping_failed",
+            revision: row.attempt_count + 1,
+            occurredAt: new Date(),
+            payload: {
+              event: "mapping_failed",
+              sourceId,
+              sourceStreamId: state.source_stream_id,
+              ...(row.normalized_source_event_id === null
+                ? {}
+                : { sourceEventId: row.normalized_source_event_id }),
+              ...(row.normalized_source_sequence === null
+                ? {}
+                : { sourceSequence: row.normalized_source_sequence }),
+              inboxState: durable ? "continuity_loss_pending" : "terminal_skipped",
+              reasonCode: "SOURCE_MAPPING_FAILED",
+              attemptCount: row.attempt_count + 1,
+            },
+          });
           await client.query("COMMIT");
           return "terminal";
         }
@@ -693,6 +855,26 @@ export class BusinessEventRepository {
           [providerId, eventId, candidateIds],
         );
       }
+      await this.providerOpsRecorder?.capture({
+        client,
+        providerId,
+        recordType: "provider.business_event.publication.lifecycle",
+        aggregateId: providerId,
+        stableAggregateIdentity: eventId,
+        eventIdentity: "published",
+        revision: runtimeSequence,
+        occurredAt: requiredString(payload.occurredAt),
+        payload: {
+          event: "published",
+          streamId,
+          eventId,
+          runtimeSequence,
+          sourceId,
+          sourceSequence,
+          scope: row.normalized_scope ?? "task",
+          outcome: "published",
+        },
+      });
       await client.query("COMMIT");
       const event = inserted.rows[0];
       if (event === undefined) throw new Error("BUSINESS_EVENT_NOT_RETURNED");
@@ -901,6 +1083,48 @@ export class BusinessEventRepository {
          WHERE provider_id=$1 AND source_id=ANY($2::text[])`,
         [providerId, normalizedAffectedSourceIds],
       );
+      const generationVersion = (BigInt(current.generation_version) + 1n).toString();
+      const rotationIdentity = `${previous.stream_id}:${newStreamId}`;
+      await this.providerOpsRecorder?.capture({
+        client,
+        providerId,
+        recordType: "provider.business_event.continuity",
+        aggregateId: providerId,
+        stableAggregateIdentity: rotationIdentity,
+        eventIdentity: "continuity_loss",
+        revision: continuityReasonIdentity,
+        occurredAt: continuity.rows[0]?.gap_detected_at ?? new Date(),
+        payload: {
+          event: "continuity_loss",
+          previousStreamId: previous.stream_id,
+          newStreamId,
+          affectedSourceCount: normalizedAffectedSourceIds.length,
+          reasonCode,
+          lastReplayableSequence: lastReplayable,
+          ...(lastContinuous === null ? {} : { lastContinuousSequence: lastContinuous }),
+        },
+      });
+      await this.providerOpsRecorder?.capture({
+        client,
+        providerId,
+        recordType: "provider.business_event.stream.lifecycle",
+        aggregateId: providerId,
+        stableAggregateIdentity: rotationIdentity,
+        eventIdentity: reasonCode,
+        revision: generationVersion,
+        occurredAt: continuity.rows[0]?.gap_detected_at ?? new Date(),
+        payload: {
+          event: "rotation",
+          previousStreamId: previous.stream_id,
+          currentStreamId: newStreamId,
+          generationStatus: "current",
+          continuityClass: classifyContinuity(roster),
+          lastReplayableSequence: lastReplayable,
+          ...(lastContinuous === null ? {} : { lastContinuousSequence: lastContinuous }),
+          reasonCode,
+          generationVersion,
+        },
+      });
       await client.query("COMMIT");
       const continuityRow = continuity.rows[0];
       if (continuityRow === undefined) throw new Error("BUSINESS_EVENT_CONTINUITY_NOT_RETURNED");
@@ -1075,6 +1299,37 @@ export class BusinessEventRepository {
       sourceStreamId: row.source_stream_id,
       deliverySemantics: row.delivery_semantics,
     }));
+  }
+
+  async #captureIngestAudit(
+    client: PoolClient,
+    lease: BusinessEventLease,
+    fact: BusinessEventSourceFact,
+    rawEnvelopeHash: string,
+    event: "received" | "rejected",
+    reasonCode?: string,
+  ): Promise<void> {
+    await this.providerOpsRecorder?.capture({
+      client,
+      providerId: lease.providerId,
+      recordType: "provider.business_event.ingest.lifecycle",
+      aggregateId: lease.providerId,
+      stableAggregateIdentity: `${lease.sourceId}:${lease.sourceStreamId}:${fact.sourceEventId}`,
+      eventIdentity: event,
+      revision: fact.sourceSequence,
+      occurredAt: fact.occurredAt,
+      payload: {
+        event,
+        sourceId: lease.sourceId,
+        sourceStreamId: lease.sourceStreamId,
+        sourceEventId: fact.sourceEventId,
+        sourceSequence: fact.sourceSequence,
+        inboxState: event,
+        decodeStatus: "decoded",
+        rawEnvelopeHash,
+        ...(reasonCode === undefined ? {} : { reasonCode }),
+      },
+    });
   }
 
   async createRelationProjection(
@@ -1282,6 +1537,9 @@ interface InboxRow {
   source_canonical_hash: string | null;
   source_payload: Record<string, unknown> | null;
   mapping_deadline: Date | null;
+  normalized_source_event_id: string | null;
+  normalized_source_sequence: string | null;
+  attempt_count: number;
 }
 
 interface StoredEventRow {
