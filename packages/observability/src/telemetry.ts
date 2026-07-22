@@ -61,6 +61,7 @@ export interface ProviderTelemetryOptions {
     attributes: Attributes,
     kind: ProviderMetricKind,
   ) => void;
+  boundedDynamicMetricValues?: Record<string, ReadonlySet<string>>;
 }
 
 export type ProviderMetricKind = "counter" | "histogram" | "gauge";
@@ -188,9 +189,19 @@ export class ProviderTelemetry {
   readonly #sanitizer = new TelemetrySanitizer();
   readonly #propagator = new W3CTraceContextPropagator();
   readonly #contextManager = new AsyncLocalStorageContextManager().enable();
+  readonly #boundedDynamicMetricValues: Readonly<Record<string, ReadonlySet<string>>>;
 
   constructor(options: ProviderTelemetryOptions) {
     this.#options = options;
+    const dynamic = options.boundedDynamicMetricValues ?? {};
+    for (const [label, values] of Object.entries(dynamic)) {
+      if (label !== "sourceId" || values.size > 16) {
+        throw new Error("TELEMETRY_DYNAMIC_METRIC_VALUES_INVALID");
+      }
+    }
+    this.#boundedDynamicMetricValues = Object.fromEntries(
+      Object.entries(dynamic).map(([label, values]) => [label, new Set(values)]),
+    );
   }
 
   start(): void {
@@ -619,19 +630,27 @@ export class ProviderTelemetry {
         else if (kind === "histogram") instrument = meter.createHistogram(name);
         else {
           const gauge = meter.createObservableGauge(name);
-          let currentValue = 0;
-          let currentAttributes: Attributes = {};
-          gauge.addCallback((observation) => observation.observe(currentValue, currentAttributes));
+          const series = new Map<string, { value: number; attributes: Attributes }>();
+          gauge.addCallback((observation) => {
+            for (const current of series.values()) {
+              observation.observe(current.value, current.attributes);
+            }
+          });
           instrument = {
             set: (nextValue, nextAttributes = {}) => {
-              currentValue = nextValue;
-              currentAttributes = nextAttributes;
+              series.set(attributeSeriesKey(nextAttributes), {
+                value: nextValue,
+                attributes: nextAttributes,
+              });
             },
           };
         }
         this.#metricInstruments.set(key, instrument);
       }
-      const boundedAttributes = boundedMetricAttributes(attributes);
+      const boundedAttributes = boundedMetricAttributes(
+        attributes,
+        this.#boundedDynamicMetricValues,
+      );
       if (name.startsWith("telemetry_")) {
         try {
           this.#options.onSelfMetric?.(name, value, boundedAttributes, kind);
@@ -771,14 +790,28 @@ function batchOptions(options: ProviderTelemetryBatchOptions | undefined) {
   };
 }
 
-function boundedMetricAttributes(attributes: Attributes): Attributes {
+function boundedMetricAttributes(
+  attributes: Attributes,
+  dynamicValues: Readonly<Record<string, ReadonlySet<string>>> = {},
+): Attributes {
   return Object.fromEntries(
     Object.entries(attributes)
-      .filter(([key, value]) => BOUNDED_METRIC_LABELS.has(key) && value !== undefined)
+      .filter(
+        ([key, value]) =>
+          (BOUNDED_METRIC_LABELS.has(key) || dynamicValues[key] !== undefined) &&
+          value !== undefined,
+      )
       .map(([key, value]) => {
         const text = typeof value === "string" ? value : "other";
-        return [key, METRIC_LABEL_VALUES[key]?.has(text) === true ? text : "other"];
+        const allowed = dynamicValues[key] ?? METRIC_LABEL_VALUES[key];
+        return [key, allowed?.has(text) === true ? text : "other"];
       }),
+  );
+}
+
+function attributeSeriesKey(attributes: Attributes): string {
+  return JSON.stringify(
+    Object.entries(attributes).sort(([left], [right]) => left.localeCompare(right)),
   );
 }
 

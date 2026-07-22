@@ -33,8 +33,8 @@ describe("BusinessEventMetricPolicy", () => {
   });
 
   it("rejects a source roster above the frozen maximum", () => {
-    expect(() => new BusinessEventMetricPolicy(Array.from({ length: 17 }, (_, i) => `s-${i}`))).toThrow(
-      "BUSINESS_EVENT_SOURCE_COUNT_INVALID",
-    );
+    expect(
+      () => new BusinessEventMetricPolicy(Array.from({ length: 17 }, (_, i) => `s-${i}`)),
+    ).toThrow("BUSINESS_EVENT_SOURCE_COUNT_INVALID");
   });
 });

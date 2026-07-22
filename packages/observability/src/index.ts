@@ -1,4 +1,5 @@
 export * from "./event-envelope.js";
+export * from "./business-event-metrics.js";
 export * from "./hash.js";
 export * from "./logger.js";
 export * from "./metrics.js";

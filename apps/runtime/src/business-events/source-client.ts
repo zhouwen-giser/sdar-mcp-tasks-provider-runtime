@@ -49,6 +49,9 @@ export class AdapterBusinessEventSourceClient {
   }
 
   async runOnce(): Promise<"not_owner" | "completed" | "rotated" | "degraded"> {
+    this.#gauge("sdar_business_event_publication_barrier_waiting", 0, {
+      sourceId: this.options.sourceId,
+    });
     const lease = await this.repository.acquireSourceLease(
       this.options.providerId,
       this.options.sourceId,
@@ -159,6 +162,9 @@ export class AdapterBusinessEventSourceClient {
         sourceId: this.options.sourceId,
         outcome: "finalized",
       });
+      this.#gauge("sdar_business_event_publication_barrier_waiting", 0, {
+        sourceId: this.options.sourceId,
+      });
     } else if (
       prepared === "terminal" &&
       this.options.deliverySemantics === "durable_at_least_once"
@@ -178,6 +184,9 @@ export class AdapterBusinessEventSourceClient {
       });
       this.#increment("sdar_business_event_continuity_loss_total", {
         reason: "SOURCE_MAPPING_FAILED",
+      });
+      this.#gauge("sdar_business_event_publication_barrier_waiting", 0, {
+        sourceId: this.options.sourceId,
       });
     } else if (prepared === "pending") {
       this.#gauge("sdar_business_event_publication_barrier_waiting", 1, {

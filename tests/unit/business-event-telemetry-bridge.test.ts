@@ -29,8 +29,16 @@ describe("BusinessEventTelemetryBridge", () => {
 
   it("is fail-open for both sinks", () => {
     const bridge = new BusinessEventTelemetryBridge(
-      { increment: () => { throw new Error("prometheus unavailable"); } },
-      { metric: () => { throw new Error("otlp unavailable"); } },
+      {
+        increment: () => {
+          throw new Error("prometheus unavailable");
+        },
+      },
+      {
+        metric: () => {
+          throw new Error("otlp unavailable");
+        },
+      },
       new BusinessEventMetricPolicy(["source-a"]),
     );
     expect(() =>
